@@ -4,19 +4,30 @@ Responsiver est conçu pour fonctionner localement.
 
 ## Ce que l’application ne fait pas
 
-- Elle ne transmet pas le contenu des projets importés.
+- Elle ne téléverse pas volontairement le contenu des projets importés.
 - Elle ne crée pas de compte utilisateur.
 - Elle n’active ni télémétrie, ni analytics, ni rapport de crash externe.
-- Elle n’utilise aucune API distante dans le MVP.
-- Elle ne charge ni police, ni icône, ni image depuis un CDN.
+- Elle n’appelle aucune API produit distante.
+- Elle ne lance pas de gestionnaire de paquets, de build ou de serveur de développement pour le projet importé.
 
 ## Ce qui reste sur l’ordinateur
 
-Les chemins de projets, fichiers analysés, résultats d’audit, aperçus et rapports d’export sont traités localement. Les rapports JSON sont enregistrés uniquement à l’emplacement choisi par la personne utilisatrice.
+Les chemins choisis, fichiers analysés, aperçus, décisions de staging et rapports sont traités localement. Un rapport JSON n’est écrit qu’à l’emplacement explicitement sélectionné. Le dossier source n’est jamais écrit automatiquement par Responsiver.
 
-## Aperçu statique
+## Aperçu local interactif
 
-Pour réduire les risques liés au code importé, l’aperçu du MVP supprime les scripts et les iframes, puis bloque les ressources réseau et les soumissions de formulaires. Il ne doit pas être confondu avec l’exécution complète d’une application dynamique.
+Un dossier importé est servi temporairement sur `127.0.0.1` afin que ses pages, scripts, formulaires et assets **locaux** restent utilisables. Le serveur est fermé au changement de projet et à la fermeture de l’application. Il ne rend accessible que des types de ressources web autorisés à l’intérieur du dossier choisi.
+
+Les destinations externes initiées par la preview sont bloquées. Les permissions Chromium, notamment caméra, micro, géolocalisation et notifications, sont refusées. Les formulaires et navigations de même origine loopback peuvent fonctionner ; ils ne constituent pas une transmission vers Internet.
+
+## Exception Google Fonts
+
+Lorsque le projet importé référence Google Fonts, Responsiver autorise uniquement :
+
+- les feuilles de style HTTPS de `fonts.googleapis.com` ;
+- les fichiers de police HTTPS de `fonts.gstatic.com`.
+
+Google reçoit alors l’adresse IP de la machine et les métadonnées HTTP normales de ces requêtes, notamment l’URL de police demandée. Cette exception est présente pour préserver le rendu de projets existants ; elle ne constitue ni une API de Responsiver ni un téléversement intentionnel du dossier. Les autres CDN, appels `fetch`, WebSockets et liens externes sont bloqués.
 
 ## Mises à jour
 
