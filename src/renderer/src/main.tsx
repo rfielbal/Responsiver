@@ -7,6 +7,7 @@ import './styles.css'
 if (!window.responsiver) {
   window.responsiver = {
     chooseProject: async () => null,
+    openProjectPath: async () => { throw new Error('L’ouverture par chemin est disponible uniquement dans Electron.') },
     openDemoProject: async () => browserDemoProject,
     exportReport: async () => 'Rapport de démonstration disponible uniquement dans Electron.'
   }
