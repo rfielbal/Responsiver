@@ -21,11 +21,16 @@ interface ProjectSnapshot {
   analyzedAt: string
   issues: ProjectIssue[]
   previewHtml: string | null
+  previewOrigin: string | null
+  entryPath: string | null
+  routes: Array<{ path: string; label: string }>
+  theme: { detected: 'dark' | 'light' | 'dual' | 'unknown'; hasDark: boolean; hasLight: boolean }
 }
 
 interface Window {
   responsiver: {
     chooseProject: () => Promise<ProjectSnapshot | null>
+    openProjectPath: (path: string) => Promise<ProjectSnapshot>
     openDemoProject: () => Promise<ProjectSnapshot>
     exportReport: (project: ProjectSnapshot, acceptedRuleIds: string[]) => Promise<string | null>
   }

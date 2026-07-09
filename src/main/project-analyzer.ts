@@ -20,6 +20,17 @@ export interface ProjectIssue {
   proposal: string
 }
 
+export interface ProjectRoute {
+  path: string
+  label: string
+}
+
+export interface ThemeProfile {
+  detected: 'dark' | 'light' | 'dual' | 'unknown'
+  hasDark: boolean
+  hasLight: boolean
+}
+
 export interface ProjectSnapshot {
   id: string
   name: string
@@ -29,6 +40,10 @@ export interface ProjectSnapshot {
   analyzedAt: string
   issues: ProjectIssue[]
   previewHtml: string | null
+  previewOrigin: string | null
+  entryPath: string | null
+  routes: ProjectRoute[]
+  theme: ThemeProfile
 }
 
 const ignoredDirectories = new Set([
@@ -111,6 +126,40 @@ function sanitizeHtml(html: string, css: string): string {
   return `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="${csp}">${style}${safetyBanner}</head><body>${withoutExecutableContent}</body></html>`
 }
 
+function luminanceOfHex(value: string): number | null {
+  const source = value.replace('#', '')
+  const normalized = source.length === 3
+    ? source.split('').map((part) => `${part}${part}`).join('')
+    : source.slice(0, 6)
+  if (!/^[\da-f]{6}$/i.test(normalized)) return null
+  const components = [0, 2, 4].map((offset) => Number.parseInt(normalized.slice(offset, offset + 2), 16) / 255)
+  const [red, green, blue] = components.map((component) => component <= 0.03928 ? component / 12.92 : ((component + 0.055) / 1.055) ** 2.4)
+  return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+}
+
+function detectSurfaceColors(content: string): Pick<ThemeProfile, 'hasDark' | 'hasLight'> {
+  const variableDeclaration = /--[\w-]*(?:bg|background|surface|panel)[\w-]*\s*:\s*(#[\da-f]{3,8})\b/gi
+  const backgroundDeclaration = /background(?:-color)?\s*:\s*(#[\da-f]{3,8})\b/gi
+  const variables = [...content.matchAll(variableDeclaration)]
+  const declarations = variables.length > 0 ? variables : [...content.matchAll(backgroundDeclaration)]
+  let hasDark = false
+  let hasLight = false
+  for (const match of declarations) {
+    const luminance = luminanceOfHex(match[1])
+    if (luminance === null) continue
+    if (luminance < 0.2) hasDark = true
+    if (luminance > 0.78) hasLight = true
+  }
+  return { hasDark, hasLight }
+}
+
+function detectTheme(content: string): ThemeProfile {
+  const surfaces = detectSurfaceColors(content)
+  const hasDark = surfaces.hasDark || /prefers-color-scheme\s*:\s*dark|color-scheme\s*:\s*dark|data-theme\s*=\s*["']dark/i.test(content)
+  const hasLight = surfaces.hasLight || /prefers-color-scheme\s*:\s*light|color-scheme\s*:\s*light|data-theme\s*=\s*["']light/i.test(content)
+  return { detected: hasDark && hasLight ? 'dual' : hasDark ? 'dark' : hasLight ? 'light' : 'unknown', hasDark, hasLight }
+}
+
 export async function analyzeProject(root: string): Promise<ProjectSnapshot> {
   const files = await listProjectFiles(root)
   const issues: ProjectIssue[] = []
@@ -118,9 +167,14 @@ export async function analyzeProject(root: string): Promise<ProjectSnapshot> {
   const htmlFiles = files.filter((file) => ['.html', '.htm'].includes(extname(file).toLowerCase()))
   const cssFiles = files.filter((file) => ['.css', '.scss', '.sass', '.less'].includes(extname(file).toLowerCase()))
   const relativeFile = (file: string) => relative(root, file) || basename(file)
-  const indexFile = htmlFiles.find((file) => basename(file).toLowerCase() === 'index.html') ?? htmlFiles[0]
-  const cssForPreview = (await Promise.all(cssFiles.filter((file) => extname(file) === '.css').slice(0, 30).map((file) => fs.readFile(file, 'utf8').catch(() => '')))).join('\n')
+  const indexFile = htmlFiles.find((file) => relative(root, file) === 'index.html') ?? htmlFiles.find((file) => basename(file).toLowerCase() === 'index.html') ?? htmlFiles[0]
+  const routes = htmlFiles
+    .map((file) => ({ path: `/${relativeFile(file).replaceAll('\\', '/')}`, label: relativeFile(file).replaceAll('\\', '/') }))
+    .sort((a, b) => (a.path === '/index.html' ? -1 : b.path === '/index.html' ? 1 : a.path.localeCompare(b.path)))
+  const rootCssFiles = cssFiles.filter((file) => !relativeFile(file).includes('/'))
+  const cssForPreview = (await Promise.all(rootCssFiles.filter((file) => extname(file) === '.css').map((file) => fs.readFile(file, 'utf8').catch(() => '')))).join('\n')
   const htmlForPreview = indexFile ? await fs.readFile(indexFile, 'utf8').catch(() => '') : ''
+  const theme = detectTheme(`${htmlForPreview}\n${cssForPreview}`)
 
   if (indexFile) {
     const html = await fs.readFile(indexFile, 'utf8').catch(() => '')
@@ -143,7 +197,13 @@ export async function analyzeProject(root: string): Promise<ProjectSnapshot> {
     }
   }
 
-  for (const file of cssFiles.slice(0, 120)) {
+  const orderedCssFiles = [...cssFiles].sort((left, right) => {
+    const leftIsRoot = !relativeFile(left).includes('/')
+    const rightIsRoot = !relativeFile(right).includes('/')
+    if (leftIsRoot !== rightIsRoot) return leftIsRoot ? -1 : 1
+    return relativeFile(left).localeCompare(relativeFile(right))
+  })
+  for (const file of orderedCssFiles.slice(0, 120)) {
     const css = await fs.readFile(file, 'utf8').catch(() => '')
     if (!css) continue
 
@@ -255,7 +315,11 @@ export async function analyzeProject(root: string): Promise<ProjectSnapshot> {
     files: files.length,
     analyzedAt: new Date().toISOString(),
     issues,
-    previewHtml: htmlForPreview ? sanitizeHtml(htmlForPreview.slice(0, 240_000), cssForPreview.slice(0, 240_000)) : null
+    previewHtml: null,
+    previewOrigin: null,
+    entryPath: indexFile ? `/${relativeFile(indexFile).replaceAll('\\', '/')}` : null,
+    routes,
+    theme
   }
 }
 
@@ -267,29 +331,22 @@ export function createDemoProject(): ProjectSnapshot {
     kind: 'Démo statique',
     files: 28,
     analyzedAt: new Date().toISOString(),
-    previewHtml: `<!doctype html><html lang="fr"><head><meta name="viewport" content="width=device-width, initial-scale=1"><style>:root{font-family:Inter,system-ui,sans-serif;color:#172033;background:#fff}*{box-sizing:border-box}body{margin:0}.top{display:flex;align-items:center;justify-content:space-between;padding:18px 7vw;border-bottom:1px solid #e8ebf2;font-size:14px}.brand{font-weight:800;letter-spacing:-.03em}.links{display:flex;gap:24px;color:#516078}.hero{display:grid;grid-template-columns:1.1fr .9fr;gap:36px;align-items:center;padding:72px 7vw;background:linear-gradient(135deg,#f6f8ff,#fff)}h1{margin:0;font-size:clamp(34px,6vw,66px);line-height:.98;letter-spacing:-.06em}.hero p{color:#56637a;font-size:17px;line-height:1.55}.button{display:inline-block;margin-top:18px;background:#315cf5;color:white;padding:13px 18px;border-radius:9px;font-weight:700}.visual{min-height:250px;border:1px solid #d9e1f4;border-radius:18px;background:linear-gradient(145deg,#c9d6ff,#eef3ff);box-shadow:0 18px 45px #91a8df55}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;padding:45px 7vw}.metric{padding:18px;border:1px solid #e7eaf1;border-radius:12px}.metric strong{display:block;font-size:24px}@media(max-width:640px){.links{display:none}.hero{grid-template-columns:1fr;padding:48px 24px}.visual{min-height:160px}.metrics{grid-template-columns:1fr;padding:24px}.top{padding:16px 24px}}</style></head><body><header class="top"><span class="brand">ATELIER ATLAS</span><nav class="links"><span>Solutions</span><span>Références</span><span>Contact</span></nav></header><main><section class="hero"><div><p>Architecture intérieure</p><h1>Des espaces qui racontent une histoire.</h1><p>Un projet de démonstration pour visualiser les tests de Responsiver sur une vraie mise en page HTML/CSS.</p><a class="button">Découvrir le studio</a></div><div class="visual"></div></section><section class="metrics"><article class="metric"><strong>18</strong>projets livrés</article><article class="metric"><strong>12 ans</strong>d'expertise</article><article class="metric"><strong>100 %</strong>sur mesure</article></section></main></body></html>`,
+    previewOrigin: null,
+    entryPath: '/index.html',
+    routes: [{ path: '/index.html', label: 'index.html' }],
+    theme: { detected: 'light', hasDark: false, hasLight: true },
+    previewHtml: `<!doctype html><html lang="fr"><head><meta name="viewport" content="width=device-width, initial-scale=1"><style>:root{font-family:Inter,system-ui,sans-serif;color:#172033;background:#fff}*{box-sizing:border-box}body{margin:0}.top{display:flex;align-items:center;justify-content:space-between;padding:18px 7vw;border-bottom:1px solid #e8ebf2;font-size:14px}.brand{font-weight:800;letter-spacing:-.03em}.links{display:flex;gap:24px;color:#516078;white-space:nowrap}.hero{display:grid;grid-template-columns:1.1fr .9fr;gap:36px;align-items:center;padding:72px 7vw;background:linear-gradient(135deg,#f6f8ff,#fff)}h1{margin:0;font-size:clamp(34px,6vw,66px);line-height:.98;letter-spacing:-.06em}.hero p{color:#56637a;font-size:17px;line-height:1.55}.button{display:inline-block;margin-top:18px;background:#315cf5;color:white;padding:13px 18px;border-radius:9px;font-weight:700}.visual{min-height:250px;border:1px solid #d9e1f4;border-radius:18px;background:linear-gradient(145deg,#c9d6ff,#eef3ff);box-shadow:0 18px 45px #91a8df55}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;padding:45px 7vw}.metric{padding:18px;border:1px solid #e7eaf1;border-radius:12px}.metric strong{display:block;font-size:24px}@media(max-width:640px){.links{display:none}.hero{grid-template-columns:1fr;padding:48px 24px}.visual{min-height:160px}.metrics{grid-template-columns:1fr;padding:24px}.top{padding:16px 24px}}</style></head><body><header class="top"><span class="brand">ATELIER ATLAS</span><nav class="links"><span>Solutions</span><span>Références</span><span>Contact</span></nav></header><main><section class="hero"><div><p>Architecture intérieure</p><h1>Des espaces qui racontent une histoire.</h1><p>Un projet de démonstration pour visualiser les tests de Responsiver sur une vraie mise en page HTML/CSS.</p><a class="button">Découvrir le studio</a></div><div class="visual"></div></section><section class="metrics"><article class="metric"><strong>18</strong>projets livrés</article><article class="metric"><strong>12 ans</strong>d'expertise</article><article class="metric"><strong>100 %</strong>sur mesure</article></section></main></body></html>`,
     issues: [
       {
-        id: 'demo-viewport',
-        title: 'Balise viewport absente',
-        description: 'Le navigateur mobile peut conserver une largeur de mise en page de bureau.',
-        severity: 'bloquant',
-        coverage: 'standard',
-        viewport: 'Tous les téléphones',
-        source: { file: 'index.html', line: 4 },
-        rule: 'html.viewport-meta',
-        proposal: 'Ajouter la balise viewport standard.'
-      },
-      {
         id: 'demo-navigation',
-        title: 'Navigation trop large',
-        description: 'Un conteneur de 760 px déborde à 390 px.',
+        title: 'Navigation à confirmer sur mobile',
+        description: 'La navigation conserve white-space: nowrap. Le breakpoint prévu doit être vérifié dans la preview.',
         severity: 'attention',
         coverage: 'heuristique',
         viewport: '390 × 844',
-        source: { file: 'styles/navigation.css', line: 18 },
-        rule: 'css.fixed-width',
-        proposal: 'Activer flex-wrap sous 640 px et limiter la largeur à 100 %.'
+        source: { file: 'index.html', line: 1 },
+        rule: 'css.nowrap',
+        proposal: 'Conserver l’effacement mobile ou autoriser le retour à la ligne selon le contenu réel.'
       },
       {
         id: 'demo-theme',
