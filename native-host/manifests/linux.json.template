@@ -1,0 +1,7 @@
+{
+  "name": "fr.responsiver.desktop",
+  "description": "Pont local minimal entre Chrome et Responsiver",
+  "path": "__ABSOLUTE_PATH_TO_NATIVE_HOST__",
+  "type": "stdio",
+  "allowed_origins": ["chrome-extension://__EXTENSION_ID__/"]
+}

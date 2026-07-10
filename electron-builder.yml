@@ -14,6 +14,17 @@ files:
 extraResources:
   - from: demo/atelier
     to: demo/atelier
+  - from: extensions/chrome
+    to: companion/chrome
+  - from: native-host
+    to: companion/native-host
+    filter:
+      - host.mjs
+      - protocol.mjs
+      - spool.mjs
+      - register.mjs
+      - README.md
+      - manifests/**/*
   - from: LICENSE
     to: LICENSE
   - from: NOTICE

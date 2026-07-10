@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>Responsiver</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="panel">
+      <header class="brand">
+        <span class="brand-mark" aria-hidden="true"><span></span></span>
+        <span>
+          <strong>Responsiver</strong>
+          <small>Compagnon Chrome</small>
+        </span>
+        <span class="local-pill">LOCAL</span>
+      </header>
+
+      <section class="intro" aria-labelledby="popup-title">
+        <p class="eyebrow">PAGE ACTIVE</p>
+        <h1 id="popup-title">Passez du navigateur au laboratoire.</h1>
+        <p class="description">
+          L’URL et les dimensions de cet onglet seront transmises uniquement à l’application installée sur cet ordinateur.
+        </p>
+      </section>
+
+      <div id="status" class="status" role="status" aria-live="polite" hidden>
+        <span class="status-icon" aria-hidden="true"></span>
+        <span>
+          <strong id="status-title"></strong>
+          <small id="status-detail"></small>
+        </span>
+      </div>
+
+      <button id="open-button" class="primary-button" type="button">
+        <span>Ouvrir dans Responsiver</span>
+        <svg viewBox="0 0 20 20" aria-hidden="true">
+          <path d="M5 10h10M11 6l4 4-4 4" />
+        </svg>
+      </button>
+
+      <p class="privacy-note">
+        Aucun contenu de page, cookie, mot de passe ou historique n’est lu par l’extension.
+      </p>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

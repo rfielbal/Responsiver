@@ -1,0 +1,259 @@
+:root {
+  font-family:
+    Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #20211e;
+  background: #f3f1eb;
+  font-synthesis: none;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  width: 370px;
+  min-height: 470px;
+  margin: 0;
+  overflow: hidden;
+  background:
+    linear-gradient(145deg, rgba(197, 87, 59, 0.07), transparent 40%),
+    #f3f1eb;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.panel {
+  min-height: 470px;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding-bottom: 22px;
+  border-bottom: 1px solid rgba(32, 33, 30, 0.14);
+}
+
+.brand-mark {
+  position: relative;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  border-radius: 9px;
+  background: #20211e;
+}
+
+.brand-mark::before {
+  content: "";
+  position: absolute;
+  inset: 8px 10px 8px 8px;
+  border: 2px solid #f3f1eb;
+  border-right: 0;
+  border-radius: 3px 0 0 3px;
+}
+
+.brand-mark span {
+  position: absolute;
+  top: 7px;
+  right: 6px;
+  width: 4px;
+  height: 18px;
+  border-radius: 3px;
+  background: #c5573b;
+}
+
+.brand strong,
+.brand small {
+  display: block;
+}
+
+.brand strong {
+  font-size: 14px;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+}
+
+.brand small {
+  margin-top: 2px;
+  color: #696b64;
+  font-size: 11px;
+}
+
+.local-pill {
+  margin-left: auto;
+  padding: 5px 7px;
+  border: 1px solid rgba(32, 33, 30, 0.18);
+  border-radius: 999px;
+  color: #696b64;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+}
+
+.intro {
+  padding: 38px 0 24px;
+}
+
+.eyebrow {
+  margin: 0 0 11px;
+  color: #9d4933;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.16em;
+}
+
+h1 {
+  max-width: 310px;
+  margin: 0;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 30px;
+  font-weight: 500;
+  line-height: 1.02;
+  letter-spacing: -0.035em;
+}
+
+.description {
+  margin: 18px 0 0;
+  color: #62645e;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.status {
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0 0 14px;
+  padding: 12px 13px;
+  border: 1px solid rgba(32, 33, 30, 0.16);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.46);
+}
+
+.status:not([hidden]) {
+  display: flex;
+}
+
+.status-icon {
+  width: 8px;
+  height: 8px;
+  margin-top: 4px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #777970;
+  box-shadow: 0 0 0 4px rgba(119, 121, 112, 0.12);
+}
+
+.status strong,
+.status small {
+  display: block;
+}
+
+.status strong {
+  font-size: 12px;
+  line-height: 1.25;
+}
+
+.status small {
+  margin-top: 3px;
+  color: #696b64;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.status[data-tone="success"] .status-icon {
+  background: #377756;
+  box-shadow: 0 0 0 4px rgba(55, 119, 86, 0.12);
+}
+
+.status[data-tone="error"] {
+  border-color: rgba(157, 73, 51, 0.28);
+  background: rgba(197, 87, 59, 0.06);
+}
+
+.status[data-tone="error"] .status-icon {
+  background: #c5573b;
+  box-shadow: 0 0 0 4px rgba(197, 87, 59, 0.12);
+}
+
+.primary-button {
+  width: 100%;
+  min-height: 50px;
+  margin-top: auto;
+  padding: 0 16px 0 18px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border: 0;
+  border-radius: 9px;
+  color: #f8f6f0;
+  background: #20211e;
+  box-shadow: 0 8px 22px rgba(32, 33, 30, 0.15);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 680;
+  transition:
+    background 150ms ease,
+    transform 150ms ease,
+    box-shadow 150ms ease;
+}
+
+.primary-button:hover:not(:disabled) {
+  background: #30312d;
+  box-shadow: 0 10px 28px rgba(32, 33, 30, 0.2);
+  transform: translateY(-1px);
+}
+
+.primary-button:focus-visible {
+  outline: 3px solid rgba(197, 87, 59, 0.35);
+  outline-offset: 2px;
+}
+
+.primary-button:disabled {
+  color: rgba(248, 246, 240, 0.7);
+  cursor: wait;
+  opacity: 0.72;
+}
+
+.primary-button svg {
+  width: 19px;
+  height: 19px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.6;
+}
+
+.primary-button[data-loading="true"] svg {
+  animation: pulse-arrow 900ms ease-in-out infinite alternate;
+}
+
+.privacy-note {
+  margin: 12px 5px 0;
+  color: #85877f;
+  font-size: 10px;
+  line-height: 1.45;
+  text-align: center;
+}
+
+@keyframes pulse-arrow {
+  to {
+    transform: translateX(3px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .primary-button,
+  .primary-button svg {
+    animation: none !important;
+    transition: none;
+  }
+}

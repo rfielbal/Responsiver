@@ -18,6 +18,25 @@ module.exports = async function hardenPackage(context) {
   for (const notice of ['LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md']) {
     accessSync(join(resources, notice), constants.R_OK)
   }
+  for (const companionResource of [
+    join('companion', 'chrome', 'manifest.json'),
+    join('companion', 'chrome', 'icon.png'),
+    join('companion', 'chrome', 'service-worker.js'),
+    join('companion', 'chrome', 'popup.html'),
+    join('companion', 'chrome', 'popup.css'),
+    join('companion', 'chrome', 'popup.js'),
+    join('companion', 'chrome', 'README.md'),
+    join('companion', 'native-host', 'host.mjs'),
+    join('companion', 'native-host', 'protocol.mjs'),
+    join('companion', 'native-host', 'spool.mjs'),
+    join('companion', 'native-host', 'register.mjs'),
+    join('companion', 'native-host', 'README.md'),
+    join('companion', 'native-host', 'manifests', 'macos.json.template'),
+    join('companion', 'native-host', 'manifests', 'windows.json.template'),
+    join('companion', 'native-host', 'manifests', 'linux.json.template')
+  ]) {
+    accessSync(join(resources, companionResource), constants.R_OK)
+  }
 
   if (context.electronPlatformName !== 'darwin') return
   const plist = join(applicationRoot, 'Info.plist')

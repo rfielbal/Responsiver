@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "Responsiver — Ouvrir la page",
+  "short_name": "Responsiver",
+  "version": "0.1.0",
+  "description": "Transmet la page active à l’application desktop Responsiver, uniquement après votre clic.",
+  "icons": {
+    "16": "icon.png",
+    "32": "icon.png",
+    "48": "icon.png",
+    "128": "icon.png"
+  },
+  "permissions": ["activeTab", "nativeMessaging"],
+  "action": {
+    "default_title": "Ouvrir dans Responsiver",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icon.png",
+      "32": "icon.png"
+    }
+  },
+  "background": {
+    "service_worker": "service-worker.js"
+  }
+}
