@@ -7,6 +7,7 @@ import type {
   ProjectSnapshot,
   RemoteAuditMode,
   RemoteAuditResult as SharedRemoteAuditResult,
+  RemoteFocusResult,
   RemoteOpenRequest,
   RemotePageState,
   RemoteViewBounds,
@@ -36,6 +37,9 @@ const maxScreenshotDataUrlLength = 12 * 1024 * 1024
 const maxResourceHostnames = 256
 const maxConcurrentResourceHostChecks = 16
 const resourceHostCacheMs = 10_000
+const maxAuditNodesPerViewport = 5_000
+const maxAuditFindingsPerViewport = 180
+const maxAuditFindingsTotal = 500
 const defaultViewport: RemoteViewport = { width: 393, height: 852, deviceScaleFactor: 1, mobile: true, touch: true }
 
 export interface RemoteSessionCallbacks {
@@ -159,13 +163,13 @@ function mapFinding(finding: RemoteAuditFinding): ProjectIssue {
     severity: mapSeverity(finding),
     coverage: finding.confidence >= 0.9 ? 'standard' : 'heuristique',
     viewport: `${width} × ${height}`,
-    routePath: finding.route.pathname,
+    routePath: finding.route.path,
     rule: finding.rule,
     proposal: proposalFor(finding),
     confidence: finding.confidence >= 0.9 ? 'certain' : finding.confidence >= 0.7 ? 'probable' : 'review',
     evidence: {
       selector: finding.selector,
-      route: finding.route.pathname,
+      route: finding.route.path,
       viewport: { width, height },
       rectangle: finding.rect,
       measurements: Object.fromEntries([
@@ -177,10 +181,11 @@ function mapFinding(finding: RemoteAuditFinding): ProjectIssue {
   }
 }
 
-function uniqueIssues(issues: ProjectIssue[]): ProjectIssue[] {
+function uniqueIssues(issues: ProjectIssue[]): { issues: ProjectIssue[]; truncated: boolean } {
   const unique = new Map<string, ProjectIssue>()
   for (const issue of issues) unique.set(issue.id, issue)
-  return [...unique.values()].slice(0, 500)
+  const values = [...unique.values()]
+  return { issues: values.slice(0, maxAuditFindingsTotal), truncated: values.length > maxAuditFindingsTotal }
 }
 
 export class RemoteBrowserSession {
@@ -621,11 +626,22 @@ export class RemoteBrowserSession {
     return this.state()
   }
 
-  async focusSelector(selectorValue: unknown): Promise<boolean> {
-    if (this.closed || this.auditRunning) return false
-    if (typeof selectorValue !== 'string' || !selectorValue || selectorValue.length > 320) return false
-    return Boolean(await this.view.webContents.executeJavaScript(`(() => {
-      const selector = ${JSON.stringify(selectorValue)};
+  async focusSelector(selectorValue: unknown): Promise<RemoteFocusResult> {
+    const fallbackPath = (() => {
+      try {
+        const url = new URL(this.currentApproved.href)
+        return `${url.pathname}${url.search}${url.hash}`
+      } catch {
+        return '/'
+      }
+    })()
+    if (this.closed || this.auditRunning) return { found: false, selector: null, path: fallbackPath }
+    const selector = typeof selectorValue === 'string'
+      ? selectorValue.replace(/[\u0000-\u001f\u007f]/g, ' ').trim()
+      : ''
+    if (!selector || selector.length > 320) return { found: false, selector: null, path: this.state().path }
+    const found = Boolean(await this.view.webContents.executeJavaScript(`(() => {
+      const selector = ${JSON.stringify(selector)};
       let target = null;
       try { target = document.querySelector(selector); } catch { return false; }
       document.querySelectorAll('[data-responsiver-remote-target]').forEach((element) => element.removeAttribute('data-responsiver-remote-target'));
@@ -637,6 +653,7 @@ export class RemoteBrowserSession {
       target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'auto' });
       return true;
     })()`).catch(() => false))
+    return { found, selector, path: this.state().path }
   }
 
   async setWorkspaceCss(css: string): Promise<void> {
@@ -658,6 +675,8 @@ export class RemoteBrowserSession {
     const requested = (viewportValues.length ? viewportValues : [originalViewport]).slice(0, 8).map(normalizeViewport)
     const auditUrl = this.safeCurrentUrl()
     const issues: ProjectIssue[] = []
+    let scannedNodes = 0
+    let truncated = false
     let screenshotDataUrl: string | null = null
     try {
       for (const viewport of requested) {
@@ -667,15 +686,22 @@ export class RemoteBrowserSession {
         if (approvedUrl !== auditUrl) throw new Error('La page a changé de route pendant l’audit. Relancez l’analyse sur la nouvelle route.')
         const raw = await withTimeout(
           this.view.webContents.executeJavaScript(buildRemoteAuditScript({
-            maxNodes: 5_000,
-            maxFindings: 180,
+            maxNodes: maxAuditNodesPerViewport,
+            maxFindings: maxAuditFindingsPerViewport,
             mobile: viewport.mobile === true,
             expectedViewportWidth: viewport.width
           })),
           scriptTimeoutMs,
           'L’analyse du rendu a dépassé le délai autorisé.'
         )
-        const result = sanitizeRemoteAuditResult(raw, { url: approvedUrl, viewport, maxFindings: 180, maxScannedNodes: 5_000 })
+        const result = sanitizeRemoteAuditResult(raw, {
+          url: approvedUrl,
+          viewport,
+          maxFindings: maxAuditFindingsPerViewport,
+          maxScannedNodes: maxAuditNodesPerViewport
+        })
+        scannedNodes += result.scannedNodes
+        truncated ||= result.truncated
         issues.push(...result.findings.map(mapFinding))
       }
       const image = await withTimeout(
@@ -701,13 +727,19 @@ export class RemoteBrowserSession {
       if (lateSettings) await this.applyViewport(lateSettings.viewport, lateSettings.scale).catch(() => undefined)
     }
     const state = this.state()
+    const consolidated = uniqueIssues(issues)
     return {
       url: state.url,
       path: state.path,
       generatedAt: new Date().toISOString(),
       viewports: requested,
-      findings: uniqueIssues(issues),
-      screenshotDataUrl
+      findings: consolidated.issues,
+      screenshotDataUrl,
+      truncated: truncated || consolidated.truncated,
+      scannedNodes,
+      maxNodes: maxAuditNodesPerViewport,
+      maxFindings: maxAuditFindingsPerViewport,
+      maxTotalFindings: maxAuditFindingsTotal
     }
   }
 

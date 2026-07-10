@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { cp, lstat, mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
 import { dirname, extname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import type { ExportResult, LocalAiRequest, LocalAiResponse, LocalAiStatus, ProjectPreparationProgress, ProjectSnapshot, RecentProjectSummary, RemoteAuditResult, RemoteOpenRequest, RemotePageState, RemoteViewBounds, RemoteViewport, StagingRequest, StagingSnapshot, WorkspaceApplyResult, WorkspaceDiff, WorkspaceFileSnapshot, WorkspaceFileSummary, WorkspaceSnapshot } from '../shared/contracts'
+import type { ExportResult, LocalAiRequest, LocalAiResponse, LocalAiStatus, ProjectPreparationProgress, ProjectSnapshot, RecentProjectSummary, RemoteAuditResult, RemoteFocusResult, RemoteOpenRequest, RemotePageState, RemoteViewBounds, RemoteViewport, StagingRequest, StagingSnapshot, WorkspaceApplyResult, WorkspaceDiff, WorkspaceFileSnapshot, WorkspaceFileSummary, WorkspaceSnapshot } from '../shared/contracts'
 import { analyzeProject, createDemoProject } from './project-analyzer'
 import { startProjectServer, type ProjectServer } from './project-server'
 import { buildProjectStaging, type ProjectStaging } from './project-transformer'
@@ -26,6 +26,7 @@ interface ActiveProjectSession {
   staging: ProjectStaging | null
   remoteBrowser: RemoteBrowserSession | null
   workspace: WorkspaceEditor | null
+  remoteRouteTruncation?: Map<string, boolean>
 }
 
 interface NormalizedProjectSelection {
@@ -293,7 +294,8 @@ async function openRemoteProject(value: unknown): Promise<ProjectSnapshot> {
     workspaceServer: null,
     staging: null,
     remoteBrowser,
-    workspace: null
+    workspace: null,
+    remoteRouteTruncation: new Map()
   }
   await replaceActiveSession(next)
   notifyProjectPreparation({ phase: 'responsive', step: 3, total: 4, label: 'Rendu distant prêt', detail: 'La page est navigable. L’audit visuel se lancera dans les viewports sélectionnés.' })
@@ -320,10 +322,21 @@ async function runRemoteAudit(value: unknown): Promise<RemoteAuditResult> {
   if (activeSession !== session) throw new Error('La session a changé pendant l’audit distant.')
   const currentState = browser.getState()
   const currentUrl = new URL(currentState.url)
+  session.remoteRouteTruncation ??= new Map()
+  session.remoteRouteTruncation.set(result.path, result.truncated)
+  const previous = session.project
+  const base = browser.projectSnapshot()
+  const route = { path: currentState.path, label: currentUrl.pathname === '/' ? currentUrl.hostname : currentUrl.pathname, title: currentState.title, theme: 'unknown' as const }
   session.project = {
-    ...browser.projectSnapshot(result.findings),
-    routes: [{ path: currentState.path, label: currentUrl.pathname === '/' ? currentUrl.hostname : currentUrl.pathname, title: currentState.title, theme: 'unknown' }],
-    analysis: { truncated: result.findings.length >= 500, scannedFiles: 0, scannedStyles: 0 }
+    ...base,
+    issues: [
+      ...previous.issues.filter((issue) => (issue.routePath ?? issue.evidence?.route) !== result.path),
+      ...result.findings
+    ],
+    routes: previous.routes.some((entry) => entry.path === result.path)
+      ? previous.routes.map((entry) => entry.path === result.path ? route : entry)
+      : [...previous.routes, route],
+    analysis: { truncated: [...session.remoteRouteTruncation.values()].some(Boolean), scannedFiles: 0, scannedStyles: 0 }
   }
   return result
 }
@@ -644,7 +657,8 @@ async function exportReport(owner: BrowserWindow, value: unknown): Promise<strin
   const report = {
     generatedAt: new Date().toISOString(),
     application: `Responsiver ${app.getVersion()}`,
-    localOnly: true,
+    localOnly: session.project.source.network === 'local-only',
+    networkMode: session.project.source.network,
     project: portableProject,
     projectId: createHash('sha256').update(`${session.project.name}\u001f${session.project.analyzedAt}`).digest('hex').slice(0, 12),
     acceptedRuleIds,
@@ -841,7 +855,7 @@ function registerIpcHandlers(): void {
     requireTrustedWindow(event)
     return queueSessionOperation(() => runRemoteAudit(viewports))
   })
-  ipcMain.handle('remote:focus', async (event, selector: unknown): Promise<boolean> => {
+  ipcMain.handle('remote:focus', async (event, selector: unknown): Promise<RemoteFocusResult> => {
     requireTrustedWindow(event)
     return currentRemoteSession().browser.focusSelector(selector)
   })

@@ -92,6 +92,8 @@ test('le script d’audit est borné et contient les détecteurs attendus', () =
   assert.doesNotMatch(script, /__RESPONSIVER_OPTIONS__/)
   assert.match(script, /"maxNodes":5000/)
   assert.match(script, /"maxFindings":320/)
+  assert.match(script, /createTreeWalker/)
+  assert.doesNotMatch(script, /querySelectorAll\(['"]\*['"]\)/)
   for (const rule of [
     'responsive.missing-viewport',
     'layout.viewport-overflow',
@@ -175,15 +177,22 @@ test('le résultat d’une page est assaini et rattaché au contexte approuvé',
       { rule: 'custom.injection', selector: '*', title: 'inconnu' }
     ]
   }, {
-    url: 'https://example.com/page?audit=1',
+    url: 'https://example.com/page?audit=1#hero',
     viewport: { width: 390, height: 844, deviceScaleFactor: 3 },
     maxScannedNodes: 2_500
   })
 
   assert.equal(result.version, 1)
-  assert.deepEqual(result.route, { url: 'https://example.com/page?audit=1', pathname: '/page' })
+  assert.deepEqual(result.route, {
+    url: 'https://example.com/page?audit=1#hero',
+    pathname: '/page',
+    path: '/page?audit=1#hero'
+  })
   assert.deepEqual(result.viewport, { width: 390, height: 844, deviceScaleFactor: 3 })
   assert.equal(result.scannedNodes, 2_500)
+  assert.equal(result.maxNodes, 2_500)
+  assert.equal(result.maxFindings, 180)
+  assert.equal(result.truncated, false)
   assert.equal(result.findings.length, 1)
   const finding = result.findings[0]
   assert.equal(finding.category, 'layout')

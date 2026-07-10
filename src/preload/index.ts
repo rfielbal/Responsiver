@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron'
-import type { ExportResult, LocalAiRequest, LocalAiResponse, LocalAiStatus, ProjectPreparationProgress, ProjectSnapshot, RecentProjectSummary, RemoteAuditResult, RemoteOpenRequest, RemotePageState, RemoteViewBounds, RemoteViewport, StagingRequest, StagingSnapshot, WorkspaceApplyResult, WorkspaceDiff, WorkspaceFileSnapshot, WorkspaceFileSummary, WorkspaceSnapshot } from '../shared/contracts'
+import type { ExportResult, LocalAiRequest, LocalAiResponse, LocalAiStatus, ProjectPreparationProgress, ProjectSnapshot, RecentProjectSummary, RemoteAuditResult, RemoteFocusResult, RemoteOpenRequest, RemotePageState, RemoteViewBounds, RemoteViewport, StagingRequest, StagingSnapshot, WorkspaceApplyResult, WorkspaceDiff, WorkspaceFileSnapshot, WorkspaceFileSummary, WorkspaceSnapshot } from '../shared/contracts'
 
 function reportRuleIds(projectOrRuleIds?: ProjectSnapshot | string[], acceptedRuleIds?: string[]): string[] {
   return Array.isArray(projectOrRuleIds) ? projectOrRuleIds : acceptedRuleIds ?? []
@@ -25,7 +25,7 @@ if (process.isMainFrame) {
     navigateRemote: (action: 'back' | 'forward' | 'reload' | 'url', value?: string): Promise<RemotePageState> => ipcRenderer.invoke('remote:navigate', action, value),
     getRemoteState: (): Promise<RemotePageState> => ipcRenderer.invoke('remote:state'),
     auditRemote: (viewports: RemoteViewport[]): Promise<RemoteAuditResult> => ipcRenderer.invoke('remote:audit', viewports),
-    focusRemoteFinding: (selector: string): Promise<boolean> => ipcRenderer.invoke('remote:focus', selector),
+    focusRemoteFinding: (selector: string): Promise<RemoteFocusResult> => ipcRenderer.invoke('remote:focus', selector),
     onRemoteState: (listener: (state: RemotePageState) => void): (() => void) => {
       const handler = (_event: IpcRendererEvent, state: RemotePageState): void => listener(state)
       ipcRenderer.on('remote:state', handler)

@@ -10,6 +10,7 @@ import type {
   ProjectSnapshot as SharedProjectSnapshot,
   RecentProjectSummary,
   RemoteAuditResult,
+  RemoteFocusResult,
   RemoteOpenRequest,
   RemotePageState,
   RemoteViewBounds,
@@ -42,7 +43,7 @@ declare global {
     navigateRemote: (action: 'back' | 'forward' | 'reload' | 'url', value?: string) => Promise<RemotePageState>
     getRemoteState: () => Promise<RemotePageState>
     auditRemote: (viewports: RemoteViewport[]) => Promise<RemoteAuditResult>
-    focusRemoteFinding: (selector: string) => Promise<boolean>
+    focusRemoteFinding: (selector: string) => Promise<RemoteFocusResult>
     onRemoteState: (listener: (state: RemotePageState) => void) => () => void
     onRemoteBlockedNavigation: (listener: (payload: { url: string; detail: string }) => void) => () => void
     onExtensionOpenProject: (listener: (payload: { project: ProjectSnapshot; viewport: RemoteViewport }) => void) => () => void

@@ -20,7 +20,7 @@ if (!window.responsiver) {
     navigateRemote: async () => { throw new Error('La navigation distante est disponible uniquement dans Electron.') },
     getRemoteState: async () => { throw new Error('La navigation distante est disponible uniquement dans Electron.') },
     auditRemote: async () => { throw new Error('L’audit URL est disponible uniquement dans Electron.') },
-    focusRemoteFinding: async () => false,
+    focusRemoteFinding: async () => ({ found: false, selector: null, path: '/' }),
     onRemoteState: () => () => undefined,
     onRemoteBlockedNavigation: () => () => undefined,
     onExtensionOpenProject: () => () => undefined,

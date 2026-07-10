@@ -169,6 +169,23 @@ export interface RemoteAuditResult {
   viewports: RemoteViewport[]
   findings: ProjectIssue[]
   screenshotDataUrl: string | null
+  /** Vrai dès qu'un viewport ou la consolidation finale a atteint une limite. */
+  truncated: boolean
+  /** Nombre total de nœuds effectivement inspectés sur tous les viewports. */
+  scannedNodes: number
+  /** Budget de nœuds par viewport. */
+  maxNodes: number
+  /** Budget de constats bruts par viewport. */
+  maxFindings: number
+  /** Budget de constats consolidés renvoyés à l'interface. */
+  maxTotalFindings: number
+}
+
+export interface RemoteFocusResult {
+  found: boolean
+  selector: string | null
+  /** Route réellement affichée au moment de la recherche, query et hash inclus. */
+  path: string
 }
 
 export interface WorkspaceFileSummary {
@@ -320,13 +337,68 @@ export interface RuntimeOverflow {
   width: number
 }
 
+export type RuntimeAuditRule =
+  | 'layout.viewport-overflow'
+  | 'layout.clipped-content'
+  | 'layout.truncated-text'
+  | 'interaction.small-target'
+  | 'layout.fixed-obstruction'
+  | 'media.image-error'
+  | 'media.image-distortion'
+  | 'accessibility.low-contrast'
+
+export interface RuntimeAuditRect {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export interface RuntimeAuditViewport {
+  width: number
+  height: number
+  mobile: boolean
+}
+
+export interface RuntimeAuditFinding {
+  id: string
+  rule: RuntimeAuditRule
+  severity: 'warning' | 'error'
+  title: string
+  description: string
+  proposal: string
+  confidence: number
+  selector: string
+  tag: string
+  label: string
+  rect: RuntimeAuditRect
+  route: string
+  viewport: RuntimeAuditViewport
+}
+
+export interface RuntimeAuditLimits {
+  maxNodes: number
+  maxFindings: number
+  maxFindingsPerRule: number
+  maxLegacyOverflows: number
+  maxContrastChecks: number
+}
+
 export interface RuntimeAudit {
+  version: 2
   path: string
+  route: string
   viewportWidth: number
   viewportHeight: number
+  viewport: RuntimeAuditViewport
   documentWidth: number
   overflowCount: number
   overflows: RuntimeOverflow[]
+  findingCount: number
+  findings: RuntimeAuditFinding[]
+  inspectedNodes: number
+  truncated: boolean
+  limits: RuntimeAuditLimits
 }
 
 export interface ExportResult {

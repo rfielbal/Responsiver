@@ -83,6 +83,15 @@ const previewCsp = [
   "object-src 'none'"
 ].join('; ')
 
+/** Bornes du collecteur injecté dans les previews locales. */
+export const LOCAL_RUNTIME_AUDIT_LIMITS = Object.freeze({
+  maxNodes: 2_500,
+  maxFindings: 120,
+  maxFindingsPerRule: 24,
+  maxLegacyOverflows: 12,
+  maxContrastChecks: 600
+})
+
 const bridge = `<style data-responsiver-bridge-style>
 [data-responsiver-reveal-target] {
   outline: 3px solid #b94d32 !important;
@@ -94,6 +103,13 @@ const bridge = `<style data-responsiver-bridge-style>
   const channel = 'responsiver-preview';
   const revealAttribute = 'data-responsiver-reveal-target';
   const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const AUDIT_MAX_NODES = ${LOCAL_RUNTIME_AUDIT_LIMITS.maxNodes};
+  const AUDIT_MAX_FINDINGS = ${LOCAL_RUNTIME_AUDIT_LIMITS.maxFindings};
+  const AUDIT_MAX_FINDINGS_PER_RULE = ${LOCAL_RUNTIME_AUDIT_LIMITS.maxFindingsPerRule};
+  const AUDIT_MAX_LEGACY_OVERFLOWS = ${LOCAL_RUNTIME_AUDIT_LIMITS.maxLegacyOverflows};
+  const AUDIT_MAX_CONTRAST_CHECKS = ${LOCAL_RUNTIME_AUDIT_LIMITS.maxContrastChecks};
+  const AUDIT_MOBILE_MAX_WIDTH = 768;
+  const AUDIT_MIN_TARGET_SIZE = 44;
   let originalThemeState = null;
   let mutationObserver = null;
   const nativeAttachShadow = Element.prototype.attachShadow;
@@ -174,7 +190,7 @@ const bridge = `<style data-responsiver-bridge-style>
     return parts.join(' > ') || element.tagName.toLowerCase();
   };
   const composedElements = (root, limit) => {
-    if (!root) return [];
+    if (!root || limit <= 0) return [];
     const result = [];
     const scopes = [root];
     const visitedRoots = new Set();
@@ -182,11 +198,12 @@ const bridge = `<style data-responsiver-bridge-style>
       const scope = scopes.shift();
       if (!scope || visitedRoots.has(scope)) continue;
       visitedRoots.add(scope);
-      if (scope instanceof Element) result.push(scope);
-      for (const element of scope.querySelectorAll?.('*') || []) {
-        if (result.length >= limit) break;
+      const walker = document.createTreeWalker(scope, NodeFilter.SHOW_ELEMENT);
+      let element = scope instanceof Element ? scope : walker.nextNode();
+      while (element && result.length < limit) {
         result.push(element);
         if (element.shadowRoot && !visitedRoots.has(element.shadowRoot)) scopes.push(element.shadowRoot);
+        element = walker.nextNode();
       }
     }
     return result;
@@ -205,23 +222,247 @@ const bridge = `<style data-responsiver-bridge-style>
   const audit = () => {
     const viewportWidth = document.documentElement.clientWidth || innerWidth;
     const viewportHeight = document.documentElement.clientHeight || innerHeight;
+    const viewport = { width: viewportWidth, height: viewportHeight, mobile: viewportWidth <= AUDIT_MOBILE_MAX_WIDTH };
+    const route = location.pathname + location.search + location.hash;
     const documentWidth = Math.max(document.documentElement.scrollWidth, document.body?.scrollWidth || 0);
+    const sampledNodes = composedElements(document.body, AUDIT_MAX_NODES + 1);
+    const nodes = sampledNodes.slice(0, AUDIT_MAX_NODES);
+    const findings = [];
     const overflows = [];
+    const findingsPerRule = new Map();
+    const seenFindings = new Set();
+    const seenOverflowElements = new Set();
+    const seenLegacyOverflows = new Set();
+    const fixedCandidates = [];
     let overflowCount = 0;
-    let inspected = 0;
-    if (documentWidth > viewportWidth + 1) {
-      for (const element of composedElements(document.body, 5000)) {
-        inspected += 1;
-        if (inspected > 5000) break;
-        const style = getComputedStyle(element);
-        if (style.display === 'none' || style.position === 'fixed' || style.visibility === 'hidden') continue;
-        const rect = element.getBoundingClientRect();
-        if (rect.width <= 0 || rect.height <= 0 || (rect.left >= -1 && rect.right <= viewportWidth + 1)) continue;
-        overflowCount += 1;
-        if (overflows.length < 12) overflows.push({ selector: selectorFor(element), tag: element.tagName.toLowerCase(), label: (element.getAttribute('aria-label') || element.textContent || '').trim().replace(/\\s+/g, ' ').slice(0, 80), left: Math.round(rect.left), right: Math.round(rect.right), width: Math.round(rect.width) });
+    let contrastChecks = 0;
+    let truncated = sampledNodes.length > AUDIT_MAX_NODES;
+    const clean = (value, limit = 240) => String(value || '').replace(/\\s+/g, ' ').trim().slice(0, limit);
+    const round = (value) => Number.isFinite(value) ? Math.round(value * 100) / 100 : 0;
+    const rectangleOf = (rect) => ({ x: round(rect.x), y: round(rect.y), width: round(rect.width), height: round(rect.height) });
+    const labelOf = (element) => clean(element.getAttribute('aria-label') || element.getAttribute('alt') || element.getAttribute('title') || element.textContent, 80);
+    const hash = (value) => {
+      let result = 2166136261;
+      for (let index = 0; index < value.length; index += 1) {
+        result ^= value.charCodeAt(index);
+        result = Math.imul(result, 16777619);
+      }
+      return (result >>> 0).toString(16).padStart(8, '0');
+    };
+    const addFinding = (rule, element, rect, severity, title, description, proposal, confidence) => {
+      const selector = clean(selectorFor(element), 320);
+      const key = rule + '|' + selector;
+      if (seenFindings.has(key)) return false;
+      const ruleCount = findingsPerRule.get(rule) || 0;
+      if (findings.length >= AUDIT_MAX_FINDINGS || ruleCount >= AUDIT_MAX_FINDINGS_PER_RULE) {
+        truncated = true;
+        return false;
+      }
+      seenFindings.add(key);
+      findingsPerRule.set(rule, ruleCount + 1);
+      findings.push({
+        id: 'runtime-' + hash(rule + '|' + route + '|' + selector),
+        rule,
+        severity,
+        title: clean(title),
+        description: clean(description, 420),
+        proposal: clean(proposal, 420),
+        confidence: Math.max(0, Math.min(1, Number(confidence) || 0)),
+        selector,
+        tag: element.tagName.toLowerCase(),
+        label: labelOf(element),
+        rect: rectangleOf(rect),
+        route,
+        viewport
+      });
+      return true;
+    };
+    const recordOverflow = (element, rect) => {
+      if (seenOverflowElements.has(element)) return;
+      seenOverflowElements.add(element);
+      overflowCount += 1;
+      const selector = clean(selectorFor(element), 320);
+      if (overflows.length >= AUDIT_MAX_LEGACY_OVERFLOWS || seenLegacyOverflows.has(selector)) return;
+      seenLegacyOverflows.add(selector);
+      overflows.push({ selector, tag: element.tagName.toLowerCase(), label: labelOf(element), left: Math.round(rect.left), right: Math.round(rect.right), width: Math.round(rect.width) });
+    };
+    const visible = (style, rect) => rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || 1) > 0;
+    const hasOwnText = (element) => [...element.childNodes].some((node) => node.nodeType === Node.TEXT_NODE && clean(node.nodeValue).length > 0);
+    const parseOpaqueRgb = (value) => {
+      const source = String(value || '');
+      if (!source.toLowerCase().startsWith('rgb')) return null;
+      const components = source.match(/[\\d.]+/g);
+      if (!components || components.length < 3) return null;
+      const alpha = components.length > 3 ? Number(components[3]) : 1;
+      if (!Number.isFinite(alpha) || alpha < .98) return null;
+      return components.slice(0, 3).map(Number);
+    };
+    const parentElementOf = (element) => {
+      if (element.parentElement) return element.parentElement;
+      const root = element.getRootNode();
+      return root instanceof ShadowRoot ? root.host : null;
+    };
+    const backgroundOf = (element) => {
+      let current = element;
+      while (current) {
+        const style = getComputedStyle(current);
+        if (style.backgroundImage && style.backgroundImage !== 'none') return null;
+        const color = parseOpaqueRgb(style.backgroundColor);
+        if (color) return color;
+        current = parentElementOf(current);
+      }
+      const rootStyle = getComputedStyle(document.documentElement);
+      if (rootStyle.backgroundImage && rootStyle.backgroundImage !== 'none') return null;
+      return parseOpaqueRgb(rootStyle.backgroundColor) || [255, 255, 255];
+    };
+    const relativeLuminance = (rgb) => {
+      const values = rgb.map((value) => {
+        const component = Math.max(0, Math.min(255, value)) / 255;
+        return component <= .04045 ? component / 12.92 : ((component + .055) / 1.055) ** 2.4;
+      });
+      return .2126 * values[0] + .7152 * values[1] + .0722 * values[2];
+    };
+    const contrastRatio = (foreground, background) => {
+      const foregroundLuminance = relativeLuminance(foreground);
+      const backgroundLuminance = relativeLuminance(background);
+      return (Math.max(foregroundLuminance, backgroundLuminance) + .05) / (Math.min(foregroundLuminance, backgroundLuminance) + .05);
+    };
+    const targetSelector = 'a[href],button,input:not([type="hidden"]),select,textarea,summary,[role="button"],[role="link"],[tabindex]:not([tabindex="-1"])';
+
+    for (const element of nodes) {
+      const style = getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      const displayed = style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || 1) > 0;
+
+      if (element.localName === 'img' && displayed) {
+        if (element.complete && element.naturalWidth === 0) {
+          addFinding('media.image-error', element, rect, 'error', 'Image impossible à charger',
+            'La ressource image a terminé son chargement sans fournir de dimensions naturelles.',
+            'Vérifier le chemin, le fichier et le chargement de l’image, puis prévoir un contenu alternatif.', .99);
+        } else if (element.complete && element.naturalWidth > 0 && element.naturalHeight > 0 && rect.width > 1 && rect.height > 1 && (style.objectFit === 'fill' || style.objectFit === 'none')) {
+          const naturalRatio = element.naturalWidth / element.naturalHeight;
+          const renderedRatio = rect.width / rect.height;
+          const ratioDelta = Math.abs(renderedRatio / naturalRatio - 1);
+          if (ratioDelta > .08) {
+            addFinding('media.image-distortion', element, rect, 'warning', 'Proportions d’image déformées',
+              'Le ratio affiché diffère de ' + Math.round(ratioDelta * 100) + ' % du ratio naturel de la ressource.',
+              'Préserver le ratio de l’image avec une dimension automatique ou un object-fit adapté.', .91);
+          }
+        }
+      }
+
+      if (!visible(style, rect)) continue;
+
+      const beyondViewport = rect.right > viewportWidth + 1 || rect.left < -1;
+      const scrollOverflow = element.clientWidth > 0 && element.scrollWidth > element.clientWidth + 1;
+      if (beyondViewport && style.position !== 'fixed' && style.position !== 'sticky') {
+        recordOverflow(element, rect);
+        addFinding('layout.viewport-overflow', element, rect, 'error', 'Élément hors du viewport',
+          'Le rendu dépasse horizontalement la largeur testée.',
+          'Remplacer les dimensions rigides par des contraintes fluides et limiter la largeur au viewport.', .94);
+      } else if (scrollOverflow && style.overflowX === 'visible' && element !== document.documentElement && element !== document.body) {
+        recordOverflow(element, rect);
+        addFinding('layout.viewport-overflow', element, rect, 'warning', 'Contenu horizontal débordant',
+          'Le contenu est plus large que son conteneur sans mécanisme de défilement.',
+          'Adapter les largeurs minimales, autoriser le retour à la ligne ou ajouter un défilement explicite.', .82);
+      }
+
+      const clipsX = style.overflowX === 'hidden' || style.overflowX === 'clip';
+      const clipsY = style.overflowY === 'hidden' || style.overflowY === 'clip';
+      const clippedX = clipsX && element.clientWidth > 0 && element.scrollWidth > element.clientWidth + 1;
+      const clippedY = clipsY && element.clientHeight > 0 && element.scrollHeight > element.clientHeight + 1;
+      if (clippedX || clippedY) {
+        const hasText = clean(element.textContent).length > 0;
+        const lineClamp = style.webkitLineClamp;
+        const truncationStyle = style.textOverflow === 'ellipsis' || clippedX && style.whiteSpace === 'nowrap' || Boolean(lineClamp && lineClamp !== 'none' && lineClamp !== '0');
+        if (hasText && truncationStyle) {
+          addFinding('layout.truncated-text', element, rect, 'warning', 'Texte potentiellement tronqué',
+            'Le contenu textuel dépasse une zone qui le masque.',
+            'Autoriser le retour à la ligne ou ajuster la limite de lignes et la taille du conteneur au breakpoint concerné.', style.textOverflow === 'ellipsis' ? .9 : .8);
+        } else {
+          addFinding('layout.clipped-content', element, rect, 'warning', 'Contenu rogné par son conteneur',
+            'Une règle overflow masque une partie mesurable du contenu.',
+            'Ajuster la taille du conteneur ou rendre le débordement accessible sans masquer l’information.', .78);
+        }
+      }
+
+      if (viewport.mobile && element.matches(targetSelector) && !element.hasAttribute('disabled') && element.getAttribute('aria-disabled') !== 'true' && style.pointerEvents !== 'none') {
+        if (rect.width < AUDIT_MIN_TARGET_SIZE || rect.height < AUDIT_MIN_TARGET_SIZE) {
+          addFinding('interaction.small-target', element, rect, 'warning', 'Cible tactile trop petite',
+            'La zone interactive mesure ' + round(rect.width) + ' × ' + round(rect.height) + ' px sur ce viewport mobile.',
+            'Porter la zone activable à au moins ' + AUDIT_MIN_TARGET_SIZE + ' × ' + AUDIT_MIN_TARGET_SIZE + ' CSS px, espacement compris.', .84);
+        }
+      }
+
+      if ((style.position === 'fixed' || style.position === 'sticky') && style.pointerEvents !== 'none') fixedCandidates.push({ element, style, rect });
+
+      if (hasOwnText(element)) {
+        if (contrastChecks >= AUDIT_MAX_CONTRAST_CHECKS) {
+          truncated = true;
+        } else {
+          contrastChecks += 1;
+          const foreground = parseOpaqueRgb(style.color);
+          const background = backgroundOf(element);
+          if (foreground && background) {
+            const ratio = contrastRatio(foreground, background);
+            const fontSize = Number.parseFloat(style.fontSize) || 16;
+            const fontWeight = Number.parseInt(style.fontWeight, 10) || (style.fontWeight === 'bold' ? 700 : 400);
+            const largeText = fontSize >= 24 || fontSize >= 18.66 && fontWeight >= 700;
+            const minimumRatio = largeText ? 3 : 4.5;
+            if (ratio < minimumRatio) {
+              addFinding('accessibility.low-contrast', element, rect, 'warning', 'Contraste de texte insuffisant',
+                'Le contraste simple calculé est de ' + round(ratio) + ':1, sous le seuil de ' + minimumRatio + ':1.',
+                'Choisir une couleur de texte ou de fond offrant un contraste suffisant dans ce thème.', .86);
+            }
+          }
+        }
       }
     }
-    const audit = { path: location.pathname + location.search + location.hash, viewportWidth, viewportHeight, documentWidth, overflowCount, overflows };
+
+    if (documentWidth > viewportWidth + 1 && overflowCount === 0) {
+      const rootRect = document.documentElement.getBoundingClientRect();
+      recordOverflow(document.documentElement, rootRect);
+      addFinding('layout.viewport-overflow', document.documentElement, rootRect, 'warning', 'Page plus large que le viewport',
+        'La largeur du document dépasse le viewport sans qu’un élément unique puisse être isolé.',
+        'Inspecter les largeurs minimales, marges et transformations des conteneurs de premier niveau.', .72);
+    }
+
+    for (const candidate of fixedCandidates) {
+      const rect = candidate.rect;
+      const visibleWidth = Math.max(0, Math.min(rect.right, viewportWidth) - Math.max(rect.left, 0));
+      const visibleHeight = Math.max(0, Math.min(rect.bottom, viewportHeight) - Math.max(rect.top, 0));
+      const areaRatio = visibleWidth * visibleHeight / Math.max(1, viewportWidth * viewportHeight);
+      const horizontalBand = visibleWidth >= viewportWidth * .8 && visibleHeight >= viewportHeight * .12;
+      const coversCenter = rect.left <= viewportWidth / 2 && rect.right >= viewportWidth / 2 && rect.top <= viewportHeight / 2 && rect.bottom >= viewportHeight / 2;
+      if (areaRatio >= .22 || horizontalBand || coversCenter) {
+        addFinding('layout.fixed-obstruction', candidate.element, rect, 'warning', 'Élément fixe potentiellement envahissant',
+          'Cet élément fixe ou collant couvre environ ' + Math.round(areaRatio * 100) + ' % du viewport visible.',
+          'Réduire son emprise, le rendre repliable ou réserver explicitement l’espace qu’il occupe.', coversCenter || horizontalBand ? .84 : .74);
+      }
+    }
+
+    const audit = {
+      version: 2,
+      path: route,
+      route,
+      viewportWidth,
+      viewportHeight,
+      viewport,
+      documentWidth,
+      overflowCount,
+      overflows,
+      findingCount: findings.length,
+      findings,
+      inspectedNodes: nodes.length,
+      truncated,
+      limits: {
+        maxNodes: AUDIT_MAX_NODES,
+        maxFindings: AUDIT_MAX_FINDINGS,
+        maxFindingsPerRule: AUDIT_MAX_FINDINGS_PER_RULE,
+        maxLegacyOverflows: AUDIT_MAX_LEGACY_OVERFLOWS,
+        maxContrastChecks: AUDIT_MAX_CONTRAST_CHECKS
+      }
+    };
     message('audit', { ...audit, audit });
   };
   const renderStatus = (stable) => {
@@ -294,7 +535,9 @@ const bridge = `<style data-responsiver-bridge-style>
     } catch { message('navigation-error', { value: String(value) }); }
   };
   const clearReveal = () => {
-    for (const element of document.querySelectorAll('[' + revealAttribute + ']')) element.removeAttribute(revealAttribute);
+    for (const element of composedElements(document.documentElement, AUDIT_MAX_NODES)) {
+      if (element.hasAttribute(revealAttribute)) element.removeAttribute(revealAttribute);
+    }
   };
   const rememberThemeState = () => {
     if (originalThemeState) return;
@@ -382,11 +625,16 @@ const bridge = `<style data-responsiver-bridge-style>
     const withoutPseudoElement = requestedSelector.replace(/::[a-z-]+(?:\\([^)]*\\))?/gi, '').trim();
     const normalizedSelector = normalizeRevealSelector(requestedSelector);
     const candidates = [...new Set([requestedSelector, withoutPseudoElement, normalizedSelector].filter(Boolean))];
+    const composed = composedElements(document.documentElement, AUDIT_MAX_NODES);
     let target = null;
     let resolvedSelector = null;
     for (const candidate of candidates) {
       try {
         const matches = [...document.querySelectorAll(candidate)];
+        const knownMatches = new Set(matches);
+        for (const element of composed) {
+          if (!knownMatches.has(element) && element.matches(candidate)) matches.push(element);
+        }
         target = matches.find((element) => {
           const rectangle = element.getBoundingClientRect();
           const style = getComputedStyle(element);

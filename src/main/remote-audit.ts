@@ -22,6 +22,8 @@ export interface RemoteAuditViewport {
 export interface RemoteAuditRoute {
   url: string
   pathname: string
+  /** pathname, query et hash de la route auditée. */
+  path: string
 }
 
 export interface RemoteAuditRect {
@@ -60,6 +62,8 @@ export interface RemoteAuditResult {
   viewport: RemoteAuditViewport
   scannedNodes: number
   truncated: boolean
+  maxNodes: number
+  maxFindings: number
   findings: readonly RemoteAuditFinding[]
 }
 
@@ -176,7 +180,11 @@ const REMOTE_AUDIT_COLLECTOR_TEMPLATE = String.raw`(() => {
     height: Math.max(1, Math.round(window.innerHeight || document.documentElement.clientHeight || 1)),
     deviceScaleFactor: Math.max(0.1, Math.min(8, Number(window.devicePixelRatio) || 1))
   };
-  const route = { url: String(location.href).slice(0, 4096), pathname: String(location.pathname).slice(0, 2048) };
+  const route = {
+    url: String(location.href).slice(0, 4096),
+    pathname: String(location.pathname).slice(0, 2048),
+    path: String(location.pathname + location.search + location.hash).slice(0, 4096)
+  };
   const findings = [];
   let truncated = false;
   let scannedNodes = 0;
@@ -272,8 +280,7 @@ const REMOTE_AUDIT_COLLECTOR_TEMPLATE = String.raw`(() => {
   const hasOwnText = (element) => Array.from(element.childNodes || []).some((node) => node.nodeType === 3 && String(node.nodeValue || '').trim().length > 0);
   const targetSelector = 'a[href],button,input:not([type="hidden"]),select,textarea,summary,[role="button"],[role="link"],[tabindex]:not([tabindex="-1"])';
   const fixedCandidates = [];
-  const nodes = Array.from(document.querySelectorAll('*'));
-  if (nodes.length > options.maxNodes) truncated = true;
+  const walker = document.createTreeWalker(document.documentElement, NodeFilter.SHOW_ELEMENT);
 
   if (options.mobile) {
     const viewportMeta = document.querySelector('meta[name="viewport" i]');
@@ -289,7 +296,8 @@ const REMOTE_AUDIT_COLLECTOR_TEMPLATE = String.raw`(() => {
     }
   }
 
-  for (const element of nodes.slice(0, options.maxNodes)) {
+  let element = walker.currentNode;
+  for (; element && scannedNodes < options.maxNodes; element = walker.nextNode()) {
     if (findings.length >= options.maxFindings) { truncated = true; break; }
     scannedNodes += 1;
     const style = getComputedStyle(element);
@@ -397,6 +405,7 @@ const REMOTE_AUDIT_COLLECTOR_TEMPLATE = String.raw`(() => {
       }
     }
   }
+  if (element) truncated = true;
 
   for (const candidate of fixedCandidates) {
     if (findings.length >= options.maxFindings) { truncated = true; break; }
@@ -420,7 +429,7 @@ const REMOTE_AUDIT_COLLECTOR_TEMPLATE = String.raw`(() => {
       0.98, 'error', 'runtime');
   }
 
-  return { version: 1, route, viewport, scannedNodes, truncated, findings };
+  return { version: 1, route, viewport, scannedNodes, truncated, maxNodes: options.maxNodes, maxFindings: options.maxFindings, findings };
 })()`
 
 /** Script autonome à exécuter dans le monde de la page après stabilisation du rendu. */
@@ -512,7 +521,11 @@ export function sanitizeRemoteAuditResult(raw: unknown, context: SanitizeRemoteA
     ? finiteNumber(context.viewport.deviceScaleFactor, 0.1, 8, 1)
     : 1
   const trustedUrl = new URL(context.url)
-  const route: RemoteAuditRoute = { url: trustedUrl.href.slice(0, 4_096), pathname: trustedUrl.pathname.slice(0, 2_048) }
+  const route: RemoteAuditRoute = {
+    url: trustedUrl.href.slice(0, 4_096),
+    pathname: trustedUrl.pathname.slice(0, 2_048),
+    path: `${trustedUrl.pathname}${trustedUrl.search}${trustedUrl.hash}`.slice(0, 4_096)
+  }
   const viewport: RemoteAuditViewport = { width, height, deviceScaleFactor }
   const maximum = clampInteger(context.maxFindings, 1, ABSOLUTE_MAX_FINDINGS, DEFAULT_MAX_FINDINGS)
   const rawFindings = Array.isArray(source.findings) ? source.findings : []
@@ -547,6 +560,8 @@ export function sanitizeRemoteAuditResult(raw: unknown, context: SanitizeRemoteA
     viewport,
     scannedNodes: clampInteger(source.scannedNodes, 0, maxScannedNodes, 0),
     truncated: source.truncated === true || rawFindings.length > maximum,
+    maxNodes: maxScannedNodes,
+    maxFindings: maximum,
     findings
   }
 }

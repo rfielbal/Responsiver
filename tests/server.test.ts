@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { startProjectServer } from '../src/main/project-server.ts'
+import { LOCAL_RUNTIME_AUDIT_LIMITS, startProjectServer } from '../src/main/project-server.ts'
 
 function requestWithHost(origin: string, path: string, host: string, method = 'GET'): Promise<{ status: number; body: string }> {
   const url = new URL(path, origin)
@@ -39,7 +39,26 @@ test('le runner sert uniquement localhost, injecte le bridge et gère les média
   assert.match(pageBody, /render-status/)
   assert.match(pageBody, /runtimeErrors\.length >= 12/)
   assert.match(pageBody, /element\.shadowRoot/)
+  assert.match(pageBody, /document\.createTreeWalker/)
   assert.match(pageBody, /'::before', '::after'/)
+  assert.match(pageBody, /const seenFindings = new Set\(\)/)
+  assert.match(pageBody, /findingCount: findings\.length/)
+  assert.match(pageBody, /proposal: clean\(proposal/)
+  assert.match(pageBody, /confidence: Math\.max/)
+  assert.match(pageBody, /route,\s+viewport/)
+  assert.match(pageBody, /layout\.viewport-overflow/)
+  assert.match(pageBody, /layout\.clipped-content/)
+  assert.match(pageBody, /layout\.truncated-text/)
+  assert.match(pageBody, /interaction\.small-target/)
+  assert.match(pageBody, /layout\.fixed-obstruction/)
+  assert.match(pageBody, /media\.image-error/)
+  assert.match(pageBody, /media\.image-distortion/)
+  assert.match(pageBody, /accessibility\.low-contrast/)
+  assert.match(pageBody, new RegExp('const AUDIT_MAX_NODES = ' + LOCAL_RUNTIME_AUDIT_LIMITS.maxNodes))
+  assert.match(pageBody, new RegExp('const AUDIT_MAX_FINDINGS = ' + LOCAL_RUNTIME_AUDIT_LIMITS.maxFindings))
+  assert.match(pageBody, new RegExp('const AUDIT_MAX_FINDINGS_PER_RULE = ' + LOCAL_RUNTIME_AUDIT_LIMITS.maxFindingsPerRule))
+  assert.match(pageBody, new RegExp('const AUDIT_MAX_LEGACY_OVERFLOWS = ' + LOCAL_RUNTIME_AUDIT_LIMITS.maxLegacyOverflows))
+  assert.match(pageBody, new RegExp('const AUDIT_MAX_CONTRAST_CHECKS = ' + LOCAL_RUNTIME_AUDIT_LIMITS.maxContrastChecks))
   const bridgeSource = pageBody.match(/<script data-responsiver-bridge>([\s\S]*?)<\/script>/)?.[1]
   assert.ok(bridgeSource)
   assert.doesNotThrow(() => new Function(bridgeSource))
