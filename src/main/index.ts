@@ -3,12 +3,16 @@ import { createHash } from 'node:crypto'
 import { cp, lstat, mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
 import { dirname, extname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import type { ExportResult, ProjectPreparationProgress, ProjectSnapshot, RecentProjectSummary, StagingRequest, StagingSnapshot } from '../shared/contracts'
+import type { ExportResult, LocalAiRequest, LocalAiResponse, LocalAiStatus, ProjectPreparationProgress, ProjectSnapshot, RecentProjectSummary, RemoteAuditResult, RemoteOpenRequest, RemotePageState, RemoteViewBounds, RemoteViewport, StagingRequest, StagingSnapshot, WorkspaceApplyResult, WorkspaceDiff, WorkspaceFileSnapshot, WorkspaceFileSummary, WorkspaceSnapshot } from '../shared/contracts'
 import { analyzeProject, createDemoProject } from './project-analyzer'
 import { startProjectServer, type ProjectServer } from './project-server'
 import { buildProjectStaging, type ProjectStaging } from './project-transformer'
 import { createRecentProjectsStore, recentProjectId, type RecentProjectsStore } from './recent-projects'
 import { assertPrivateExportDirectory, reservePrivateExportDirectory } from './secure-export'
+import { RemoteBrowserSession } from './remote-session'
+import { createWorkspaceEditor, type WorkspaceEditor } from './workspace-editor'
+import { probeLocalAi, sendLocalAiRequest } from './local-ai'
+import { resolveExtensionInbox, startExtensionInboxWatcher, type ExtensionOpenUrlRequest } from './extension-inbox'
 
 interface ActiveProjectSession {
   root: string
@@ -18,7 +22,10 @@ interface ActiveProjectSession {
   sourceServer: ProjectServer | null
   proposalServer: ProjectServer | null
   stagedServer: ProjectServer | null
+  workspaceServer: ProjectServer | null
   staging: ProjectStaging | null
+  remoteBrowser: RemoteBrowserSession | null
+  workspace: WorkspaceEditor | null
 }
 
 interface NormalizedProjectSelection {
@@ -31,6 +38,7 @@ let mainWindow: BrowserWindow | undefined
 let activeSession: ActiveProjectSession | null = null
 let recentProjectsStore: RecentProjectsStore | null = null
 let sessionQueue: Promise<void> = Promise.resolve()
+let extensionInboxWatcher: ReturnType<typeof startExtensionInboxWatcher> | null = null
 const knownPreviewOrigins = new Set<string>()
 const maxClipboardLength = 10 * 1024 * 1024
 const ignoredCopyDirectories = new Set(['.git', 'node_modules'])
@@ -110,7 +118,9 @@ async function disposeSession(session: ActiveProjectSession | null): Promise<voi
   await Promise.all([
     closePreviewServer(session.sourceServer),
     closePreviewServer(session.proposalServer),
-    closePreviewServer(session.stagedServer)
+    closePreviewServer(session.stagedServer),
+    closePreviewServer(session.workspaceServer),
+    session.remoteBrowser?.close()
   ])
 }
 
@@ -181,7 +191,10 @@ async function createLocalSession(selection: NormalizedProjectSelection): Promis
     sourceServer,
     proposalServer: null,
     stagedServer: null,
-    staging: null
+    workspaceServer: null,
+    staging: null,
+    remoteBrowser: null,
+    workspace: null
   }
 }
 
@@ -227,8 +240,158 @@ async function openDemoProject(): Promise<ProjectSnapshot> {
   if (demoRoot) return openLocalProject({ root: demoRoot, selectionPath: demoRoot, preferredEntryPath: '/index.html' }, false)
   if (!mainWindow) throw new Error('La fenêtre Responsiver a été fermée pendant l’ouverture de la démonstration.')
   const project = createDemoProject()
-  await replaceActiveSession({ root: '', selectionPath: null, recentId: null, project, sourceServer: null, proposalServer: null, stagedServer: null, staging: null })
+  await replaceActiveSession({ root: '', selectionPath: null, recentId: null, project, sourceServer: null, proposalServer: null, stagedServer: null, workspaceServer: null, staging: null, remoteBrowser: null, workspace: null })
   return project
+}
+
+function notifyRemoteState(state: RemotePageState): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  mainWindow.webContents.send('remote:state', state)
+}
+
+async function normalizeLinkedRoot(value: unknown): Promise<string | null> {
+  if (value === null || value === undefined || value === '') return null
+  if (typeof value !== 'string' || value.length > 4_096 || value.includes('\0')) throw new Error('Le dossier associé au localhost est invalide.')
+  const root = await realpath(value).catch(() => null)
+  if (!root || !(await stat(root).catch(() => null))?.isDirectory()) throw new Error('Le dossier associé au localhost est introuvable.')
+  return root
+}
+
+function validRemoteOpenRequest(value: unknown): value is RemoteOpenRequest {
+  if (!value || typeof value !== 'object') return false
+  const request = value as Partial<RemoteOpenRequest>
+  return typeof request.url === 'string' && request.url.length > 0 && request.url.length <= 4_096 &&
+    (request.mode === 'public' || request.mode === 'localhost') &&
+    (request.linkedRoot === undefined || request.linkedRoot === null || typeof request.linkedRoot === 'string')
+}
+
+async function openRemoteProject(value: unknown): Promise<ProjectSnapshot> {
+  if (!validRemoteOpenRequest(value)) throw new Error('La demande d’ouverture URL est invalide.')
+  if (!mainWindow || mainWindow.isDestroyed()) throw new Error('La fenêtre Responsiver est indisponible.')
+  notifyProjectPreparation({ phase: 'selection', step: 1, total: 4, label: 'Validation de l’URL', detail: value.mode === 'public' ? 'Vérification HTTPS et résolution publique avant toute navigation.' : 'Vérification de la boucle locale et du dossier éventuellement associé.' })
+  const linkedRoot = value.mode === 'localhost' ? await normalizeLinkedRoot(value.linkedRoot) : null
+  notifyProjectPreparation({ phase: 'preview', step: 2, total: 4, label: 'Création de la session isolée', detail: 'Chromium prépare une partition éphémère sans accès Node, fichier ou IPC.' })
+  const remoteBrowser = await RemoteBrowserSession.create({
+    owner: mainWindow,
+    request: value,
+    linkedRoot,
+    onState: notifyRemoteState,
+    onBlockedNavigation: (url, detail) => {
+      if (!mainWindow || mainWindow.isDestroyed()) return
+      mainWindow.webContents.send('remote:blocked-navigation', { url, detail })
+    }
+  })
+  const project = remoteBrowser.projectSnapshot()
+  const next: ActiveProjectSession = {
+    root: linkedRoot ?? '',
+    selectionPath: linkedRoot,
+    recentId: null,
+    project,
+    sourceServer: null,
+    proposalServer: null,
+    stagedServer: null,
+    workspaceServer: null,
+    staging: null,
+    remoteBrowser,
+    workspace: null
+  }
+  await replaceActiveSession(next)
+  notifyProjectPreparation({ phase: 'responsive', step: 3, total: 4, label: 'Rendu distant prêt', detail: 'La page est navigable. L’audit visuel se lancera dans les viewports sélectionnés.' })
+  notifyProjectPreparation({ phase: 'ready', step: 4, total: 4, label: 'Laboratoire prêt', detail: linkedRoot ? 'Le localhost est associé à ses sources locales modifiables.' : 'La page est ouverte en lecture seule dans une session éphémère.' })
+  return project
+}
+
+function currentRemoteSession(): { session: ActiveProjectSession; browser: RemoteBrowserSession } {
+  const session = currentSession()
+  if (!session.remoteBrowser) throw new Error('Aucune session URL n’est active.')
+  return { session, browser: session.remoteBrowser }
+}
+
+async function runRemoteAudit(value: unknown): Promise<RemoteAuditResult> {
+  if (!Array.isArray(value) || value.length > 8) throw new Error('La matrice de viewports est invalide.')
+  const viewports: RemoteViewport[] = value.map((entry) => {
+    if (!entry || typeof entry !== 'object') throw new Error('Un viewport est invalide.')
+    const viewport = entry as Partial<RemoteViewport>
+    if (typeof viewport.width !== 'number' || typeof viewport.height !== 'number') throw new Error('Les dimensions du viewport sont invalides.')
+    return viewport as RemoteViewport
+  })
+  const { session, browser } = currentRemoteSession()
+  const result = await browser.audit(viewports)
+  if (activeSession !== session) throw new Error('La session a changé pendant l’audit distant.')
+  const currentState = browser.getState()
+  const currentUrl = new URL(currentState.url)
+  session.project = {
+    ...browser.projectSnapshot(result.findings),
+    routes: [{ path: currentState.path, label: currentUrl.pathname === '/' ? currentUrl.hostname : currentUrl.pathname, title: currentState.title, theme: 'unknown' }],
+    analysis: { truncated: result.findings.length >= 500, scannedFiles: 0, scannedStyles: 0 }
+  }
+  return result
+}
+
+function assertExpectedProject(session: ActiveProjectSession, expectedProjectId: unknown): void {
+  if (typeof expectedProjectId !== 'string' || expectedProjectId.length > 300 || expectedProjectId !== session.project.id) {
+    throw new Error('La session projet a changé. Rechargez l’espace code avant de continuer.')
+  }
+}
+
+async function workspaceForSession(expectedProjectId: unknown): Promise<{ session: ActiveProjectSession; workspace: WorkspaceEditor }> {
+  const session = currentEditableSession()
+  assertExpectedProject(session, expectedProjectId)
+  if (!session.workspace) session.workspace = await createWorkspaceEditor(session.root)
+  if (activeSession !== session) throw new Error('La session projet a changé pendant l’ouverture de l’espace code.')
+  return { session, workspace: session.workspace }
+}
+
+async function refreshWorkspacePreview(session: ActiveProjectSession): Promise<string | null> {
+  const workspace = session.workspace
+  if (!workspace) return null
+  const overrides = workspace.getOverrides()
+  if (session.remoteBrowser) {
+    const css = [...overrides.entries()]
+      .filter(([path]) => path.toLowerCase().endsWith('.css'))
+      .map(([path, body]) => `/* ${path} — aperçu Responsiver */\n${body.toString('utf8')}`)
+      .join('\n\n')
+    await session.remoteBrowser.setWorkspaceCss(css)
+    return null
+  }
+  const previous = session.workspaceServer
+  if (overrides.size === 0 || !session.project.entryPath) {
+    session.workspaceServer = null
+    await closePreviewServer(previous)
+    mainWindow?.webContents.send('workspace:preview-origin', null)
+    return null
+  }
+  const server = await startProjectServer(session.root, { mode: 'proposal', overrides, previewBasePath: session.project.previewBasePath ?? undefined })
+  knownPreviewOrigins.add(server.origin)
+  session.workspaceServer = server
+  await closePreviewServer(previous)
+  mainWindow?.webContents.send('workspace:preview-origin', server.origin)
+  return server.origin
+}
+
+function validWorkspacePath(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 2_000 && !value.includes('\0')
+}
+
+async function workspaceFile(expectedProjectId: unknown, value: unknown): Promise<WorkspaceFileSnapshot> {
+  if (!validWorkspacePath(value)) throw new Error('Le fichier demandé est invalide.')
+  const { session, workspace } = await workspaceForSession(expectedProjectId)
+  const file = await workspace.readFile(value)
+  if (activeSession !== session) throw new Error('La session projet a changé pendant la lecture du fichier.')
+  return { ...file, diff: await workspace.getDiff(value), previewOrigin: session.workspaceServer?.origin ?? null }
+}
+
+async function replaceWorkspaceFile(expectedProjectId: unknown, value: unknown): Promise<WorkspaceFileSnapshot> {
+  if (!value || typeof value !== 'object') throw new Error('La modification de fichier est invalide.')
+  const request = value as { path?: unknown; content?: unknown; expectedVersion?: unknown }
+  if (!validWorkspacePath(request.path) || typeof request.content !== 'string' || request.content.length > 4 * 1024 * 1024 || (request.expectedVersion !== undefined && (!Number.isSafeInteger(request.expectedVersion) || Number(request.expectedVersion) < 1))) {
+    throw new Error('La modification de fichier est invalide ou trop volumineuse.')
+  }
+  const { session, workspace } = await workspaceForSession(expectedProjectId)
+  const file = await workspace.replaceFile(request.path, request.content, request.expectedVersion as number | undefined)
+  if (activeSession !== session) throw new Error('La session projet a changé pendant la préparation du fichier.')
+  const previewOrigin = await refreshWorkspacePreview(session)
+  return { ...file, diff: await workspace.getDiff(request.path), previewOrigin }
 }
 
 function validStagingRequest(value: unknown): value is StagingRequest {
@@ -240,8 +403,14 @@ function validStagingRequest(value: unknown): value is StagingRequest {
 }
 
 function currentSession(): ActiveProjectSession {
-  if (!activeSession || !activeSession.root) throw new Error('Ouvrez d’abord un projet local dans Responsiver.')
+  if (!activeSession) throw new Error('Ouvrez d’abord un projet ou une URL dans Responsiver.')
   return activeSession
+}
+
+function currentEditableSession(): ActiveProjectSession {
+  const session = currentSession()
+  if (!session.root || session.project.source.readOnly) throw new Error('Cette session est disponible en lecture seule.')
+  return session
 }
 
 async function buildStaging(value: unknown): Promise<StagingSnapshot> {
@@ -550,6 +719,39 @@ function createWindow(): void {
   else void mainWindow.loadFile(rendererFile)
 }
 
+async function waitForRenderer(window: BrowserWindow): Promise<void> {
+  if (!window.webContents.isLoadingMainFrame()) return
+  await new Promise<void>((resolve) => window.webContents.once('did-finish-load', () => resolve()))
+}
+
+function extensionMode(url: string): 'public' | 'localhost' {
+  const hostname = new URL(url).hostname.toLowerCase().replace(/^\[|\]$/g, '')
+  return hostname === 'localhost' || hostname.endsWith('.localhost') || hostname === '::1' || /^127(?:\.\d{1,3}){3}$/.test(hostname)
+    ? 'localhost'
+    : 'public'
+}
+
+async function openExtensionRequest(request: ExtensionOpenUrlRequest): Promise<void> {
+  if (!mainWindow || mainWindow.isDestroyed()) createWindow()
+  const window = mainWindow
+  if (!window) throw new Error('La fenêtre Responsiver est indisponible.')
+  await waitForRenderer(window)
+  const project = await queueSessionOperation(() => openRemoteProject({ url: request.url, mode: extensionMode(request.url), linkedRoot: null }))
+  window.webContents.send('extension:open-project', {
+    project,
+    viewport: {
+      width: request.viewport.width,
+      height: request.viewport.height,
+      deviceScaleFactor: request.viewport.devicePixelRatio,
+      mobile: request.viewport.width < 700,
+      touch: request.viewport.width < 1_100
+    }
+  })
+  if (window.isMinimized()) window.restore()
+  window.show()
+  window.focus()
+}
+
 function registerIpcHandlers(): void {
   ipcMain.handle('project:choose', async (event): Promise<ProjectSnapshot | null> => {
     const owner = requireTrustedWindow(event)
@@ -573,6 +775,17 @@ function registerIpcHandlers(): void {
     })
     if (selection.canceled || !selection.filePaths[0]) return null
     return queueSessionOperation(() => prepareLocalProject(selection.filePaths[0]))
+  })
+  ipcMain.handle('project:choose-linked-root', async (event): Promise<string | null> => {
+    const owner = requireTrustedWindow(event)
+    const selection = await dialog.showOpenDialog(owner, {
+      title: 'Associer les sources du serveur localhost',
+      message: 'Choisissez la racine locale du projet servi par votre serveur déjà lancé.',
+      buttonLabel: 'Associer ce dossier',
+      properties: ['openDirectory']
+    })
+    if (selection.canceled || !selection.filePaths[0]) return null
+    return realpath(selection.filePaths[0])
   })
 
   ipcMain.handle('project:open-path', async (event, path: unknown): Promise<ProjectSnapshot> => {
@@ -605,6 +818,92 @@ function registerIpcHandlers(): void {
       return recentStore().list(activeSession?.recentId)
     })
   })
+  ipcMain.handle('remote:open', async (event, request: unknown): Promise<ProjectSnapshot> => {
+    requireTrustedWindow(event)
+    return queueSessionOperation(() => openRemoteProject(request))
+  })
+  ipcMain.handle('remote:set-bounds', async (event, bounds: unknown): Promise<void> => {
+    requireTrustedWindow(event)
+    if (!bounds || typeof bounds !== 'object') throw new Error('Les limites de la preview distante sont invalides.')
+    await currentRemoteSession().browser.setViewBounds(bounds as RemoteViewBounds)
+  })
+  ipcMain.handle('remote:navigate', async (event, action: unknown, value: unknown): Promise<RemotePageState> => {
+    requireTrustedWindow(event)
+    if (action !== 'back' && action !== 'forward' && action !== 'reload' && action !== 'url') throw new Error('L’action de navigation est invalide.')
+    if (action === 'url' && (typeof value !== 'string' || value.length > 4_096)) throw new Error('L’URL de navigation est invalide.')
+    return currentRemoteSession().browser.navigate(action, typeof value === 'string' ? value : undefined)
+  })
+  ipcMain.handle('remote:state', (event): RemotePageState => {
+    requireTrustedWindow(event)
+    return currentRemoteSession().browser.getState()
+  })
+  ipcMain.handle('remote:audit', async (event, viewports: unknown): Promise<RemoteAuditResult> => {
+    requireTrustedWindow(event)
+    return queueSessionOperation(() => runRemoteAudit(viewports))
+  })
+  ipcMain.handle('remote:focus', async (event, selector: unknown): Promise<boolean> => {
+    requireTrustedWindow(event)
+    return currentRemoteSession().browser.focusSelector(selector)
+  })
+  ipcMain.handle('workspace:list', async (event, projectId: unknown): Promise<WorkspaceFileSummary[]> => {
+    requireTrustedWindow(event)
+    return (await workspaceForSession(projectId)).workspace.listFiles()
+  })
+  ipcMain.handle('workspace:read', async (event, projectId: unknown, path: unknown): Promise<WorkspaceFileSnapshot> => {
+    requireTrustedWindow(event)
+    return workspaceFile(projectId, path)
+  })
+  ipcMain.handle('workspace:replace', async (event, projectId: unknown, request: unknown): Promise<WorkspaceFileSnapshot> => {
+    requireTrustedWindow(event)
+    return replaceWorkspaceFile(projectId, request)
+  })
+  ipcMain.handle('workspace:discard', async (event, projectId: unknown, path: unknown, expectedVersion: unknown): Promise<WorkspaceFileSnapshot> => {
+    requireTrustedWindow(event)
+    if (!validWorkspacePath(path) || (expectedVersion !== undefined && (!Number.isSafeInteger(expectedVersion) || Number(expectedVersion) < 1))) throw new Error('La demande d’annulation est invalide.')
+    const { session, workspace } = await workspaceForSession(projectId)
+    const file = await workspace.discard(path, expectedVersion as number | undefined)
+    if (activeSession !== session) throw new Error('La session projet a changé pendant l’annulation du fichier.')
+    const previewOrigin = await refreshWorkspacePreview(session)
+    return { ...file, diff: await workspace.getDiff(path), previewOrigin }
+  })
+  ipcMain.handle('workspace:snapshot', async (event, projectId: unknown): Promise<WorkspaceSnapshot> => {
+    requireTrustedWindow(event)
+    return (await workspaceForSession(projectId)).workspace.getSnapshot()
+  })
+  ipcMain.handle('workspace:diff', async (event, projectId: unknown, path: unknown): Promise<WorkspaceDiff> => {
+    requireTrustedWindow(event)
+    if (!validWorkspacePath(path)) throw new Error('Le fichier demandé est invalide.')
+    return (await workspaceForSession(projectId)).workspace.getDiff(path)
+  })
+  ipcMain.handle('workspace:apply-file', async (event, projectId: unknown, path: unknown, expectedVersion: unknown): Promise<WorkspaceApplyResult> => {
+    requireTrustedWindow(event)
+    if (!validWorkspacePath(path) || (expectedVersion !== undefined && (!Number.isSafeInteger(expectedVersion) || Number(expectedVersion) < 1))) throw new Error('La demande d’application est invalide.')
+    const { session, workspace } = await workspaceForSession(projectId)
+    const result = await workspace.applyFile(path, expectedVersion as number | undefined)
+    if (activeSession !== session) throw new Error('La session projet a changé pendant l’application du fichier.')
+    await refreshWorkspacePreview(session)
+    if (session.remoteBrowser) session.remoteBrowser.navigate('reload').catch(() => undefined)
+    mainWindow?.webContents.send('workspace:applied', [result.path])
+    return result
+  })
+  ipcMain.handle('workspace:apply-all', async (event, projectId: unknown): Promise<WorkspaceApplyResult[]> => {
+    requireTrustedWindow(event)
+    const { session, workspace } = await workspaceForSession(projectId)
+    const results = await workspace.applyAll()
+    if (activeSession !== session) throw new Error('La session projet a changé pendant l’application des fichiers.')
+    await refreshWorkspacePreview(session)
+    if (session.remoteBrowser) session.remoteBrowser.navigate('reload').catch(() => undefined)
+    mainWindow?.webContents.send('workspace:applied', results.map((result) => result.path))
+    return results
+  })
+  ipcMain.handle('ai:local-probe', async (event, provider: unknown, endpoint: unknown): Promise<LocalAiStatus> => {
+    requireTrustedWindow(event)
+    return probeLocalAi(provider, endpoint)
+  })
+  ipcMain.handle('ai:local-send', async (event, request: unknown): Promise<LocalAiResponse> => {
+    requireTrustedWindow(event)
+    return sendLocalAiRequest(request as LocalAiRequest)
+  })
   ipcMain.handle('staging:build', async (event, request: unknown): Promise<StagingSnapshot> => {
     requireTrustedWindow(event)
     return queueSessionOperation(() => buildStaging(request))
@@ -632,12 +931,29 @@ function registerIpcHandlers(): void {
   })
 }
 
-app.whenReady().then(() => {
+const ownsInstanceLock = app.requestSingleInstanceLock()
+if (!ownsInstanceLock) app.quit()
+
+app.on('second-instance', () => {
+  const window = mainWindow
+  if (window) {
+    if (window.isMinimized()) window.restore()
+    window.show()
+    window.focus()
+  }
+  void extensionInboxWatcher?.poll()
+})
+
+app.whenReady().then(async () => {
+  if (!ownsInstanceLock) return
   app.setName('Responsiver')
   registerIpcHandlers()
   createWindow()
+  extensionInboxWatcher = startExtensionInboxWatcher(resolveExtensionInbox(app.getPath('userData')), openExtensionRequest)
+  await extensionInboxWatcher.poll().catch(() => 0)
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    void extensionInboxWatcher?.poll()
   })
 })
 
@@ -646,6 +962,8 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
+  extensionInboxWatcher?.close()
+  extensionInboxWatcher = null
   const session = activeSession
   activeSession = null
   void disposeSession(session)

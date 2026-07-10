@@ -1503,6 +1503,7 @@ export async function analyzeProject(root: string, options: AnalyzeProjectOption
           : 'Dossier sans page HTML directement prévisualisable',
     files: new Set([...sourceFiles, ...analysisFiles]).size,
     analyzedAt: new Date().toISOString(),
+    source: { kind: 'local-project', readOnly: false, url: null, localRoot: normalizedRoot, network: 'local-only' },
     issues,
     previewHtml: null,
     previewOrigin: null,
@@ -1553,6 +1554,7 @@ export function createDemoProject(): ProjectSnapshot {
     kind: 'Démo statique',
     files: 4,
     analyzedAt: new Date().toISOString(),
+    source: { kind: 'local-project', readOnly: true, url: null, localRoot: 'Projet de démonstration local', network: 'local-only' },
     previewOrigin: null,
     previewBasePath: null,
     previewReadiness: {

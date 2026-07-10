@@ -179,6 +179,33 @@ try {
   const sourceOrigin = new URL(await page.locator('.stage-canvas iframe').first().getAttribute('src')).origin
   console.log('E2E · démo ouverte dans le runner local')
 
+  await page.getByRole('button', { name: 'Code', exact: true }).click()
+  const liveCodeFrame = page.locator('.code-live-preview iframe')
+  await liveCodeFrame.waitFor({ state: 'visible' })
+  assert.equal(new URL(await liveCodeFrame.getAttribute('src')).origin, sourceOrigin)
+  await page.locator('.code-files button').filter({ hasText: 'styles.css' }).click()
+  const monacoEditor = page.locator('.monaco-editor').first()
+  await monacoEditor.waitFor({ state: 'visible' })
+  await monacoEditor.click({ position: { x: 180, y: 120 } })
+  await page.keyboard.press('Control+End')
+  await page.keyboard.type('\n/* aperçu code e2e */\n')
+  const stylesEntry = page.locator('.code-files button').filter({ hasText: 'styles.css' })
+  await stylesEntry.locator('i.is-dirty').waitFor({ state: 'visible' })
+  await page.waitForFunction((originalOrigin) => {
+    const frame = document.querySelector('.code-live-preview iframe')
+    return frame?.src && new URL(frame.src).origin !== originalOrigin
+  }, sourceOrigin)
+  await page.locator('.code-page').screenshot({ path: join(root, 'output', 'playwright', 'electron-code-studio.png'), animations: 'disabled' })
+  await page.getByRole('button', { name: 'Écarter', exact: true }).click()
+  await stylesEntry.locator('i.is-dirty').waitFor({ state: 'detached' })
+  await page.waitForFunction((originalOrigin) => {
+    const frame = document.querySelector('.code-live-preview iframe')
+    return frame?.src && new URL(frame.src).origin === originalOrigin
+  }, sourceOrigin)
+  await page.getByRole('button', { name: 'Laboratoire', exact: true }).click()
+  await page.locator('.stage-canvas iframe').first().waitFor({ state: 'visible' })
+  console.log('E2E · studio code, overlay temps réel et annulation vérifiés')
+
   // La navigation est exercée dans le site, et non simulée depuis le sélecteur de Responsiver.
   await sourceFrame.getByRole('link', { name: 'Journal', exact: true }).evaluate((link) => link.click())
   await waitForActivePath('/journal.html')
@@ -357,7 +384,7 @@ try {
 
   await page.getByRole('button', { name: 'Appareil', exact: true }).click()
   const stagingOriginBeforeInstruction = new URL(await page.locator('.stage-canvas iframe').first().getAttribute('src')).origin
-  await page.getByRole('tab', { name: 'Conversation' }).click()
+  await page.getByRole('tab', { name: 'Assistant' }).click()
   await page.getByLabel('Nouvel ajustement').fill('Mets les angles droits sur les composants')
   await page.getByRole('button', { name: 'Prévisualiser' }).click()
   await page.locator('.message--system').filter({ hasText: 'Ajustement interprété et affiché en proposition' }).waitFor({ state: 'visible' })
@@ -379,7 +406,7 @@ try {
   await page.getByRole('button', { name: 'Construire le staging' }).click()
   await page.locator('.staging-summary').waitFor({ state: 'visible' })
   await dismissToast()
-  console.log('E2E · conversation locale prévisualisée, validée et reconstruite')
+  console.log('E2E · ajustement déterministe prévisualisé, validé et reconstruit')
 
   await page.getByRole('button', { name: /^Révision/ }).click()
   await page.locator('.visual-comparison').waitFor({ state: 'visible' })
@@ -420,7 +447,7 @@ try {
   for (const [file, source] of sourcesBefore) assert.equal(await readFile(join(demoRoot, file), 'utf8'), source, `${file} ne doit pas être modifié.`)
   assert.ok(pageErrors.includes('Erreur de montage contrôlée'))
   assert.deepEqual(pageErrors.filter((message) => message !== 'Erreur de montage contrôlée'), [])
-  process.stdout.write('E2E Electron v0.5 : import qualifié, smoke-test runtime, historique, navigation, propositions, thème, redimensionnement, staging, révision et export — OK\n')
+  process.stdout.write('E2E Electron v0.6 : import qualifié, smoke-test runtime, historique, navigation, propositions, thème, redimensionnement, staging, révision et export — OK\n')
 } finally {
   await application.close()
   await rm(testStateRoot, { recursive: true, force: true })

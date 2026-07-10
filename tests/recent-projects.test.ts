@@ -17,6 +17,7 @@ function projectSnapshot(root: string, name: string, entryPath = '/index.html', 
     kind: 'Projet web local',
     files: 3,
     analyzedAt: '2026-07-10T08:00:00.000Z',
+    source: { kind: 'local-project', readOnly: false, url: null, localRoot: root, network: 'local-only' },
     issues: [{
       id: `issue-${name}`,
       title: 'Constat de test',

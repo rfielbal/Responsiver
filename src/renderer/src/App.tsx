@@ -1,8 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState, type FormEvent, type ReactElement } from 'react'
 
-import type { ProjectPreparationProgress, RecentProjectSummary } from '../../shared/contracts'
+import type { ProjectPreparationProgress, RecentProjectSummary, RemoteAuditResult, RemotePageState, RemoteViewport } from '../../shared/contracts'
+import LocalAssistant from './LocalAssistant'
+import RemotePreview from './RemotePreview'
 
-type Destination = 'projects' | 'lab' | 'review' | 'export'
+const CodeWorkspace = React.lazy(() => import('./CodeWorkspace'))
+
+type Destination = 'projects' | 'lab' | 'code' | 'review' | 'export'
 type InspectorTab = 'findings' | 'fixes' | 'theme' | 'conversation'
 type DeviceFamily = 'smartphone' | 'tablet' | 'computer'
 type LabMode = 'device' | 'compare'
@@ -145,6 +149,7 @@ const compareDevices = [devices[1], devices[5], devices[7]]
 const destinations: Array<{ id: Destination; label: string; icon: string }> = [
   { id: 'projects', label: 'Projets', icon: 'projects' },
   { id: 'lab', label: 'Laboratoire', icon: 'ruler' },
+  { id: 'code', label: 'Code', icon: 'code' },
   { id: 'review', label: 'Révision', icon: 'changes' },
   { id: 'export', label: 'Exporter', icon: 'export' }
 ]
@@ -153,7 +158,7 @@ const inspectorTabs: Array<{ id: InspectorTab; label: string; icon: string }> = 
   { id: 'findings', label: 'Constats', icon: 'finding' },
   { id: 'fixes', label: 'Correctifs', icon: 'changes' },
   { id: 'theme', label: 'Thème', icon: 'theme' },
-  { id: 'conversation', label: 'Conversation', icon: 'chat' }
+  { id: 'conversation', label: 'Assistant', icon: 'chat' }
 ]
 
 function Icon({ name, size = 18 }: { name: string; size?: number }): ReactElement {
@@ -165,6 +170,7 @@ function Icon({ name, size = 18 }: { name: string; size?: number }): ReactElemen
     export: <><path d="M12 3v12m-4-4 4 4 4-4" /><path d="M4 18v2h16v-2" /></>,
     folder: <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />,
     file: <><path d="M6 2h8l4 4v16H6Z" /><path d="M14 2v5h5" /></>,
+    code: <><path d="m8 9-4 3 4 3M16 9l4 3-4 3" /><path d="m14 5-4 14" /></>,
     phone: <><rect x="7" y="2" width="10" height="20" rx="2" /><path d="M10 5h4" /></>,
     tablet: <rect x="5" y="2" width="14" height="20" rx="2" />,
     laptop: <><rect x="4" y="4" width="16" height="12" rx="1.5" /><path d="M2 20h20" /></>,
@@ -480,6 +486,12 @@ export default function App(): ReactElement {
   const [draft, setDraft] = useState('')
   const [runtimeAudit, setRuntimeAudit] = useState<RuntimeAudit | null>(null)
   const [runtimeRenderStatus, setRuntimeRenderStatus] = useState<RuntimeRenderState | null>(null)
+  const [remoteAudit, setRemoteAudit] = useState<RemoteAuditResult | null>(null)
+  const [remoteState, setRemoteState] = useState<RemotePageState | null>(null)
+  const [workspaceOrigin, setWorkspaceOrigin] = useState<string | null>(null)
+  const [publicUrl, setPublicUrl] = useState('')
+  const [localhostUrl, setLocalhostUrl] = useState('http://localhost:5173')
+  const [localhostRoot, setLocalhostRoot] = useState('')
   const [projectPath, setProjectPath] = useState('')
   const [recentProjects, setRecentProjects] = useState<RecentProjectSummary[]>([])
   const [recentLoading, setRecentLoading] = useState(true)
@@ -528,12 +540,14 @@ export default function App(): ReactElement {
   const inspectorIssues = showAllIssues ? project?.issues ?? [] : routeIssues
   const scopedProject = useMemo(() => project ? { ...project, issues: inspectorIssues } : null, [inspectorIssues, project])
   const selectedIssue = inspectorIssues.find((issue) => issue.id === selectedIssueId) ?? inspectorIssues[0] ?? null
+  const isRemote = project?.source.kind === 'remote-url' || project?.source.kind === 'linked-localhost'
+  const workspaceEnabled = Boolean(project && !project.source.readOnly && project.source.localRoot)
   const detectedTheme: RuntimeTheme = runtimeTheme !== 'unknown' ? runtimeTheme : project?.theme.detected === 'dark' ? 'dark' : project?.theme.detected === 'light' ? 'light' : 'unknown'
   const activeOrigin = previewMode === 'staging' && staging?.previewOrigin
     ? staging.previewOrigin
     : (previewMode === 'proposal' || previewMode === 'before-after') && proposal?.previewOrigin
       ? proposal.previewOrigin
-      : project?.previewOrigin ?? null
+      : workspaceOrigin ?? project?.previewOrigin ?? null
   const focusedSelector = proposalContext?.kind === 'issue'
     ? ((project?.issues.find((issue) => issue.id === proposalContext.issueId) as (ProjectIssue & IssueExtra) | undefined)?.fix?.selector ?? null)
     : null
@@ -548,7 +562,17 @@ export default function App(): ReactElement {
   useEffect(() => {
     void refreshRecentProjects()
     const unsubscribe = api().onProjectPreparation?.((progress) => setPreparation(progress))
-    return () => unsubscribe?.()
+    const unsubscribeExtension = window.responsiver.onExtensionOpenProject((payload) => {
+      applyProject(payload.project)
+      setWidth(String(payload.viewport.width))
+      setHeight(String(payload.viewport.height))
+      setFamily(payload.viewport.width < 600 ? 'smartphone' : payload.viewport.width < 1_100 ? 'tablet' : 'computer')
+      setDeviceId('custom')
+      flash('Page reçue depuis l’extension Chrome et ouverte dans une session isolée.')
+    })
+    const unsubscribeBlocked = window.responsiver.onRemoteBlockedNavigation((payload) => flash(`${payload.detail} ${payload.url}`))
+    const unsubscribeWorkspace = window.responsiver.onWorkspacePreviewOrigin(setWorkspaceOrigin)
+    return () => { unsubscribe?.(); unsubscribeExtension(); unsubscribeBlocked(); unsubscribeWorkspace() }
   }, [])
 
   const preparationActive = preparation !== null
@@ -617,6 +641,9 @@ export default function App(): ReactElement {
     setDraft('')
     setRuntimeAudit(null)
     setRuntimeRenderStatus(null)
+    setRemoteAudit(null)
+    setRemoteState(null)
+    setWorkspaceOrigin(null)
     setInspectorTab('findings')
     setLabMode('device')
     setStageFullscreen(false)
@@ -652,6 +679,31 @@ export default function App(): ReactElement {
     const value = path.trim()
     if (!value) { flash('Indiquez un fichier ou un dossier local.'); return }
     await openWith(() => window.responsiver.openProjectPath(value), 'Projet analysé et servi localement.')
+  }
+
+  async function openRemote(mode: 'public' | 'localhost'): Promise<void> {
+    const url = (mode === 'public' ? publicUrl : localhostUrl).trim()
+    if (!url) { flash('Indiquez une URL à ouvrir.'); return }
+    setBusy(true)
+    try {
+      const snapshot = await window.responsiver.openRemoteUrl({ url, mode, linkedRoot: mode === 'localhost' ? localhostRoot.trim() || null : null })
+      applyProject(snapshot)
+      flash(mode === 'public' ? 'URL publique ouverte en lecture seule.' : snapshot.source.kind === 'linked-localhost' ? 'Localhost ouvert et associé à ses sources.' : 'Localhost ouvert en lecture seule.')
+    } catch (error) {
+      flash(error instanceof Error ? error.message : 'Cette URL ne peut pas être ouverte en sécurité.')
+    } finally {
+      setBusy(false)
+      setPreparation(null)
+    }
+  }
+
+  async function chooseLocalhostRoot(): Promise<void> {
+    try {
+      const path = await window.responsiver.chooseLinkedRoot()
+      if (path) setLocalhostRoot(path)
+    } catch {
+      flash('Le dossier source n’a pas pu être associé.')
+    }
   }
 
   async function openRecentProject(id: string): Promise<void> {
@@ -732,6 +784,14 @@ export default function App(): ReactElement {
       setWidth(String(issueDevice.width))
       setHeight(String(issueDevice.height))
       setDeviceId('custom')
+    }
+    if (isRemote) {
+      setProposalContext({ kind: 'issue', issueId: issue.id })
+      setPreviewMode('source')
+      const selector = issue.evidence?.selector
+      if (selector) await window.responsiver.focusRemoteFinding(selector).catch(() => false)
+      flash(selector ? 'Viewport restauré et élément distant mis en évidence.' : 'La route et le viewport du constat sont affichés.')
+      return
     }
     if (!project?.capabilities?.staging || !extra.fix || extra.fix.kind === 'manual') {
       const expectedOrigin = proposal?.previewOrigin ?? null
@@ -873,6 +933,10 @@ export default function App(): ReactElement {
 
   function go(next: Destination): void {
     if (next !== 'projects' && !project) { setDestination('projects'); flash('Ouvrez d’abord un projet.'); return }
+    if ((next === 'review' || next === 'export') && project?.source.kind !== 'local-project') {
+      flash('La révision exportable exige un projet local. Utilisez Code pour un localhost associé ou consultez les solutions du rapport URL.')
+      return
+    }
     setDestination(next)
   }
 
@@ -910,6 +974,21 @@ export default function App(): ReactElement {
     setActivePath(path)
   }
 
+  function applyRemoteAudit(result: RemoteAuditResult): void {
+    setRemoteAudit(result)
+    setActivePath(result.path)
+    setProject((current) => current ? {
+      ...current,
+      analyzedAt: result.generatedAt,
+      issues: result.findings,
+      source: { ...current.source, url: result.url },
+      routes: current.routes.some((route) => documentPath(route.path) === documentPath(result.path))
+        ? current.routes
+        : [...current.routes, { path: result.path, label: result.path || 'Page courante' }]
+    } : current)
+    setSelectedIssueId(result.findings[0]?.id ?? null)
+  }
+
   const counts = project ? {
     blockers: project.issues.filter((issue) => issue.severity === 'bloquant').length,
     issues: project.issues.length,
@@ -920,31 +999,31 @@ export default function App(): ReactElement {
   return <div className="app-shell">
     <aside className="nav-rail" aria-label="Navigation principale">
       <button className="brand" onClick={() => go('projects')} aria-label="Responsiver — Projets"><Mark /><span><strong>Responsiver</strong><small>Responsive workbench</small></span></button>
-      <nav>{destinations.map((item) => <button key={item.id} className={destination === item.id ? 'nav-link is-active' : 'nav-link'} onClick={() => go(item.id)} aria-current={destination === item.id ? 'page' : undefined}><Icon name={item.icon} /><span>{item.label}</span>{item.id === 'review' && counts.changes > 0 && <b>{counts.changes}</b>}</button>)}</nav>
-      <div className="rail-foot"><span><Icon name="shield" size={15} /> Traitement local</span><small>v0.5 · open source</small></div>
+      <nav>{destinations.map((item) => <button key={item.id} className={`${destination === item.id ? 'nav-link is-active' : 'nav-link'}${isRemote && (item.id === 'review' || item.id === 'export') ? ' is-limited' : ''}`} onClick={() => go(item.id)} aria-current={destination === item.id ? 'page' : undefined}><Icon name={item.icon} /><span>{item.label}</span>{item.id === 'review' && counts.changes > 0 && <b>{counts.changes}</b>}</button>)}</nav>
+      <div className="rail-foot"><span><Icon name="shield" size={15} /> Local strict par défaut</span><small>v0.6 · open source</small></div>
     </aside>
 
     <main className="app-main">
       <header className="titlebar">
-        <div className="project-identity"><span>{project ? 'Projet actif' : 'Espace local'}</span><strong>{project?.name ?? 'Aucun projet ouvert'}</strong>{project && <code title={project.root}>{project.root}</code>}</div>
+        <div className="project-identity"><span>{project ? project.source.kind === 'remote-url' ? 'Audit URL' : project.source.kind === 'linked-localhost' ? 'Localhost associé' : 'Projet actif' : 'Espace local'}</span><strong>{project?.name ?? 'Aucun projet ouvert'}</strong>{project && <code title={project.source.url ?? project.root}>{project.source.url ?? project.root}</code>}</div>
         <div className="title-actions">
-          {project?.previewOrigin && <span className="origin-indicator"><i /> Runner local</span>}
+          {project && <span className={`origin-indicator${project.source.readOnly ? ' is-readonly' : ''}`}><i />{project.source.kind === 'remote-url' ? 'URL · lecture seule' : project.source.kind === 'linked-localhost' ? 'Localhost · sources liées' : 'Runner local'}</span>}
           <button className="button button--quiet" onClick={() => openWith(() => window.responsiver.chooseProject(), 'Projet analysé et servi localement.')} disabled={busy}><Icon name="folder" /> Ouvrir</button>
         </div>
       </header>
 
-      {destination === 'projects' && <ProjectsView project={project} projectPath={projectPath} recentProjects={recentProjects} recentLoading={recentLoading} forgettingRecentId={forgettingRecentId} busy={busy} onPath={setProjectPath} onOpenFolder={() => openWith(() => window.responsiver.chooseProject(), 'Projet analysé et servi localement.')} onOpenFile={() => openWith(() => api().chooseProjectFile ? api().chooseProjectFile!() : window.responsiver.chooseProject(), 'Fichier analysé et servi localement.')} onOpenPath={() => openPath()} onOpenRecent={(id) => void openRecentProject(id)} onForgetRecent={(id) => void forgetRecentProject(id)} onDemo={() => openWith(() => window.responsiver.openDemoProject(), 'Démonstration locale prête.')} onContinue={() => go('lab')} onDrop={(file) => { const path = api().getPathForFile?.(file); if (path) void openPath(path); else flash('Déposez le projet dans l’application desktop.') }} />}
+      {destination === 'projects' && <ProjectsView project={project} projectPath={projectPath} publicUrl={publicUrl} localhostUrl={localhostUrl} localhostRoot={localhostRoot} recentProjects={recentProjects} recentLoading={recentLoading} forgettingRecentId={forgettingRecentId} busy={busy} onPath={setProjectPath} onPublicUrl={setPublicUrl} onLocalhostUrl={setLocalhostUrl} onLocalhostRoot={setLocalhostRoot} onChooseLocalhostRoot={() => void chooseLocalhostRoot()} onOpenPublic={() => void openRemote('public')} onOpenLocalhost={() => void openRemote('localhost')} onOpenFolder={() => openWith(() => window.responsiver.chooseProject(), 'Projet analysé et servi localement.')} onOpenFile={() => openWith(() => api().chooseProjectFile ? api().chooseProjectFile!() : window.responsiver.chooseProject(), 'Fichier analysé et servi localement.')} onOpenPath={() => openPath()} onOpenRecent={(id) => void openRecentProject(id)} onForgetRecent={(id) => void forgetRecentProject(id)} onDemo={() => openWith(() => window.responsiver.openDemoProject(), 'Démonstration locale prête.')} onContinue={() => go('lab')} onDrop={(file) => { const path = api().getPathForFile?.(file); if (path) void openPath(path); else flash('Déposez le projet dans l’application desktop.') }} />}
 
       {destination === 'lab' && project && <div className="workbench">
         <div className="command-bar">
-          <div className="mode-switch" role="group" aria-label="Disposition de l’aperçu"><button className={labMode === 'device' ? 'is-active' : ''} onClick={() => setLabMode('device')} aria-pressed={labMode === 'device'}><Icon name="ruler" /> Appareil</button><button className={labMode === 'compare' ? 'is-active' : ''} onClick={() => { setLabMode('compare'); if (previewMode === 'before-after') setPreviewMode('proposal') }} aria-pressed={labMode === 'compare'}><Icon name="compare" /> 3 écrans</button></div>
+          <div className="mode-switch" role="group" aria-label="Disposition de l’aperçu"><button className={labMode === 'device' ? 'is-active' : ''} onClick={() => setLabMode('device')} aria-pressed={labMode === 'device'}><Icon name="ruler" /> Appareil</button><button className={labMode === 'compare' ? 'is-active' : ''} onClick={() => { setLabMode('compare'); if (previewMode === 'before-after') setPreviewMode('proposal') }} aria-pressed={labMode === 'compare'} disabled={isRemote} title={isRemote ? 'Le balayage distant analyse déjà cinq largeurs sans multiplier les sessions.' : undefined}><Icon name="compare" /> 3 écrans</button></div>
           <div className="command-divider" aria-hidden="true" />
-          <div className="version-switch" role="group" aria-label="État du projet affiché">
+          {!isRemote ? <div className="version-switch" role="group" aria-label="État du projet affiché">
             <button className={previewMode === 'source' ? 'is-active' : ''} onClick={() => setPreviewMode('source')} aria-pressed={previewMode === 'source'}>Source</button>
             <button className={previewMode === 'proposal' ? 'is-active' : ''} onClick={() => proposal && setPreviewMode('proposal')} disabled={!proposal} aria-pressed={previewMode === 'proposal'}>Proposition {proposal && <b>{proposal.changes.length}</b>}</button>
             <button className={previewMode === 'before-after' ? 'is-active' : ''} onClick={() => { if (proposal) { setLabMode('device'); setPreviewMode('before-after') } }} disabled={!proposal} aria-pressed={previewMode === 'before-after'}>Avant / Après</button>
             <button className={previewMode === 'staging' ? 'is-active' : ''} onClick={() => staging ? setPreviewMode('staging') : flash('Construisez le staging depuis les correctifs validés.')} disabled={!staging} aria-pressed={previewMode === 'staging'}>Staging {staging && <b>{staging.changes.length}</b>}</button>
-          </div>
+          </div> : <div className="remote-mode-label"><span><i /> Rendu réel</span><small>{project.source.readOnly ? 'Lecture seule' : workspaceOrigin ? 'Overlay code actif' : 'Sources associées'}</small></div>}
           <div className="command-spacer" />
           {labMode === 'device' && <DeviceControls family={family} devices={familyDevices} selectedId={deviceId} width={width} height={height} onFamily={selectFamily} onDevice={selectDevice} onWidth={(value) => { setWidth(value); setDeviceId('custom') }} onHeight={(value) => { setHeight(value); setDeviceId('custom') }} onRotate={() => { setWidth(height); setHeight(width); setDeviceId('custom') }} />}
         </div>
@@ -952,21 +1031,37 @@ export default function App(): ReactElement {
         <div className="lab-grid">
           <div className={stageFullscreen ? 'stage-column is-fullscreen' : 'stage-column'} role={stageFullscreen ? 'dialog' : undefined} aria-modal={stageFullscreen || undefined} aria-label={stageFullscreen ? 'Prévisualisation en plein écran' : undefined}>
             <div className="stage-toolbar">
-              <span><i className={proposal && previewMode !== 'source' && previewMode !== 'staging' ? 'status-dot status-dot--proposal' : 'status-dot status-dot--ok'} />{previewMode === 'before-after' ? 'Comparaison du correctif' : previewMode === 'proposal' ? 'Proposition temporaire' : previewMode === 'staging' ? 'Staging exportable' : 'Source du projet'}</span>
-              <small>{previewMode === 'before-after' ? 'Deux rendus synchronisés' : labMode === 'device' ? 'Bords redimensionnables' : 'Trois familles d’appareils'}</small>
+              <span><i className={proposal && previewMode !== 'source' && previewMode !== 'staging' ? 'status-dot status-dot--proposal' : 'status-dot status-dot--ok'} />{isRemote ? project.source.kind === 'linked-localhost' ? 'Localhost connecté' : 'URL publique isolée' : previewMode === 'before-after' ? 'Comparaison du correctif' : previewMode === 'proposal' ? 'Proposition temporaire' : previewMode === 'staging' ? 'Staging exportable' : workspaceOrigin ? 'Overlay code temporaire' : 'Source du projet'}</span>
+              <small>{isRemote ? 'Navigation réelle · audit multi-viewport' : previewMode === 'before-after' ? 'Deux rendus synchronisés' : labMode === 'device' ? 'Bords redimensionnables' : 'Trois familles d’appareils'}</small>
               <button ref={fullscreenButtonRef} className="stage-fullscreen" onClick={() => setStageFullscreen((current) => !current)} aria-label={stageFullscreen ? 'Quitter le plein écran de la prévisualisation' : 'Afficher la prévisualisation en plein écran'} aria-pressed={stageFullscreen}><Icon name={stageFullscreen ? 'fullscreenExit' : 'fullscreen'} size={15} /><span>{stageFullscreen ? 'Réduire' : 'Plein écran'}</span></button>
             </div>
             <div className="stage-canvas">
               {previewBusy && <div className="preview-loading" role="status"><span className="loading-mark" /><strong>Préparation de la proposition…</strong></div>}
-              {labMode === 'device' && previewMode === 'before-after' && proposal ? <div className="before-after-grid" aria-label="Comparaison avant et après le correctif">
+              {isRemote ? <RemotePreview projectId={project.id} device={currentDevice} visible={destination === 'lab'} allowUpscale={stageFullscreen} onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onAudit={applyRemoteAudit} onState={(state) => { setRemoteState(state); setActivePath(state.path) }} onNotice={flash} /> : labMode === 'device' && previewMode === 'before-after' && proposal ? <div className="before-after-grid" aria-label="Comparaison avant et après le correctif">
                 <div className="comparison-pane"><header><span>Avant</span><strong>Source</strong></header><PreviewFrame compact project={project} origin={project.previewOrigin} device={currentDevice} path={activePath} label="Avant — Source" focusSelector={focusedSelector} onPathChange={changePreviewPath} onThemeChange={setRuntimeTheme} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} /></div>
                 <div className="comparison-pane comparison-pane--after"><header><span>Après</span><strong>Proposition non validée</strong></header><PreviewFrame compact project={project} origin={proposal.previewOrigin} device={currentDevice} path={activePath} label="Après — Proposition" focusSelector={focusedSelector} onPathChange={changePreviewPath} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} /></div>
               </div> : labMode === 'device' ? <PreviewFrame project={project} origin={activeOrigin} device={currentDevice} path={activePath} focusSelector={focusedSelector} themeOverride={nativeThemeTarget} resizable allowUpscale={stageFullscreen} onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onPathChange={changePreviewPath} onThemeChange={activeOrigin === project.previewOrigin ? setRuntimeTheme : undefined} onAudit={setRuntimeAudit} onRenderStatus={setRuntimeRenderStatus} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} /> : <div className="comparison-grid">{compareDevices.map((device) => <PreviewFrame key={device.id} project={project} origin={activeOrigin} device={device} path={activePath} compact focusSelector={focusedSelector} themeOverride={nativeThemeTarget} label={device.family === 'smartphone' ? 'Smartphone' : device.family === 'tablet' ? 'Tablette' : 'Ordinateur'} onPathChange={changePreviewPath} onThemeChange={activeOrigin === project.previewOrigin ? setRuntimeTheme : undefined} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} />)}</div>}
             </div>
           </div>
-          {scopedProject && <Inspector project={scopedProject} activeIssueCount={routeIssues.length} totalIssueCount={project.issues.length} showAllIssues={showAllIssues} onShowAllIssues={setShowAllIssues} tab={inspectorTab} onTab={setInspectorTab} selectedIssue={selectedIssue} selectedIds={selectedIssueIds} onPreviewIssue={(issue) => void previewIssue(issue)} onToggleIssue={toggleAcceptedIssue} detectedTheme={detectedTheme} themeTarget={themeTarget} previewThemeTarget={previewThemeTarget} onPreviewTheme={(target) => void previewTheme(target)} onRemoveTheme={removeTheme} proposal={proposal} proposalContext={proposalContext} previewBusy={previewBusy} staging={staging} runtimeAudit={runtimeAudit} runtimeRenderStatus={runtimeRenderStatus} instructions={instructions} onRemoveInstruction={removeInstruction} messages={messages} draft={draft} onDraft={setDraft} onSubmit={submitInstruction} busy={busy} onAcceptProposal={acceptProposal} onRejectProposal={rejectProposal} onBuild={() => void buildStaging()} onClear={() => void clearStaging()} />}
+          {scopedProject && <Inspector project={scopedProject} activeIssueCount={routeIssues.length} totalIssueCount={project.issues.length} showAllIssues={showAllIssues} onShowAllIssues={setShowAllIssues} tab={inspectorTab} onTab={setInspectorTab} selectedIssue={selectedIssue} selectedIds={selectedIssueIds} onPreviewIssue={(issue) => void previewIssue(issue)} onToggleIssue={toggleAcceptedIssue} detectedTheme={detectedTheme} themeTarget={themeTarget} previewThemeTarget={previewThemeTarget} onPreviewTheme={(target) => void previewTheme(target)} onRemoveTheme={removeTheme} proposal={proposal} proposalContext={proposalContext} previewBusy={previewBusy} staging={staging} runtimeAudit={runtimeAudit} runtimeRenderStatus={runtimeRenderStatus} instructions={instructions} onRemoveInstruction={removeInstruction} messages={messages} draft={draft} onDraft={setDraft} onSubmit={submitInstruction} busy={busy} onAcceptProposal={acceptProposal} onRejectProposal={rejectProposal} onBuild={() => void buildStaging()} onClear={() => void clearStaging()} assistantRoute={remoteState?.path ?? activePath} assistantViewport={{ width: currentDevice.width, height: currentDevice.height, deviceScaleFactor: 1, mobile: currentDevice.family !== 'computer', touch: currentDevice.family !== 'computer' }} assistantScreenshot={remoteAudit?.screenshotDataUrl ?? null} workspaceEnabled={workspaceEnabled} onWorkspacePreviewOrigin={setWorkspaceOrigin} onNotice={flash} onOpenCode={() => go('code')} />}
         </div>
-        <footer className="activity-bar"><span><i className="status-dot status-dot--ok" /> {project.routes.length} page{project.routes.length > 1 ? 's' : ''}</span>{project.capabilities?.buildRequired ? <span className="activity-alert" title="Responsiver n’exécute jamais les scripts arbitraires d’un projet sans consentement. Ouvrez plutôt le fichier HTML généré dans dist ou out.">Sources à compiler · choisir dist/out</span> : <span className={counts.blockers ? 'activity-alert' : ''}>{counts.blockers} bloquant{counts.blockers > 1 ? 's' : ''}</span>}<span>{runtimeAudit ? `${runtimeAudit.overflowCount} débordement${runtimeAudit.overflowCount > 1 ? 's' : ''} à ${runtimeAudit.viewportWidth}px` : 'Audit visuel en attente'}</span><span className="activity-end" title="Seules les ressources locales et Google Fonts HTTPS sont autorisées dans la preview."><Icon name="shield" size={13} /> Réseau contrôlé</span></footer>
+        <footer className="activity-bar"><span><i className="status-dot status-dot--ok" /> {project.routes.length} page{project.routes.length > 1 ? 's' : ''}</span>{project.capabilities?.buildRequired ? <span className="activity-alert" title="Responsiver n’exécute jamais les scripts arbitraires d’un projet sans consentement. Ouvrez plutôt le fichier HTML généré dans dist ou out.">Sources à compiler · choisir dist/out</span> : <span className={counts.blockers ? 'activity-alert' : ''}>{counts.blockers} bloquant{counts.blockers > 1 ? 's' : ''}</span>}<span>{isRemote ? remoteAudit ? `${remoteAudit.findings.length} constats sur ${remoteAudit.viewports.length} largeurs` : 'Audit visuel en préparation' : runtimeAudit ? `${runtimeAudit.overflowCount} débordement${runtimeAudit.overflowCount > 1 ? 's' : ''} à ${runtimeAudit.viewportWidth}px` : 'Audit visuel en attente'}</span><span className="activity-end"><Icon name="shield" size={13} /> {project.source.network === 'local-only' ? 'Hors ligne' : project.source.network === 'localhost' ? 'Réseau localhost autorisé' : 'Session réseau éphémère'}</span></footer>
+      </div>}
+
+      {destination === 'code' && project && <div className="code-page">
+        <header className="page-head page-head--code"><div><span className="overline">Espace de changements</span><h1>Code</h1><p>Éditez dans un overlay temporaire, observez le rendu à côté du fichier, puis appliquez uniquement les changements explicitement validés.</p></div><span className={workspaceEnabled ? 'code-capability is-ready' : 'code-capability'}><i />{workspaceEnabled ? 'Sources locales liées' : 'Lecture seule'}</span></header>
+        <div className="code-studio">
+          <React.Suspense fallback={<div className="code-workspace code-loading"><span /> Chargement de l’éditeur local…</div>}><CodeWorkspace projectId={project.id} enabled={workspaceEnabled} preferredPath={selectedIssue?.source?.file ?? null} onNotice={flash} onPreviewOrigin={setWorkspaceOrigin} /></React.Suspense>
+          <aside className="code-live-preview">
+            <header><div><span className="overline">Aperçu direct</span><strong>{currentDevice.name}</strong></div><button className="text-button" onClick={() => go('lab')}><Icon name="fullscreen" size={14} /> Ouvrir en grand</button></header>
+            <div className="code-preview-body">
+              {isRemote
+                ? <RemotePreview projectId={project.id} device={currentDevice} visible={destination === 'code'} embedded automaticAudit={false} onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onAudit={applyRemoteAudit} onState={(state) => { setRemoteState(state); setActivePath(state.path) }} onNotice={flash} />
+                : <PreviewFrame compact project={project} origin={workspaceOrigin ?? project.previewOrigin} device={currentDevice} path={activePath} resizable onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onPathChange={changePreviewPath} onThemeChange={setRuntimeTheme} onAudit={setRuntimeAudit} onRenderStatus={setRuntimeRenderStatus} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} />}
+            </div>
+            <footer><span><i /> Overlay en mémoire</span><code>{currentDevice.width} × {currentDevice.height}</code></footer>
+          </aside>
+        </div>
       </div>}
 
       {destination === 'review' && project && <ReviewView project={project} staging={staging} sourceOrigin={project.previewOrigin} path={activePath} device={currentDevice} acceptedCount={counts.selected} onBuild={() => void buildStaging()} onClear={() => void clearStaging()} onCopy={() => void copyPatch()} busy={busy} />}
@@ -1002,14 +1097,23 @@ function availabilityLabel(project: RecentProjectSummary): string {
   return 'Disponible'
 }
 
-function ProjectsView({ project, projectPath, recentProjects, recentLoading, forgettingRecentId, busy, onPath, onOpenFolder, onOpenFile, onOpenPath, onOpenRecent, onForgetRecent, onDemo, onContinue, onDrop }: {
+function ProjectsView({ project, projectPath, publicUrl, localhostUrl, localhostRoot, recentProjects, recentLoading, forgettingRecentId, busy, onPath, onPublicUrl, onLocalhostUrl, onLocalhostRoot, onChooseLocalhostRoot, onOpenPublic, onOpenLocalhost, onOpenFolder, onOpenFile, onOpenPath, onOpenRecent, onForgetRecent, onDemo, onContinue, onDrop }: {
   project: (ProjectSnapshot & ProjectExtra) | null
   projectPath: string
+  publicUrl: string
+  localhostUrl: string
+  localhostRoot: string
   recentProjects: RecentProjectSummary[]
   recentLoading: boolean
   forgettingRecentId: string | null
   busy: boolean
   onPath: (value: string) => void
+  onPublicUrl: (value: string) => void
+  onLocalhostUrl: (value: string) => void
+  onLocalhostRoot: (value: string) => void
+  onChooseLocalhostRoot: () => void
+  onOpenPublic: () => void
+  onOpenLocalhost: () => void
   onOpenFolder: () => void
   onOpenFile: () => void
   onOpenPath: () => void
@@ -1030,6 +1134,10 @@ function ProjectsView({ project, projectPath, recentProjects, recentLoading, for
       <div className="drop-mark"><Mark /></div><div><h2>Déposez le projet, Responsiver prépare le reste</h2><p>Site statique, dossier complet ou artefact compilé existant. Rien ne quitte cette machine.</p></div><div className="drop-actions"><button className="button button--primary" onClick={onOpenFolder} disabled={busy}><Icon name="folder" /> Choisir un dossier</button><button className="button button--secondary" onClick={onOpenFile} disabled={busy}><Icon name="file" /> Choisir un fichier</button></div>
     </section>
     <form className="path-bar" onSubmit={(event) => { event.preventDefault(); onOpenPath() }}><label htmlFor="project-path">Chemin local</label><input id="project-path" value={projectPath} onChange={(event) => onPath(event.target.value)} placeholder="/Users/vous/Sites/mon-projet" spellCheck={false} /><button className="button button--secondary" disabled={busy}>Ouvrir</button></form>
+    <section className="source-entry-grid" aria-label="Autres sources à auditer">
+      <form className="source-entry-card source-entry-card--url" onSubmit={(event) => { event.preventDefault(); onOpenPublic() }}><header><span>URL—01</span><div><strong>Tester une URL publique</strong><small>Navigation réelle · lecture seule</small></div><i /></header><p>Ouvrez un site HTTPS dans une partition éphémère, puis mesurez sa responsivité sur cinq largeurs.</p><label htmlFor="public-url"><span>Adresse HTTPS</span><input id="public-url" type="url" value={publicUrl} onChange={(event) => onPublicUrl(event.target.value)} placeholder="https://rfielbal.fr" spellCheck={false} /></label><footer><span><Icon name="shield" size={14} /> Aucun cookie conservé</span><button className="button button--primary" disabled={busy || !publicUrl.trim()}>Auditer l’URL</button></footer></form>
+      <form className="source-entry-card source-entry-card--localhost" onSubmit={(event) => { event.preventDefault(); onOpenLocalhost() }}><header><span>DEV—02</span><div><strong>Connecter un localhost</strong><small>Symfony, Docker, Vite ou autre serveur</small></div><i /></header><p>Responsiver se connecte au serveur déjà lancé. Associez son dossier pour activer l’éditeur sans accéder directement à la base.</p><div className="localhost-fields"><label htmlFor="localhost-url"><span>Adresse locale</span><input id="localhost-url" value={localhostUrl} onChange={(event) => onLocalhostUrl(event.target.value)} placeholder="http://localhost:8080" spellCheck={false} /></label><label htmlFor="localhost-root"><span>Dossier source facultatif</span><span className="localhost-root-field"><input id="localhost-root" value={localhostRoot} onChange={(event) => onLocalhostRoot(event.target.value)} placeholder="/Users/vous/Sites/projet-symfony" spellCheck={false} /><button type="button" onClick={onChooseLocalhostRoot} disabled={busy} aria-label="Choisir le dossier source"><Icon name="folder" size={15} /></button></span></label></div><footer><span><Icon name="shield" size={14} /> Aucune commande Docker lancée</span><button className="button button--secondary" disabled={busy || !localhostUrl.trim()}>Connecter</button></footer></form>
+    </section>
     <section className="project-list"><div className="section-heading"><div><span className="overline">Session</span><h2>{project ? 'Projet actif' : 'Commencer sans configuration'}</h2></div><button className="text-button" onClick={onDemo}>Ouvrir la démo locale <Icon name="arrow" size={15} /></button></div>
       {project ? <><article className={blocked ? 'project-row project-row--blocked' : 'project-row'}><div className="project-symbol">{project.name.slice(0, 2).toUpperCase()}</div><div className="project-copy"><strong>{project.name}</strong><span>{project.kind} · {project.files} fichiers · {project.routes.length} page{project.routes.length !== 1 ? 's' : ''}</span>{project.capabilities?.buildRequired && <span className="project-warning">Sources à compiler : Responsiver ne lance aucun script de projet sans votre accord.</span>}<code title={project.root}>{project.root}</code></div><div className="project-metrics"><span><b>{project.issues.length}</b> constat{project.issues.length !== 1 ? 's' : ''}</span><span><b>{themeCount}</b> {themeCount === 0 ? 'à qualifier' : `thème${themeCount > 1 ? 's' : ''}`}</span></div><button className={blocked ? 'button button--secondary' : 'button button--primary'} onClick={onContinue}>{blocked ? 'Voir le diagnostic' : 'Laboratoire'} <Icon name="arrow" /></button></article>
         {blocked && readiness && <div className="readiness-card" role="alert"><div className="readiness-icon"><Icon name="finding" /></div><div><span className="overline">Rendu non exploitable</span><strong>{readiness.summary}</strong><p>Responsiver n’invente pas une interface absente et ne masque plus ce problème derrière une prévisualisation blanche.</p><ul>{readiness.diagnostics.slice(0, 4).map((diagnostic) => <li key={diagnostic.code}><b>{diagnostic.title}</b><span>{diagnostic.detail}</span></li>)}</ul></div></div>}
@@ -1063,7 +1171,7 @@ function DeviceControls({ family, devices: choices, selectedId, width, height, o
   </div>
 }
 
-function Inspector({ project, activeIssueCount, totalIssueCount, showAllIssues, onShowAllIssues, tab, onTab, selectedIssue, selectedIds, onPreviewIssue, onToggleIssue, detectedTheme, themeTarget, previewThemeTarget, onPreviewTheme, onRemoveTheme, proposal, proposalContext, previewBusy, staging, runtimeAudit, runtimeRenderStatus, instructions, onRemoveInstruction, messages, draft, onDraft, onSubmit, busy, onAcceptProposal, onRejectProposal, onBuild, onClear }: {
+function Inspector({ project, activeIssueCount, totalIssueCount, showAllIssues, onShowAllIssues, tab, onTab, selectedIssue, selectedIds, onPreviewIssue, onToggleIssue, detectedTheme, themeTarget, previewThemeTarget, onPreviewTheme, onRemoveTheme, proposal, proposalContext, previewBusy, staging, runtimeAudit, runtimeRenderStatus, instructions, onRemoveInstruction, messages, draft, onDraft, onSubmit, busy, onAcceptProposal, onRejectProposal, onBuild, onClear, assistantRoute, assistantViewport, assistantScreenshot, workspaceEnabled, onWorkspacePreviewOrigin, onNotice, onOpenCode }: {
   project: ProjectSnapshot & ProjectExtra
   activeIssueCount: number
   totalIssueCount: number
@@ -1097,6 +1205,13 @@ function Inspector({ project, activeIssueCount, totalIssueCount, showAllIssues, 
   onRejectProposal: () => void
   onBuild: () => void
   onClear: () => void
+  assistantRoute: string
+  assistantViewport: RemoteViewport
+  assistantScreenshot: string | null
+  workspaceEnabled: boolean
+  onWorkspacePreviewOrigin: (origin: string | null) => void
+  onNotice: (message: string) => void
+  onOpenCode: () => void
 }): ReactElement {
   const issueExtra = selectedIssue as (ProjectIssue & IssueExtra) | null
   const acceptedCount = selectedIds.length + instructions.length + (themeTarget ? 1 : 0)
@@ -1118,7 +1233,7 @@ function Inspector({ project, activeIssueCount, totalIssueCount, showAllIssues, 
           const accepted = selectedIds.includes(issue.id)
           return <button key={issue.id} className={`${selectedIssue?.id === issue.id ? 'issue-item is-active' : 'issue-item'}${accepted ? ' is-accepted' : ''}`} onClick={() => onPreviewIssue(issue)} disabled={busy} aria-label={`${issue.title} — ouvrir la page et ${((issue as ProjectIssue & IssueExtra).fix?.kind === 'manual' || !(issue as ProjectIssue & IssueExtra).fix) ? 'localiser le constat' : 'prévisualiser l’avant et l’après'}`}><i className={`severity-dot severity-dot--${issue.severity}`} /><span><strong>{issue.title}</strong><small>{(issue as ProjectIssue & IssueExtra).routePath ?? issue.viewport}</small></span><em>{accepted ? 'Retenu' : severityLabel(issue)}</em></button>
         }) : <div className="empty-panel"><Icon name="check" /><strong>Aucun motif connu détecté</strong><span>Continuez la vérification visuelle sur les trois familles d’appareils.</span></div>}</div>
-        {selectedIssue && <article className="issue-detail"><header><span className={`severity severity--${selectedIssue.severity}`}>{severityLabel(selectedIssue)}</span><code>{selectedIssue.rule}</code></header><h3>{selectedIssue.title}</h3><p>{selectedIssue.description}</p><dl><div><dt>Source</dt><dd>{selectedIssue.source ? <code>{selectedIssue.source.file}:{selectedIssue.source.line}</code> : 'Mesure à l’exécution'}</dd></div><div><dt>Proposition</dt><dd>{selectedIssue.proposal}</dd></div></dl>
+        {selectedIssue && <article className="issue-detail"><header><span className={`severity severity--${selectedIssue.severity}`}>{severityLabel(selectedIssue)}</span><code>{selectedIssue.rule}</code></header><h3>{selectedIssue.title}</h3><p>{selectedIssue.description}</p><dl><div><dt>Source</dt><dd>{selectedIssue.source ? <code>{selectedIssue.source.file}:{selectedIssue.source.line}</code> : selectedIssue.evidence?.selector ? <code>{selectedIssue.evidence.selector}</code> : 'Mesure à l’exécution'}</dd></div><div><dt>Proposition</dt><dd>{selectedIssue.proposal}</dd></div>{selectedIssue.confidence && <div><dt>Confiance</dt><dd>{selectedIssue.confidence === 'certain' ? 'Certaine' : selectedIssue.confidence === 'probable' ? 'Probable' : 'À vérifier'}</dd></div>}</dl>{selectedIssue.source && workspaceEnabled && <button className="text-button issue-code-link" onClick={onOpenCode}><Icon name="code" size={14} /> Ouvrir le fichier associé</button>}
           {!selectedActionable ? <div className="manual-review"><Icon name="info" size={15} /><span>Ce point ne possède pas de transformation automatique sûre. Responsiver vous amène à la page concernée sans simuler un résultat.</span></div> : previewBusy && proposalContext?.issueId === selectedIssue.id ? <div className="proposal-pending" role="status"><span className="loading-mark" /> Préparation de l’avant / après…</div> : selectedProposal ? <ProposalDecision title="Correctif isolé" accepted={selectedAccepted} changeCount={selectedProposal.changes.length} disabled={busy} onAccept={onAcceptProposal} onReject={onRejectProposal} /> : <button className="button button--primary button--full" onClick={() => onPreviewIssue(selectedIssue)} disabled={busy}><Icon name="compare" /> Voir l’avant / après</button>}
         </article>}
       </>}
@@ -1131,7 +1246,10 @@ function Inspector({ project, activeIssueCount, totalIssueCount, showAllIssues, 
         <button className="button button--primary button--full inspector-action" onClick={onBuild} disabled={busy || previewBusy || !acceptedCount || !canStage}>{busy ? 'Construction…' : staging ? 'Reconstruire le staging' : 'Construire le staging'} <Icon name="arrow" /></button>
       </>}
       {tab === 'theme' && <>{!canStage && <div className="manual-review"><Icon name="info" size={15} /><span>La variante de thème sera disponible après qu’un rendu exploitable aura été détecté.</span></div>}<ThemePanel project={project} detectedTheme={detectedTheme} acceptedTarget={themeTarget} previewTarget={previewThemeTarget} proposal={proposalContext?.kind === 'theme' ? proposal : null} busy={previewBusy} disabled={busy || !canStage} onPreview={onPreviewTheme} onAccept={onAcceptProposal} onReject={onRejectProposal} onRemoveAccepted={onRemoveTheme} /></>}
-      {tab === 'conversation' && <><div className="inspector-heading"><div><span className="overline">Ajustements locaux</span><h2>Conversation</h2></div><span className="rule-chip">Sans IA</span></div>{!canStage && <div className="manual-review"><Icon name="info" size={15} /><span>Les ajustements seront disponibles après qu’un layout exploitable aura été détecté.</span></div>}<div className="conversation">{messages.map((message) => <div className={`message message--${message.author}`} key={message.id}><span>{message.author === 'user' ? 'Vous' : 'Responsiver'}</span><p>{message.text}</p></div>)}</div>{previewBusy && proposalContext?.kind === 'instruction' && <div className="proposal-pending" role="status"><span className="loading-mark" /> Interprétation locale…</div>}{instructionProposal && proposalContext?.instruction && <ProposalDecision title="Ajustement prévisualisé" accepted={instructions.includes(proposalContext.instruction)} changeCount={instructionProposal.changes.filter((change) => change.kind === 'instruction').length} disabled={busy || !canStage} onAccept={onAcceptProposal} onReject={onRejectProposal} />}<form className="prompt-form" onSubmit={onSubmit}><label htmlFor="instruction">Nouvel ajustement</label><textarea id="instruction" value={draft} onChange={(event) => onDraft(event.target.value)} placeholder="Ex. Réduis les arrondis et utilise #b94d32 comme couleur d’accent." rows={4} disabled={!canStage} /><div><small>Couleur · espacement · rayon · texte · navigation</small><button className="button button--primary" disabled={busy || previewBusy || !draft.trim() || !canStage}>Prévisualiser</button></div></form></>}
+      {tab === 'conversation' && <div className="assistant-stack">
+        <LocalAssistant key={project.id} project={project} route={assistantRoute} viewport={assistantViewport} screenshotDataUrl={assistantScreenshot} workspaceEnabled={workspaceEnabled} onNotice={onNotice} onPreviewOrigin={onWorkspacePreviewOrigin} />
+        <section className="deterministic-assistant"><header><div><span className="overline">Ajustements rapides</span><h3>Sans modèle</h3></div><span className="rule-chip">Hors ligne</span></header>{!canStage && <div className="manual-review"><Icon name="info" size={15} /><span>Les ajustements déterministes exigent un projet local avec un rendu exploitable.</span></div>}<div className="conversation">{messages.map((message) => <div className={`message message--${message.author}`} key={message.id}><span>{message.author === 'user' ? 'Vous' : 'Responsiver'}</span><p>{message.text}</p></div>)}</div>{previewBusy && proposalContext?.kind === 'instruction' && <div className="proposal-pending" role="status"><span className="loading-mark" /> Interprétation locale…</div>}{instructionProposal && proposalContext?.instruction && <ProposalDecision title="Ajustement prévisualisé" accepted={instructions.includes(proposalContext.instruction)} changeCount={instructionProposal.changes.filter((change) => change.kind === 'instruction').length} disabled={busy || !canStage} onAccept={onAcceptProposal} onReject={onRejectProposal} />}<form className="prompt-form" onSubmit={onSubmit}><label htmlFor="instruction">Nouvel ajustement</label><textarea id="instruction" value={draft} onChange={(event) => onDraft(event.target.value)} placeholder="Ex. Réduis les arrondis et utilise #b94d32 comme couleur d’accent." rows={4} disabled={!canStage} /><div><small>Couleur · espacement · rayon · texte · navigation</small><button className="button button--primary" disabled={busy || previewBusy || !draft.trim() || !canStage}>Prévisualiser</button></div></form></section>
+      </div>}
     </div>
   </aside>
 }

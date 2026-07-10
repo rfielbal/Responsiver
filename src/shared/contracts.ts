@@ -5,6 +5,17 @@ export type ThemeDetection = ThemeMode | 'dual' | 'unknown'
 export type PreviewReadinessStatus = 'ready' | 'degraded' | 'blocked' | 'needs-build'
 export type PreviewStrategy = 'static' | 'artifact' | 'source' | 'unsupported'
 export type RecentProjectAvailability = 'available' | 'missing' | 'unreadable' | 'unsupported'
+export type AuditSourceKind = 'local-project' | 'remote-url' | 'linked-localhost'
+export type RemoteAuditMode = 'public' | 'localhost'
+export type FindingConfidence = 'certain' | 'probable' | 'review'
+
+export interface AuditSource {
+  kind: AuditSourceKind
+  readOnly: boolean
+  url: string | null
+  localRoot: string | null
+  network: 'local-only' | 'public' | 'localhost'
+}
 
 export interface SourceLocation {
   file: string
@@ -34,6 +45,17 @@ export interface ProjectIssue {
   rule: string
   proposal: string
   fix?: ProjectFix
+  confidence?: FindingConfidence
+  evidence?: FindingEvidence
+}
+
+export interface FindingEvidence {
+  selector: string | null
+  route: string
+  viewport: { width: number; height: number }
+  rectangle?: { x: number; y: number; width: number; height: number } | null
+  measurements?: Record<string, string | number | boolean | null>
+  screenshotDataUrl?: string | null
 }
 
 export interface ProjectRoute {
@@ -90,6 +112,7 @@ export interface ProjectSnapshot {
   kind: string
   files: number
   analyzedAt: string
+  source: AuditSource
   issues: ProjectIssue[]
   previewHtml: string | null
   previewOrigin: string | null
@@ -104,6 +127,133 @@ export interface ProjectSnapshot {
     scannedFiles: number
     scannedStyles: number
   }
+}
+
+export interface RemoteOpenRequest {
+  url: string
+  mode: RemoteAuditMode
+  linkedRoot?: string | null
+}
+
+export interface RemoteViewport {
+  width: number
+  height: number
+  deviceScaleFactor?: number
+  mobile?: boolean
+  touch?: boolean
+}
+
+export interface RemoteViewBounds {
+  x: number
+  y: number
+  width: number
+  height: number
+  scale: number
+  visible: boolean
+  viewport: RemoteViewport
+}
+
+export interface RemotePageState {
+  url: string
+  title: string
+  path: string
+  loading: boolean
+  canGoBack: boolean
+  canGoForward: boolean
+}
+
+export interface RemoteAuditResult {
+  url: string
+  path: string
+  generatedAt: string
+  viewports: RemoteViewport[]
+  findings: ProjectIssue[]
+  screenshotDataUrl: string | null
+}
+
+export interface WorkspaceFileSummary {
+  path: string
+  size: number
+  modifiedAt: string
+  dirty: boolean
+  version: number | null
+}
+
+export interface WorkspaceFileSnapshot {
+  path: string
+  content: string
+  sourceHash: string
+  currentHash: string
+  size: number
+  dirty: boolean
+  version: number
+  diff?: WorkspaceDiff
+  previewOrigin?: string | null
+}
+
+export interface WorkspaceDiff {
+  path: string
+  text: string
+  additions: number
+  deletions: number
+  truncated: boolean
+}
+
+export interface WorkspaceDocumentSnapshot {
+  path: string
+  version: number
+  dirty: boolean
+  sourceHash: string
+  currentHash: string
+  sourceBytes: number
+  currentBytes: number
+  additions: number
+  deletions: number
+}
+
+export interface WorkspaceSnapshot {
+  root: string
+  dirtyCount: number
+  overlayBytes: number
+  documents: WorkspaceDocumentSnapshot[]
+}
+
+export interface WorkspaceApplyResult {
+  path: string
+  hash: string
+  bytes: number
+  version: number
+}
+
+export interface LocalAiStatus {
+  available: boolean
+  provider: 'ollama' | 'llama.cpp' | null
+  endpoint: string
+  models: string[]
+  detail: string
+}
+
+export interface LocalAiRequest {
+  provider: 'ollama' | 'llama.cpp'
+  endpoint: string
+  model: string
+  prompt: string
+  context: {
+    projectName: string
+    sourceKind: AuditSourceKind
+    route: string
+    viewport?: RemoteViewport
+    findings: Array<Pick<ProjectIssue, 'id' | 'title' | 'description' | 'rule' | 'proposal' | 'source'>>
+    files?: Array<{ path: string; content: string }>
+    screenshotDataUrl?: string | null
+  }
+}
+
+export interface LocalAiResponse {
+  text: string
+  model: string
+  provider: 'ollama' | 'llama.cpp'
+  proposedFiles: Array<{ path: string; content: string; explanation: string }>
 }
 
 export interface ProjectPreparationProgress {

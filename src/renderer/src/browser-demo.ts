@@ -7,6 +7,7 @@ export const browserDemoProject: ProjectSnapshot = {
   kind: 'Démo statique',
   files: 28,
   analyzedAt: new Date().toISOString(),
+  source: { kind: 'local-project', readOnly: true, url: null, localRoot: 'Projet de démonstration local', network: 'local-only' },
   previewHtml,
   previewOrigin: null,
   previewBasePath: null,
