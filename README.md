@@ -1,25 +1,39 @@
 # Responsiver
 
-Responsiver est une application desktop open source pour vérifier localement la responsivité d’un projet web, parcourir ses pages et démos à différentes tailles, puis préparer des décisions de correction explicables.
+Responsiver est un laboratoire desktop open source pour auditer, corriger et valider la responsivité d’un projet web sans envoyer son code vers un service distant.
 
-## Principes
+La version 0.3 ouvre un dossier ou un fichier HTML, sert le site sur une origine locale isolée, permet de naviguer réellement entre ses pages, mesure les débordements, prépare des corrections déterministes dans un staging en mémoire, puis exporte un patch ou une copie corrigée. Le dossier source n’est jamais réécrit.
 
-- Aucun compte, API produit, télémétrie ou envoi volontaire de projet.
-- Les dossiers importés sont lus et servis uniquement depuis la machine.
-- Un serveur HTTP temporaire, limité à `127.0.0.1` et à un port aléatoire, permet aux liens, assets et scripts **locaux** de fonctionner.
-- Les routes HTML détectées sont accessibles depuis le sélecteur de pages ; les popups internes sont réorientés dans la preview.
-- Le projet source n’est jamais modifié automatiquement.
-- Les constats distinguent `standard`, `heuristique` et `manuel`.
+## Fonctionnalités
 
-La seule sortie réseau autorisée par défaut depuis une preview est le chargement HTTPS de Google Fonts (`fonts.googleapis.com` pour les feuilles de style et `fonts.gstatic.com` pour les polices). Consultez [PRIVACY.md](PRIVACY.md) pour ses conséquences. Les autres destinations, permissions navigateur et ouvertures externes sont refusées.
+- Ouverture par dossier, fichier HTML, chemin local ou glisser-déposer.
+- Détection prioritaire de la vraie entrée du site ; les dossiers `demo`, `examples` et assimilés ne prennent pas sa place.
+- Navigation fonctionnelle entre les pages, ancres et fenêtres internes du projet.
+- Aperçu smartphone, tablette et ordinateur avec modèles connus, dimensions libres et rotation.
+- Mode **Comparer** sur trois familles d’appareils.
+- Analyse HTML/CSS par route : viewport, largeurs fixes, `min-width`, `nowrap`, ressources distantes et vérification visuelle.
+- Audit runtime des éléments qui débordent réellement du viewport.
+- Staging source/corrigé non destructif et patch unifié lisible.
+- Génération du thème complémentaire : clair pour un site sombre, sombre pour un site clair, sans doublon si les deux existent.
+- Ajustements locaux sans IA pour la couleur, les espacements, les arrondis, l’échelle du texte et la navigation.
+- Export du patch, des seuls fichiers modifiés, d’une copie complète corrigée ou d’un rapport JSON portable.
+- Démo multi-page et interactive utilisant exactement le même runner que les projets importés.
 
-## Périmètre actuel
+## Données et réseau
 
-Responsiver 0.2 prend en charge les projets HTML, CSS et JavaScript déjà prêts à servir : site statique, assets locaux, pages secondaires et démos navigateur. Il ne lance ni `npm install`, ni commande de build/dev, ni backend, SSR ou service distant.
+Responsiver n’intègre ni compte, télémétrie, analytics, API produit distante, moteur d’IA ou mise à jour automatique.
 
-Le staging conserve aujourd’hui des propositions textuelles vérifiables ; il ne génère pas encore un patch AST appliquable. La vue Thèmes détecte l’état de la page active et recommande seulement le thème complémentaire : la génération sémantique de thème reste à construire.
+Le code importé reste sur la machine. Les aperçus peuvent charger uniquement leurs ressources locales et, si le projet en contient déjà, les feuilles et fichiers de police Google Fonts en HTTPS. Les autres CDN, `fetch`, WebSockets, formulaires externes, nouvelles fenêtres et permissions navigateur sont bloqués. Une ressource externe interdite est signalée dans les constats afin de pouvoir la vendoriser localement après vérification de sa licence.
 
-## Lancer l’application
+Consultez [PRIVACY.md](PRIVACY.md) et [SECURITY.md](SECURITY.md) pour le détail.
+
+## Projets pris en charge
+
+Le runner ouvre les sites statiques et les sorties déjà compilées : HTML, CSS, JavaScript, médias, WebAssembly et routes SPA avec fallback local.
+
+Responsiver n’exécute jamais automatiquement `npm install`, un script de build, un serveur backend, du SSR ou une commande provenant du projet. Pour Vite, Next, Nuxt, Astro et les autres chaînes nécessitant une compilation, ouvrez le fichier HTML ou le dossier produit dans `dist`, `out`, `build` ou équivalent. L’interface affiche cette limite lorsqu’une chaîne de build est détectée.
+
+## Lancer le projet
 
 Prérequis : Node.js 22 ou plus récent.
 
@@ -32,32 +46,52 @@ Vérifications :
 
 ```bash
 npm run typecheck
+npm test
+npm run test:e2e
 npm run build
 npm audit
+```
+
+Le test E2E lance Electron et couvre la démo, la navigation, le staging, le thème complémentaire, la conversation locale, la comparaison et l’export. `npm run test:e2e:packaged` exécute le même parcours sur l’application macOS déjà empaquetée.
+
+Un projet réel peut être vérifié sans coder un scénario dédié :
+
+```bash
+npm run test:project -- /chemin/du/projet
+```
+
+## Produire les applications desktop
+
+```bash
+npm run package
+```
+
+`electron-builder` produit les formats macOS, Windows ou Linux correspondant à la machine de build. Le workflow [paquets.yml](.github/workflows/paquets.yml) construit les trois systèmes et attache les fichiers à une GitHub Release lorsqu’un tag `v*` est poussé.
+
+Les paquets publics sont volontairement **non signés** tant qu’aucun certificat n’est configuré. Cela évite tout coût ou contrat de signature, mais macOS Gatekeeper et Windows SmartScreen peuvent afficher un avertissement. Une diffusion sans avertissement nécessite ultérieurement des certificats de signature propres à chaque plateforme ; elle devra être décidée séparément.
+
+## Principes de correction
+
+Chaque proposition indique sa règle, sa route, son fichier, sa ligne et son niveau de confiance. Les transformations sont appliquées dans une carte d’overlays en mémoire. Les fichiers sources sont re-hachés avant export : si l’un d’eux a changé entre-temps, Responsiver refuse l’export et demande de reconstruire le staging.
+
+Les corrections heuristiques restent à relire. Responsiver ne prétend pas qu’une largeur fixe ou un `nowrap` est toujours une erreur ; l’aperçu source/staging et le patch existent précisément pour garder la décision humaine.
+
+## Open source et obligations
+
+Le dépôt est sous licence Apache-2.0. Les dépendances directes utilisent des licences MIT ou Apache-2.0 et sont recensées dans [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Les versions exactes sont verrouillées dans `package-lock.json` et un SBOM peut être généré avec :
+
+```bash
 npm run sbom > sbom.spdx.json
 ```
 
-## Parcours produit
+Open source ne signifie pas « aucune règle » : les avis de licence doivent rester distribués, GitHub reste soumis à ses conditions d’utilisation, et Google Fonts à sa politique propre lorsqu’un projet le charge. Responsiver organise ces obligations sans ajouter de service payant.
 
-1. **Projets** — choisir un dossier, ou coller son chemin local ; une démo intégrée reste disponible.
-2. **Tester** — choisir une famille d’appareil, un format, des dimensions exactes et l’orientation ; naviguer entre les pages détectées.
-3. **Constats** — lire la règle, le viewport et le fichier concernés.
-4. **Modifications** — décider quelles propositions entrent dans le staging, sans faux aperçu avant/après.
-5. **Thèmes** — partir du thème réellement rendu sur la page active et éviter les doublons clair/sombre.
-6. **Exporter** — copier les propositions retenues ou enregistrer un rapport JSON local.
+## Documentation
 
-## Sécurité et confidentialité
+- [Rapport produit et traçabilité](docs/rapport-produit.md)
+- [Architecture technique](docs/architecture.md)
+- [Confidentialité](PRIVACY.md)
+- [Sécurité](SECURITY.md)
+- [Notices tierces](THIRD_PARTY_NOTICES.md)
 
-La politique détaillée est disponible dans [PRIVACY.md](PRIVACY.md), les limites de sécurité et le signalement de vulnérabilités dans [SECURITY.md](SECURITY.md), et l’architecture dans [docs/architecture.md](docs/architecture.md).
-
-Les dépendances, notices et licences tierces sont recensées dans [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Le dépôt est sous licence Apache-2.0.
-
-## Contribuer
-
-Les commits suivent des messages français, impératifs et explicites, par exemple :
-
-```text
-feat: rendre les projets locaux navigables
-fix: bloquer les sorties réseau de la prévisualisation
-docs: préciser les limites du runner local
-```
+Les commits du projet sont rédigés en français, avec des messages explicites comme `feat: créer le moteur de corrections déterministes`.
