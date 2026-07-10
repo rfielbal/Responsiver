@@ -1,0 +1,74 @@
+name: Paquets desktop
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  empaqueter:
+    name: ${{ matrix.system }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: macOS
+            runner: macos-latest
+          - system: Windows
+            runner: windows-latest
+          - system: Linux
+            runner: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Récupérer le dépôt
+        uses: actions/checkout@v4
+      - name: Installer Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Installer les dépendances
+        run: npm ci
+      - name: Vérifier puis empaqueter
+        run: npm run package
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Conserver les paquets
+        uses: actions/upload-artifact@v4
+        with:
+          name: Responsiver-${{ matrix.system }}
+          path: |
+            dist/*.dmg
+            dist/*.zip
+            dist/*.exe
+            dist/*.AppImage
+            dist/*.deb
+          if-no-files-found: error
+
+  publier:
+    name: Publier la release GitHub
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: empaqueter
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Récupérer tous les paquets
+        uses: actions/download-artifact@v4
+        with:
+          path: artefacts
+      - name: Créer ou compléter la release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          shopt -s globstar nullglob
+          fichiers=(artefacts/**/*.{dmg,zip,exe,AppImage,deb})
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${fichiers[@]}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${fichiers[@]}" --generate-notes --title "Responsiver $GITHUB_REF_NAME"
+          fi

@@ -1,0 +1,47 @@
+appId: fr.responsiver.desktop
+productName: Responsiver
+copyright: Copyright © 2026 Responsiver contributors
+asar: true
+afterPack: build/after-pack.cjs
+
+directories:
+  output: dist
+
+files:
+  - out/**/*
+  - package.json
+
+extraResources:
+  - from: demo/atelier
+    to: demo/atelier
+
+mac:
+  icon: build/icon.png
+  identity: null
+  category: public.app-category.developer-tools
+  extendInfo:
+    NSAppTransportSecurity:
+      NSAllowsArbitraryLoads: false
+      NSAllowsLocalNetworking: true
+  target:
+    - dmg
+    - zip
+
+win:
+  icon: build/icon.png
+  target:
+    - nsis
+    - zip
+
+linux:
+  icon: build/icon.png
+  category: Development
+  target:
+    - AppImage
+    - deb
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
