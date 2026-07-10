@@ -10,6 +10,8 @@ if (!window.responsiver) {
     chooseProjectFile: async () => null,
     openProjectPath: async () => { throw new Error('L’ouverture par chemin est disponible uniquement dans Electron.') },
     openDemoProject: async () => browserDemoProject,
+    previewStaging: async () => { throw new Error('La prévisualisation des corrections est disponible uniquement dans Electron.') },
+    clearPreviewStaging: async (_expectedOrigin: string) => undefined,
     buildStaging: async () => { throw new Error('Le staging est disponible uniquement dans Electron.') },
     clearStaging: async () => undefined,
     exportPatch: async () => null,

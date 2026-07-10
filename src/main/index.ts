@@ -13,6 +13,7 @@ interface ActiveProjectSession {
   root: string
   project: ProjectSnapshot
   sourceServer: ProjectServer | null
+  proposalServer: ProjectServer | null
   stagedServer: ProjectServer | null
   staging: ProjectStaging | null
 }
@@ -40,6 +41,16 @@ function originOf(value: string): string | null {
     return new URL(value).origin
   } catch {
     return null
+  }
+}
+
+function isLoopbackPreviewOrigin(value: string | null | undefined): boolean {
+  if (!value) return false
+  try {
+    const origin = new URL(value)
+    return origin.protocol === 'http:' && origin.hostname === '127.0.0.1'
+  } catch {
+    return false
   }
 }
 
@@ -76,6 +87,7 @@ async function disposeSession(session: ActiveProjectSession | null): Promise<voi
   if (!session) return
   await Promise.all([
     closePreviewServer(session.sourceServer),
+    closePreviewServer(session.proposalServer),
     closePreviewServer(session.stagedServer)
   ])
 }
@@ -118,6 +130,7 @@ async function createLocalSession(selection: NormalizedProjectSelection): Promis
     root: selection.root,
     project: { ...project, previewOrigin: sourceServer?.origin ?? null },
     sourceServer,
+    proposalServer: null,
     stagedServer: null,
     staging: null
   }
@@ -149,7 +162,7 @@ async function openDemoProject(): Promise<ProjectSnapshot> {
   if (demoRoot) return openLocalProject({ root: demoRoot, preferredEntryPath: '/index.html' })
   if (!mainWindow) throw new Error('La fenêtre Responsiver a été fermée pendant l’ouverture de la démonstration.')
   const project = createDemoProject()
-  await replaceActiveSession({ root: '', project, sourceServer: null, stagedServer: null, staging: null })
+  await replaceActiveSession({ root: '', project, sourceServer: null, proposalServer: null, stagedServer: null, staging: null })
   return project
 }
 
@@ -180,10 +193,43 @@ async function buildStaging(value: unknown): Promise<StagingSnapshot> {
   }
   if (stagedServer) knownPreviewOrigins.add(stagedServer.origin)
   const previousServer = session.stagedServer
+  const proposalServer = session.proposalServer
   session.staging = staging
   session.stagedServer = stagedServer
-  await closePreviewServer(previousServer)
+  session.proposalServer = null
+  await Promise.all([
+    closePreviewServer(previousServer),
+    closePreviewServer(proposalServer)
+  ])
   return { ...staging.snapshot, previewOrigin: stagedServer?.origin ?? null }
+}
+
+async function previewStaging(value: unknown): Promise<StagingSnapshot> {
+  if (!validStagingRequest(value)) throw new Error('La demande de prévisualisation est invalide.')
+  const session = currentSession()
+  const proposal = await buildProjectStaging(session.root, session.project, value)
+  if (activeSession !== session || !mainWindow) throw new Error('La session projet a changé pendant la préparation de la prévisualisation.')
+  const proposalServer = session.project.entryPath
+    ? await startProjectServer(session.root, { mode: 'proposal', overrides: proposal.overrides })
+    : null
+  if (activeSession !== session || !mainWindow) {
+    await closePreviewServer(proposalServer)
+    throw new Error('La session projet a changé pendant le démarrage de la prévisualisation.')
+  }
+  if (proposalServer) knownPreviewOrigins.add(proposalServer.origin)
+  const previousServer = session.proposalServer
+  session.proposalServer = proposalServer
+  await closePreviewServer(previousServer)
+  return { ...proposal.snapshot, previewOrigin: proposalServer?.origin ?? null }
+}
+
+async function clearPreviewStaging(expectedOrigin: unknown): Promise<void> {
+  if (!activeSession) return
+  const server = activeSession.proposalServer
+  if (!server) return
+  if (typeof expectedOrigin !== 'string' || server.origin !== expectedOrigin) return
+  activeSession.proposalServer = null
+  await closePreviewServer(server)
 }
 
 async function clearStaging(): Promise<void> {
@@ -383,7 +429,8 @@ function configureWindowSecurity(window: BrowserWindow, packagedRendererUrl: str
   window.webContents.on('will-frame-navigate', (details) => {
     const initiatorOrigin = details.initiator?.origin ?? details.frame?.origin
     const destinationOrigin = originOf(details.url)
-    if (initiatorOrigin && knownPreviewOrigins.has(initiatorOrigin) && destinationOrigin !== initiatorOrigin) details.preventDefault()
+    if (isLoopbackPreviewOrigin(initiatorOrigin) && destinationOrigin !== initiatorOrigin) details.preventDefault()
+    else if (isLoopbackPreviewOrigin(destinationOrigin) && destinationOrigin && !knownPreviewOrigins.has(destinationOrigin)) details.preventDefault()
   })
 
   const electronSession = window.webContents.session
@@ -393,8 +440,9 @@ function configureWindowSecurity(window: BrowserWindow, packagedRendererUrl: str
     try {
       const request = new URL(details.url)
       const initiatingOrigin = details.frame?.origin ?? originOf(details.referrer)
-      if (!initiatingOrigin || !knownPreviewOrigins.has(initiatingOrigin)) {
-        callback({})
+      if (!isLoopbackPreviewOrigin(initiatingOrigin)) {
+        const targetsPreviewFrame = details.resourceType === 'subFrame' && isLoopbackPreviewOrigin(request.origin)
+        callback({ cancel: targetsPreviewFrame && !knownPreviewOrigins.has(request.origin) })
         return
       }
       const isInlineResource = request.protocol === 'about:' || request.protocol === 'blob:' || request.protocol === 'data:'
@@ -471,6 +519,14 @@ function registerIpcHandlers(): void {
   ipcMain.handle('staging:build', async (event, request: unknown): Promise<StagingSnapshot> => {
     requireTrustedWindow(event)
     return queueSessionOperation(() => buildStaging(request))
+  })
+  ipcMain.handle('staging:preview', async (event, request: unknown): Promise<StagingSnapshot> => {
+    requireTrustedWindow(event)
+    return queueSessionOperation(() => previewStaging(request))
+  })
+  ipcMain.handle('staging:clear-preview', async (event, expectedOrigin: unknown): Promise<void> => {
+    requireTrustedWindow(event)
+    return queueSessionOperation(() => clearPreviewStaging(expectedOrigin))
   })
   ipcMain.handle('staging:clear', async (event): Promise<void> => {
     requireTrustedWindow(event)

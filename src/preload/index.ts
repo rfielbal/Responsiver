@@ -11,6 +11,8 @@ if (process.isMainFrame) {
     chooseProjectFile: (): Promise<ProjectSnapshot | null> => ipcRenderer.invoke('project:choose-file'),
     openProjectPath: (path: string): Promise<ProjectSnapshot> => ipcRenderer.invoke('project:open-path', path),
     openDemoProject: (): Promise<ProjectSnapshot> => ipcRenderer.invoke('project:demo'),
+    previewStaging: (request: StagingRequest): Promise<StagingSnapshot> => ipcRenderer.invoke('staging:preview', request),
+    clearPreviewStaging: (expectedOrigin: string): Promise<void> => ipcRenderer.invoke('staging:clear-preview', expectedOrigin),
     buildStaging: (request: StagingRequest): Promise<StagingSnapshot> => ipcRenderer.invoke('staging:build', request),
     clearStaging: (): Promise<void> => ipcRenderer.invoke('staging:clear'),
     exportPatch: (): Promise<string | null> => ipcRenderer.invoke('staging:export-patch'),

@@ -17,6 +17,8 @@ declare global {
     chooseProjectFile: () => Promise<ProjectSnapshot | null>
     openProjectPath: (path: string) => Promise<ProjectSnapshot>
     openDemoProject: () => Promise<ProjectSnapshot>
+    previewStaging: (request: StagingRequest) => Promise<StagingSnapshot>
+    clearPreviewStaging: (expectedOrigin: string) => Promise<void>
     buildStaging: (request: StagingRequest) => Promise<StagingSnapshot>
     clearStaging: () => Promise<void>
     exportPatch: () => Promise<string | null>

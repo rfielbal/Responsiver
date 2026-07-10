@@ -4,14 +4,14 @@ import { extname, normalize, posix, relative, resolve, sep } from 'node:path'
 import { URL } from 'node:url'
 
 export interface ProjectServerOptions {
-  mode?: 'source' | 'staged'
+  mode?: 'source' | 'proposal' | 'staged'
   overrides?: ReadonlyMap<string, Buffer | string>
   injectedCss?: string
 }
 
 export interface ProjectServer {
   origin: string
-  mode: 'source' | 'staged'
+  mode: 'source' | 'proposal' | 'staged'
   close: () => Promise<void>
 }
 
@@ -82,9 +82,18 @@ const previewCsp = [
   "object-src 'none'"
 ].join('; ')
 
-const bridge = `<script data-responsiver-bridge>
+const bridge = `<style data-responsiver-bridge-style>
+[data-responsiver-reveal-target] {
+  outline: 3px solid #b94d32 !important;
+  outline-offset: 4px !important;
+  scroll-margin: 72px !important;
+}
+</style><script data-responsiver-bridge>
 (() => {
   const channel = 'responsiver-preview';
+  const revealAttribute = 'data-responsiver-reveal-target';
+  const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let originalThemeState = null;
   const message = (type, payload = {}) => parent.postMessage({ channel, type, ...payload }, '*');
   const transparent = (value) => !value || value === 'transparent' || value === 'rgba(0, 0, 0, 0)';
   const luminance = (value) => {
@@ -167,6 +176,131 @@ const bridge = `<script data-responsiver-bridge>
       else message('external-link', { url: destination.href });
     } catch { message('navigation-error', { value: String(value) }); }
   };
+  const clearReveal = () => {
+    for (const element of document.querySelectorAll('[' + revealAttribute + ']')) element.removeAttribute(revealAttribute);
+  };
+  const rememberThemeState = () => {
+    if (originalThemeState) return;
+    const root = document.documentElement;
+    const body = document.body;
+    originalThemeState = {
+      attributes: ['data-theme', 'data-color-scheme', 'data-color-mode', 'theme'].map((name) => [name, root.getAttribute(name)]),
+      rootDark: root.classList.contains('dark'),
+      rootLight: root.classList.contains('light'),
+      bodyDark: body?.classList.contains('dark') || false,
+      bodyLight: body?.classList.contains('light') || false,
+      colorScheme: root.style.colorScheme
+    };
+  };
+  const mediaRulesForTheme = (value) => {
+    const rules = [];
+    const pattern = new RegExp('prefers-color-scheme\\s*:\\s*' + value, 'i');
+    for (const sheet of document.styleSheets) {
+      let sheetRules;
+      try { sheetRules = sheet.cssRules; } catch { continue; }
+      for (const rule of sheetRules) {
+        if (rule.type !== CSSRule.MEDIA_RULE || !pattern.test(rule.conditionText || '')) continue;
+        for (const nestedRule of rule.cssRules || []) rules.push(nestedRule.cssText);
+      }
+    }
+    return rules.join('\\n');
+  };
+  const applyThemePreview = (value) => {
+    if (value !== 'dark' && value !== 'light') return;
+    rememberThemeState();
+    const root = document.documentElement;
+    const body = document.body;
+    for (const attribute of ['data-theme', 'data-color-scheme', 'data-color-mode', 'theme']) root.setAttribute(attribute, value);
+    root.classList.toggle('dark', value === 'dark');
+    root.classList.toggle('light', value === 'light');
+    body?.classList.toggle('dark', value === 'dark');
+    body?.classList.toggle('light', value === 'light');
+    root.style.colorScheme = value;
+    const mediaCss = mediaRulesForTheme(value);
+    let mediaStyle = document.querySelector('style[data-responsiver-native-theme]');
+    if (mediaCss && !mediaStyle) {
+      mediaStyle = document.createElement('style');
+      mediaStyle.setAttribute('data-responsiver-native-theme', '');
+      document.head.append(mediaStyle);
+    }
+    if (mediaStyle) mediaStyle.textContent = mediaCss;
+    requestAnimationFrame(schedule);
+  };
+  const clearThemePreview = () => {
+    if (!originalThemeState) return;
+    const root = document.documentElement;
+    const body = document.body;
+    for (const [name, value] of originalThemeState.attributes) {
+      if (value === null) root.removeAttribute(name); else root.setAttribute(name, value);
+    }
+    root.classList.toggle('dark', originalThemeState.rootDark);
+    root.classList.toggle('light', originalThemeState.rootLight);
+    body?.classList.toggle('dark', originalThemeState.bodyDark);
+    body?.classList.toggle('light', originalThemeState.bodyLight);
+    root.style.colorScheme = originalThemeState.colorScheme;
+    document.querySelector('style[data-responsiver-native-theme]')?.remove();
+    originalThemeState = null;
+    requestAnimationFrame(schedule);
+  };
+  const normalizeRevealSelector = (value) => {
+    const statePseudo = '(?:hover|active|focus(?:-visible|-within)?|visited|link|target|checked|disabled|enabled|required|optional|valid|invalid|user-valid|user-invalid|placeholder-shown|autofill|playing|paused|fullscreen|modal|popover-open)';
+    return value
+      .replace(new RegExp(':not\\\\(\\\\s*:' + statePseudo + '\\\\s*\\\\)', 'gi'), '')
+      .replace(/::[a-z-]+(?:\\([^)]*\\))?/gi, '')
+      .replace(new RegExp(':' + statePseudo + '\\\\b(?:\\\\([^)]*\\\\))?', 'gi'), '')
+      .replace(/:(?:not|is|where|has)\\(\\s*\\)/gi, '')
+      .replace(/(^|[>+~,])\\s*&\\s*/g, '$1 ')
+      .trim();
+  };
+  const reveal = (value) => {
+    clearReveal();
+    if (typeof value !== 'string' || !value.trim()) {
+      scrollTo({ top: 0, left: 0, behavior: reducedMotion ? 'auto' : 'smooth' });
+      const result = { requestedSelector: null, resolvedSelector: null, found: true, target: 'document', path: location.pathname + location.search + location.hash };
+      message('reveal-result', result);
+      message('focus-result', result);
+      return;
+    }
+    const requestedSelector = value.trim().slice(0, 2048);
+    const withoutPseudoElement = requestedSelector.replace(/::[a-z-]+(?:\\([^)]*\\))?/gi, '').trim();
+    const normalizedSelector = normalizeRevealSelector(requestedSelector);
+    const candidates = [...new Set([requestedSelector, withoutPseudoElement, normalizedSelector].filter(Boolean))];
+    let target = null;
+    let resolvedSelector = null;
+    for (const candidate of candidates) {
+      try {
+        const matches = [...document.querySelectorAll(candidate)];
+        target = matches.find((element) => {
+          const rectangle = element.getBoundingClientRect();
+          const style = getComputedStyle(element);
+          return rectangle.width > 0 && rectangle.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+        }) || matches[0] || null;
+        if (target) {
+          resolvedSelector = candidate;
+          break;
+        }
+      } catch {}
+    }
+    if (!target) {
+      const result = { requestedSelector, resolvedSelector: normalizedSelector || null, found: false, path: location.pathname + location.search + location.hash };
+      message('reveal-result', result);
+      message('focus-result', result);
+      return;
+    }
+    target.setAttribute(revealAttribute, '');
+    target.scrollIntoView({ block: 'center', inline: 'center', behavior: reducedMotion ? 'auto' : 'smooth' });
+    const rectangle = target.getBoundingClientRect();
+    const result = {
+      requestedSelector,
+      resolvedSelector,
+      found: true,
+      target: target.tagName.toLowerCase(),
+      rectangle: { x: rectangle.x, y: rectangle.y, width: rectangle.width, height: rectangle.height },
+      path: location.pathname + location.search + location.hash
+    };
+    message('reveal-result', result);
+    message('focus-result', result);
+  };
   addEventListener('message', (event) => {
     if (event.source !== parent) return;
     const data = event.data;
@@ -176,6 +310,15 @@ const bridge = `<script data-responsiver-bridge>
     if (data.type === 'forward') history.forward();
     if (data.type === 'reload') location.reload();
     if (data.type === 'audit') audit();
+    if (data.type === 'set-theme-preview') applyThemePreview(data.theme);
+    if (data.type === 'clear-theme-preview') clearThemePreview();
+    if (data.type === 'reveal' || data.type === 'focus-selector') reveal(data.selector);
+    if (data.type === 'clear-focus') {
+      clearReveal();
+      const result = { requestedSelector: null, resolvedSelector: null, found: false, cleared: true, path: location.pathname + location.search + location.hash };
+      message('reveal-result', result);
+      message('focus-result', result);
+    }
   });
   const pushState = history.pushState.bind(history);
   const replaceState = history.replaceState.bind(history);
@@ -184,6 +327,7 @@ const bridge = `<script data-responsiver-bridge>
   addEventListener('popstate', schedule);
   addEventListener('hashchange', schedule);
   addEventListener('resize', schedule);
+  addEventListener('keydown', (event) => { if (event.key === 'Escape') message('escape'); }, true);
   document.addEventListener('click', (event) => {
     const target = event.target instanceof Element ? event.target.closest('a[href]') : null;
     if (!target || event.defaultPrevented) return;
