@@ -22,9 +22,10 @@ La direction UI conserve sa propre grammaire — rail graphite, papier minéral,
 | Auditer un localhost | Boucle locale uniquement | Aucun accès LAN implicite |
 | Travailler sur Symfony/MySQL/Docker | Connexion au localhost déjà lancé | Responsiver ne démarre ni backend, DB, conteneur ou migration |
 | Associer le code au localhost | Dossier source facultatif, session `linked-localhost` | L’association est explicite |
-| Détecter des problèmes visuels | Balayage 360/390/768/1024/1440 avec mesures DOM | Route courante uniquement, pas de crawler |
+| Détecter des problèmes visuels | Balayage distant 360/390/768/1024/1440 et audit runtime local sur huit règles | Routes visitées cumulées, pas de crawler autonome |
 | Détecter les défauts objectifs | Overflow, clipping, texte, tactile, fixe, image, contraste, runtime | Ce n’est pas une note esthétique universelle |
-| Ouvrir un constat dans son contexte | Route, sélecteur, scroll et contour temporaire | Fallback route si le sélecteur n’existe plus |
+| Ouvrir un constat dans son contexte | Route exacte, viewport, sélecteur, scroll et contour temporaire | L’interface signale si le sélecteur n’existe plus |
+| Conserver l’audit URL | Agrégation de session, synthèse copiable et rapport JSON | Aucune persistance sans export explicite |
 | Voir l’avant/après | Source et Proposition séparées | Projets locaux déterministes |
 | Accepter ou refuser chaque correctif | Consultation sans effet puis décision explicite | Staging reconstruit uniquement avec les choix retenus |
 | Prévisualiser clair/sombre | Activation native ou proposition complémentaire | Validation du thème séparée |
@@ -32,9 +33,9 @@ La direction UI conserve sa propre grammaire — rail graphite, papier minéral,
 | Voir immédiatement le résultat | Runner workspace local ; injection CSS sur localhost lié | HTML/JS distant dépendent du rechargement du serveur de dev |
 | Protéger les sources | Secrets, binaires, builds, dépendances et symlinks exclus | Hash, version et renommage atomique |
 | Ajouter une IA sans cloud | Connecteurs loopback Ollama et llama.cpp | Moteur et modèle non embarqués |
-| Donner du contexte à l’IA | Constats, route, viewport, capture et fichiers bornés | Aucun terminal ni accès disque direct |
+| Donner du contexte à l’IA | Constats, route, viewport, capture et fichiers bornés avec liste et cases d’inclusion | Aucun terminal ni accès disque direct |
 | Valider une proposition IA | Chargement dans l’overlay Monaco, puis diff | Sortie modèle considérée non fiable |
-| Ouvrir depuis Chrome | Manifest V3 `activeTab` + `nativeMessaging` | Installation manuelle, app non lancée automatiquement |
+| Ouvrir depuis Chrome | Manifest V3 `activeTab` + `nativeMessaging`, HTTPS public ou HTTP(S) loopback | Host acquitté, desktop non acquitté ; installation manuelle |
 | Minimiser les données Chrome | URL/titre/viewport/DPR après clic | Aucun DOM, cookie, historique ou `<all_urls>` |
 | Fonctionnement local-first | Pas de compte, télémétrie, API cloud ou fallback distant | Une URL auditée contacte nécessairement son site |
 | Distribution GitHub | Paquets, notices, SBOM, hashes et ressources du compagnon | Paquets et compagnon encore non signés / partiellement manuels |
@@ -75,7 +76,9 @@ Cette distinction est volontaire : le staging sert à préparer une livraison no
 
 ## Analyse visuelle
 
-Le moteur distant exécute les mêmes mesures sur cinq viewports et conserve des preuves structurées : sélecteur, rectangle, style, valeur observée, seuil attendu et confiance. Les résultats de la page sont assainis dans le processus principal avant de devenir des constats.
+Le moteur distant exécute les mêmes mesures sur cinq viewports et conserve des preuves structurées : sélecteur, rectangle, style, valeur observée, seuil attendu et confiance. Les résultats de la page sont assainis dans le processus principal avant de devenir des constats. Chaque nouvelle route visitée est auditée automatiquement et rejoint l’historique de session ; une réanalyse remplace seulement cette route. Les plafonds atteints sont visibles et exportés.
+
+Le runner local complète désormais l’analyse statique avec huit familles de mesures runtime sur le viewport actif. Son message est à nouveau borné et assaini dans le renderer, car le JavaScript du projet reste une entrée non fiable.
 
 Cette méthode détecte des incohérences mesurables, mais pas toutes les fautes de direction artistique. Sans maquette ou baseline approuvée, Responsiver ne peut pas savoir si une composition volontaire est « belle ». L’assistant local peut commenter une capture avec un modèle multimodal compatible, mais son avis reste probabiliste et non bloquant.
 
@@ -115,7 +118,7 @@ Les paquets restent non signés. Une diffusion sans avertissements système et u
 ## Limites assumées
 
 - L’audit public exige HTTPS ; le mode localhost reste limité à la boucle locale.
-- L’audit distant couvre la route active et cinq largeurs, pas tout le site ni tous les breakpoints possibles.
+- L’audit distant cumule les routes visitées sur cinq largeurs, mais ne parcourt pas seul tout le site ni tous les breakpoints possibles.
 - Le rendu est Chromium/Electron ; Firefox et WebKit ne sont pas automatisés.
 - Une URL publique ne donne pas accès aux sources auteur et ne peut pas être corrigée sur le serveur.
 - Un localhost lié permet l’édition locale ; seule la CSS est injectée directement dans la session distante.
@@ -131,11 +134,13 @@ Les paquets restent non signés. Une diffusion sans avertissements système et u
 Contrôles reproductibles exécutés sur l’état consolidé :
 
 - `npm run typecheck` : réussi ;
-- `npm test` : 52 tests applicatifs réussis ;
-- `npm run test:native-host` : 14 tests du protocole Chrome réussis ;
+- `npm test` : 58 tests applicatifs réussis ;
+- `npm run test:native-host` : 17 tests du protocole Chrome réussis ;
+- `npm run test:e2e:remote` : redirection, historique multi-route, ciblage, rapport et formulaire localhost réussis ;
 - `npm run build` : réussi ;
 - `npm run package:dir` : paquet macOS arm64 construit ;
+- `npm audit --audit-level=moderate` : aucune vulnérabilité signalée ;
 - ressources `companion/chrome` et `companion/native-host` présentes dans l’application ;
 - bit exécutable du host macOS conservé.
 
-Les tests couvrent notamment analyseur, readiness, historique, URL/SSRF, audit distant, workspace, assistant local, file Chrome, serveur de preview, staging et exports. Le parcours E2E Electron complet de la v0.6 doit encore être rejoué sur chaque plateforme avant une release publique ; la construction locale ne remplace pas cette matrice.
+Les tests couvrent notamment analyseur, readiness, historique, URL/SSRF, audits local et distant, assainissement des messages du projet, workspace, assistant local, file Chrome, serveur de preview, staging et exports. Le parcours E2E Electron complet et les deux projets réels fournis ont été rejoués sur macOS ; cette validation locale ne remplace pas la matrice de release sur chaque plateforme.

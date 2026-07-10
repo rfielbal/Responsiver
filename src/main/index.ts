@@ -659,6 +659,10 @@ async function exportReport(owner: BrowserWindow, value: unknown): Promise<strin
     application: `Responsiver ${app.getVersion()}`,
     localOnly: session.project.source.network === 'local-only',
     networkMode: session.project.source.network,
+    auditSummary: session.remoteBrowser ? {
+      auditedRoutes: session.remoteRouteTruncation?.size ?? 0,
+      truncatedRoutes: [...(session.remoteRouteTruncation?.values() ?? [])].filter(Boolean).length
+    } : null,
     project: portableProject,
     projectId: createHash('sha256').update(`${session.project.name}\u001f${session.project.analyzedAt}`).digest('hex').slice(0, 12),
     acceptedRuleIds,

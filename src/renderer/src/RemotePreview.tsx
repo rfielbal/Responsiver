@@ -36,7 +36,7 @@ export default function RemotePreview({ projectId, device, visible, allowUpscale
   const stage = useRef<HTMLDivElement>(null)
   const host = useRef<HTMLDivElement>(null)
   const resizeCleanup = useRef<(() => void) | null>(null)
-  const auditedProject = useRef<string | null>(null)
+  const auditedRoutes = useRef(new Set<string>())
   const [scale, setScale] = useState(0.7)
   const [autoFit, setAutoFit] = useState(true)
   const [resizing, setResizing] = useState(false)
@@ -102,25 +102,37 @@ export default function RemotePreview({ projectId, device, visible, allowUpscale
     return off
   }, [projectId])
 
-  const audit = async (): Promise<void> => {
+  const audit = async (automatic = false): Promise<void> => {
     if (auditing) return
+    const routeKey = state?.path || '/'
+    if (automatic && auditedRoutes.current.has(routeKey)) return
+    if (automatic) auditedRoutes.current.add(routeKey)
     setAuditing(true)
     try {
       const result = await window.responsiver.auditRemote(sweepViewports)
+      auditedRoutes.current.add(result.path)
       onAudit(result)
-      onNotice(`${result.findings.length} constat${result.findings.length > 1 ? 's' : ''} visuel${result.findings.length > 1 ? 's' : ''} mesuré${result.findings.length > 1 ? 's' : ''} sur cinq largeurs.`)
-    } catch { onNotice('L’audit visuel n’a pas pu terminer toutes les mesures.') } finally {
+      onNotice(result.truncated
+        ? `${result.findings.length} constat${result.findings.length > 1 ? 's' : ''} mesuré${result.findings.length > 1 ? 's' : ''} sur cette route. Les limites de sécurité ont été atteintes : le résultat est partiel.`
+        : `${result.findings.length} constat${result.findings.length > 1 ? 's' : ''} visuel${result.findings.length > 1 ? 's' : ''} mesuré${result.findings.length > 1 ? 's' : ''} sur cette route et cinq largeurs.`)
+    } catch {
+      if (automatic) auditedRoutes.current.delete(routeKey)
+      onNotice('L’audit visuel n’a pas pu terminer toutes les mesures.')
+    } finally {
       setAuditing(false)
       window.requestAnimationFrame(publishBounds)
     }
   }
 
   useEffect(() => {
-    if (!automaticAudit || !visible || auditedProject.current === projectId) return
-    auditedProject.current = projectId
-    const timer = window.setTimeout(() => { void audit() }, 850)
+    auditedRoutes.current.clear()
+  }, [projectId])
+
+  useEffect(() => {
+    if (!automaticAudit || !visible || state?.loading || !state?.path || auditedRoutes.current.has(state.path)) return
+    const timer = window.setTimeout(() => { void audit(true) }, 850)
     return () => window.clearTimeout(timer)
-  }, [automaticAudit, projectId, visible])
+  }, [automaticAudit, projectId, state?.loading, state?.path, visible])
 
   const navigate = async (action: 'back' | 'forward' | 'reload' | 'url', value?: string): Promise<void> => {
     try {
@@ -176,7 +188,7 @@ export default function RemotePreview({ projectId, device, visible, allowUpscale
       <div><button onClick={() => void navigate('back')} disabled={!state?.canGoBack} aria-label="Page précédente">←</button><button onClick={() => void navigate('forward')} disabled={!state?.canGoForward} aria-label="Page suivante">→</button><button onClick={() => void navigate('reload')} aria-label="Recharger">↻</button></div>
       <form onSubmit={submitAddress}><span>URL</span><input value={address} onChange={(event) => setAddress(event.target.value)} aria-label="Adresse de la page distante" /></form>
       <span className="remote-session-badge"><i /> Session éphémère</span>
-      <button className="remote-audit-button" onClick={() => void audit()} disabled={auditing}>{auditing ? 'Analyse…' : 'Analyser 5 largeurs'}</button>
+      <button className="remote-audit-button" onClick={() => void audit(false)} disabled={auditing}>{auditing ? 'Analyse…' : 'Analyser cette route'}</button>
     </div>
     <div className="remote-stage" ref={stage}>
       <div className="remote-device-space" style={{ width: width + 14, height: height + 14 }}>

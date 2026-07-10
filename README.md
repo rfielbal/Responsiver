@@ -8,9 +8,9 @@ La version 0.6 ajoute quatre capacités majeures : audit d’URL dans une sessio
 
 | Source | Navigation | Audit visuel | Modification |
 | --- | --- | --- | --- |
-| Projet local statique ou compilé | Oui | Analyse locale et runtime | Oui, avec overlays puis confirmation explicite |
-| URL publique HTTPS | Oui | Oui, sur la route courante | Lecture seule |
-| Localhost | Oui | Oui, sur la route courante | Lecture seule, ou édition si un dossier source local est associé |
+| Projet local statique ou compilé | Oui | Analyse statique + huit familles de mesures runtime | Oui, avec overlays puis confirmation explicite |
+| URL publique HTTPS | Oui | Oui, cumulée sur les routes visitées | Lecture seule |
+| Localhost | Oui | Oui, cumulée sur les routes visitées | Lecture seule, ou édition si un dossier source local est associé |
 
 Responsiver ne prétend pas retrouver le code auteur d’un site public à partir de ses bundles. Une URL publique reste donc inspectable mais non modifiable. Pour Symfony, Laravel, Django, Rails, WordPress, Node ou un projet Docker, lancez d’abord l’application avec son environnement habituel puis ouvrez son localhost. Responsiver ne démarre ni conteneur, ni base de données, ni migration.
 
@@ -25,6 +25,7 @@ Responsiver ne prétend pas retrouver le code auteur d’un site public à parti
 - Diagnostic explicite des projets incomplets, des builds absents et des rendus vides au lieu d’une preview blanche.
 - Historique local d’anciens projets fondé sur leurs chemins, sans copie du code et avec réanalyse à la réouverture.
 - Navigation multi-page, ancres, historique et interactions locales via un runner lié à `127.0.0.1`.
+- Audit runtime de la page active : overflow, clipping, texte tronqué, cibles tactiles, éléments fixes, images et contraste simple, avec plafonds et sélecteurs localisables.
 
 ### Appareils et validation
 
@@ -43,10 +44,12 @@ Responsiver ne prétend pas retrouver le code auteur d’un site public à parti
 - Navigation arrière, avant, rechargement et saisie d’adresse dans une session éphémère.
 - Émulation Chromium des dimensions, du DPR, du tactile et du mode mobile.
 - Audit automatique de cinq largeurs : 360, 390, 768, 1024 et 1440 CSS px.
+- Chaque nouvelle route réellement visitée est auditée après son chargement ; les constats restent cumulés route par route sans exploration autonome des liens.
 - Détection objective des débordements, contenus masqués, textes tronqués, petites cibles tactiles, éléments fixes obstructifs, images absentes ou déformées, contrastes faibles et erreurs JavaScript.
-- Clic sur un constat distant pour centrer et mettre en évidence l’élément correspondant.
+- Clic sur un constat distant pour restaurer sa route exacte, son viewport et mettre en évidence l’élément s’il existe encore.
+- Limites de scan signalées dans l’interface, synthèse copiable et rapport JSON exportable avec solutions proposées.
 
-L’audit distant porte sur la route actuellement ouverte. Il ne parcourt pas automatiquement tout le site et ne remplace pas une revue humaine de la qualité esthétique.
+Responsiver n’ouvre pas seul tous les liens d’un site : il audite automatiquement les routes que vous visitez. Cette couverture mesurée ne remplace pas une revue humaine de la qualité esthétique.
 
 ### Espace code Monaco
 
@@ -65,16 +68,17 @@ Une frappe dans Monaco ne modifie jamais immédiatement le disque. En revanche, 
 - Connexion à un moteur Ollama ou llama.cpp déjà lancé sur une adresse HTTP loopback.
 - Aucun compte, aucune clé API, aucun fournisseur cloud et aucun fallback distant.
 - Contexte borné : route, viewport, constats, capture disponible et sélection limitée de fichiers locaux non sensibles.
+- Panneau préalable montrant les chemins exacts et permettant d’exclure séparément les fichiers ou la capture.
 - Réponse structurée et propositions de fichiers complets filtrées par chemin et taille.
 - Une proposition IA rejoint d’abord l’overlay de l’espace code ; elle n’est écrite qu’après validation humaine.
 - Aucun terminal, shell ou accès direct au disque accordé au modèle.
 
-Responsiver n’embarque ni moteur ni modèle. L’utilisateur installe et choisit son modèle local, sous sa propre licence. Le résultat dépend du modèle et doit être relu comme du code non fiable.
+Responsiver n’embarque ni moteur ni modèle. L’utilisateur installe et choisit son modèle local, sous sa propre licence. Responsiver borne la connexion à l’adresse loopback affichée, mais le moteur séparé peut journaliser ou relayer selon sa propre configuration. Le résultat dépend du modèle et doit être relu comme du code non fiable.
 
 ### Compagnon Chrome
 
 - Extension Manifest V3 avec seulement `activeTab` et `nativeMessaging`.
-- Transmission locale de l’URL, du titre, du viewport et du DPR après un clic explicite.
+- Transmission locale d’une URL HTTPS publique ou HTTP(S) loopback, du titre, du viewport et du DPR après un clic explicite.
 - Aucun accès permanent aux sites, cookies, mots de passe, historique ou DOM.
 - Native Messaging Host à schéma strict, messages limités et file privée expirant après dix minutes.
 
@@ -141,7 +145,7 @@ npm run test:project -- /chemin/du/projet
 npm run package
 ```
 
-`electron-builder` produit les formats de la plateforme de build. Les paquets embarquent les avis de licence, la démo et les sources du compagnon Chrome sous `resources/companion`. Le hook de packaging refuse un paquet incomplet.
+`electron-builder` produit les formats de la plateforme de build. Les paquets embarquent les avis de licence, `PRIVACY.md`, `SECURITY.md`, la démo et les sources du compagnon Chrome sous `resources/companion`. Le hook de packaging refuse un paquet incomplet.
 
 Le workflow de release construit les trois systèmes, génère un SBOM SPDX et un manifeste `SHA256SUMS`. Les paquets publics restent non signés tant qu’aucun certificat n’est configuré ; macOS Gatekeeper et Windows SmartScreen peuvent donc afficher un avertissement.
 

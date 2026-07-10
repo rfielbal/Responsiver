@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -9,13 +9,15 @@ import { _electron as electron } from 'playwright'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const userDataRoot = await mkdtemp(join(tmpdir(), 'responsiver-remote-e2e-'))
+const screenshotRoot = join(root, 'output', 'playwright')
+await mkdir(screenshotRoot, { recursive: true })
 let submittedMethod = null
 const requests = []
 
 const server = createServer((request, response) => {
   requests.push(`${request.method} ${request.url}`)
   if (request.url === '/') {
-    response.writeHead(302, { location: '/home' })
+    response.writeHead(302, { location: '/home?mode=mobile#copy' })
     response.end()
     return
   }
@@ -69,15 +71,44 @@ try {
   if (!openingText?.includes('Localhost ouvert')) throw new Error(`La session distante ne s’est pas ouverte : ${openingText ?? 'raison inconnue'}`)
   await page.locator('.remote-preview').waitFor({ state: 'visible' })
   await page.getByLabel('Adresse de la page distante').waitFor({ state: 'visible' })
-  await page.waitForFunction((expected) => document.querySelector('[aria-label="Adresse de la page distante"]')?.value === `${expected}/home`, origin)
+  await page.waitForFunction((expected) => document.querySelector('[aria-label="Adresse de la page distante"]')?.value === `${expected}/home?mode=mobile#copy`, origin)
 
   await page.getByText('Viewport mobile non déclaré').first().waitFor({ state: 'visible' })
   await page.getByText('Texte difficile à lire sur mobile').first().waitFor({ state: 'visible' })
-  assert.match(await page.locator('.activity-bar').textContent(), /constats sur 5 largeurs/)
+  assert.match(await page.locator('.activity-bar').textContent(), /constats cumulés · 5 largeurs/)
+
+  const auditLimits = await page.evaluate(() => window.responsiver.auditRemote([
+    { width: 390, height: 844, deviceScaleFactor: 1, mobile: true, touch: true }
+  ]))
+  assert.equal(auditLimits.truncated, false)
+  assert.ok(auditLimits.scannedNodes > 0 && auditLimits.scannedNodes <= auditLimits.maxNodes)
+  assert.equal(auditLimits.maxNodes, 5_000)
+  assert.equal(auditLimits.maxFindings, 180)
+  assert.equal(auditLimits.maxTotalFindings, 500)
+  assert.ok(auditLimits.findings.every((finding) => finding.routePath === '/home?mode=mobile#copy'))
+  const focus = await page.evaluate(() => window.responsiver.focusRemoteFinding('.copy'))
+  assert.deepEqual(focus, { found: true, selector: '.copy', path: '/home?mode=mobile#copy' })
 
   const addressInput = page.getByLabel('Adresse de la page distante')
   await addressInput.fill(`${origin}/form`)
   await addressInput.press('Enter')
+  await page.waitForFunction((expected) => document.querySelector('[aria-label="Adresse de la page distante"]')?.value === expected, `${origin}/form`)
+  await page.getByText('2 routes auditées').waitFor({ state: 'visible', timeout: 30_000 })
+
+  await page.getByRole('button', { name: 'Toutes les pages' }).click()
+  await page.locator('.issue-item').filter({ hasText: 'Texte difficile à lire sur mobile' }).first().click()
+  await page.waitForFunction((expected) => document.querySelector('[aria-label="Adresse de la page distante"]')?.value === expected, `${origin}/home?mode=mobile#copy`)
+  await page.getByText(/élément mesuré est mis en évidence/i).waitFor({ state: 'visible' })
+
+  await page.getByRole('button', { name: 'Exporter', exact: true }).click()
+  await page.getByRole('heading', { name: 'Rapport exploitable' }).waitFor({ state: 'visible' })
+  assert.match(await page.locator('.remote-report-ledger').textContent(), /2 routes/)
+  await page.locator('.remote-report-page').screenshot({ path: join(screenshotRoot, 'remote-report.png'), animations: 'disabled' })
+  await page.getByRole('button', { name: /Revenir au laboratoire/ }).click()
+  await page.locator('.remote-preview').waitFor({ state: 'visible' })
+  const restoredAddressInput = page.getByLabel('Adresse de la page distante')
+  await restoredAddressInput.fill(`${origin}/form`)
+  await restoredAddressInput.press('Enter')
   await page.waitForFunction((expected) => document.querySelector('[aria-label="Adresse de la page distante"]')?.value === expected, `${origin}/form`)
   await application.evaluate(async ({ webContents }, expectedOrigin) => {
     const remote = webContents.getAllWebContents().find((contents) => contents.getURL().startsWith(expectedOrigin))

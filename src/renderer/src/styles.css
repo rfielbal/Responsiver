@@ -564,6 +564,21 @@ code { font-family: var(--mono); }
 .ai-privacy { display: grid; gap: 2px; padding: 9px 10px 9px 13px; color: #285f45; border: 1px solid #a5c4b2; border-left: 3px solid var(--success); background: #e7efe9; }
 .ai-privacy strong { font-size: 9px; font-weight: 700; text-transform: uppercase; }
 .ai-privacy span { color: #577361; font-size: 8px; }
+.ai-context { display: grid; min-width: 0; gap: 8px; padding: 11px 12px; border: 1px solid var(--line); background: #ece9e2; }
+.ai-context > header { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+.ai-context > header > div { display: grid; gap: 2px; }
+.ai-context > header strong { color: var(--ink); font-size: 11px; font-weight: 650; }
+.ai-context > label { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: start; padding: 3px 0; cursor: pointer; }
+.ai-context > label > input { width: 14px; height: 14px; margin: 1px 0 0; accent-color: var(--accent); }
+.ai-context > label > span { display: grid; min-width: 0; gap: 2px; }
+.ai-context > label strong { color: var(--ink); font-size: 9px; font-weight: 650; }
+.ai-context > label small, .ai-context > p { color: var(--ink-muted); font-size: 8px; line-height: 1.45; }
+.ai-context > p { margin: 1px 0 0; padding-top: 7px; border-top: 1px solid var(--line); }
+.ai-context details { min-width: 0; margin-left: 22px; padding: 7px 8px; border: 1px solid var(--line); background: rgba(255, 254, 250, .62); }
+.ai-context summary { color: var(--accent-hover); cursor: pointer; font-size: 8px; font-weight: 650; }
+.ai-context ul { display: grid; min-width: 0; gap: 4px; margin: 7px 0 0; padding: 0; list-style: none; }
+.ai-context li { min-width: 0; }
+.ai-context code { display: block; overflow: hidden; color: var(--ink-muted); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
 .ai-messages { display: grid; max-height: 350px; gap: 8px; overflow: auto; }
 .ai-message { display: grid; min-width: 0; gap: 4px; padding: 10px; border: 1px solid var(--line); border-left: 3px solid var(--line-strong); background: #eceae4; }
 .ai-message--user { margin-left: 24px; color: #ecebe6; border-color: #3e3f3a; border-left-color: #73756d; background: #353632; }
@@ -638,6 +653,24 @@ code { font-family: var(--mono); }
 .export-foot strong { font-size: 11px; font-weight: 600; }
 .export-foot small { color: var(--ink-muted); font-size: 10px; }
 .export-foot > div:last-child { gap: 16px; }
+.remote-report-ledger { margin-top: 20px; border: 1px solid var(--line); background: var(--surface-raised); }
+.remote-report-ledger > header { display: flex; min-width: 0; align-items: flex-end; justify-content: space-between; gap: 18px; padding: 16px 18px; border-bottom: 1px solid var(--line); }
+.remote-report-ledger h2 { margin: 3px 0 0; font-size: 18px; font-weight: 650; }
+.remote-report-ledger > header code { min-width: 0; overflow: hidden; color: var(--ink-muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.remote-report-ledger > div { display: grid; grid-template-columns: repeat(4, 1fr); }
+.remote-report-ledger > div span { padding: 14px 17px; color: var(--ink-muted); border-right: 1px solid var(--line); font-size: 10px; }
+.remote-report-ledger > div span:last-child { border-right: 0; }
+.remote-report-ledger b { margin-right: 5px; color: var(--ink); font-size: 17px; font-weight: 650; }
+.remote-report-grid { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, .95fr); gap: 10px; margin-top: 10px; }
+.remote-report-grid > section { display: grid; min-width: 0; align-content: start; gap: 13px; padding: 18px; border: 1px solid var(--line); background: var(--surface); }
+.remote-report-grid h2 { margin: 3px 0 0; font-size: 17px; font-weight: 650; }
+.remote-report-grid ol { display: grid; margin: 0; padding: 0; border: 1px solid var(--line); list-style: none; }
+.remote-report-grid li { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 10px; border-bottom: 1px solid var(--line); }
+.remote-report-grid li:last-child { border-bottom: 0; }
+.remote-report-grid li code { min-width: 0; overflow: hidden; color: var(--ink-muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.remote-report-grid li span { display: grid; width: 25px; height: 21px; flex: 0 0 auto; place-items: center; color: var(--ink); border: 1px solid var(--line-strong); background: #eceae4; font-family: var(--mono); font-size: 9px; }
+.remote-report-grid p { margin: 0; color: var(--ink-muted); font-size: 11px; line-height: 1.55; }
+.remote-report-grid > section > div:last-child { display: flex; flex-wrap: wrap; gap: 7px; }
 
 .toast { position: fixed; right: 20px; bottom: 20px; z-index: 50; display: flex; max-width: 460px; align-items: center; gap: 9px; padding: 11px 11px 11px 13px; color: #f8f7f3; border: 1px solid #55564f; background: #292a27; box-shadow: 0 16px 34px rgba(20, 21, 18, .24); font-size: 12px; }
 .toast > svg { flex: 0 0 auto; color: #e58c72; }
@@ -720,6 +753,10 @@ code { font-family: var(--mono); }
   .export-grid { grid-template-columns: 1fr; }
   .export-grid p { min-height: 0; }
   .export-foot { align-items: flex-start; flex-direction: column; }
+  .remote-report-ledger > div { grid-template-columns: repeat(2, 1fr); }
+  .remote-report-ledger > div span:nth-child(2) { border-right: 0; }
+  .remote-report-ledger > div span:nth-child(-n + 2) { border-bottom: 1px solid var(--line); }
+  .remote-report-grid { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 620px) {
@@ -804,6 +841,10 @@ code { font-family: var(--mono); }
   .review-summary > div, .export-ledger > div span { border-right: 0; border-bottom: 1px solid var(--line); }
   .review-summary > div:last-child, .export-ledger > div span:last-child { border-bottom: 0; }
   .export-ledger header { align-items: flex-start; flex-direction: column; gap: 10px; }
+  .remote-report-ledger > header { align-items: flex-start; flex-direction: column; }
+  .remote-report-ledger > div { grid-template-columns: 1fr; }
+  .remote-report-ledger > div span { border-right: 0; border-bottom: 1px solid var(--line); }
+  .remote-report-ledger > div span:last-child { border-bottom: 0; }
   .export-foot > div:last-child { align-items: flex-start; flex-direction: column; gap: 4px; }
   .toast { right: 12px; bottom: 70px; left: 12px; max-width: none; }
 }

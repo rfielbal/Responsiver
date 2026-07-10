@@ -59,7 +59,7 @@ Le HTML reçoit en mémoire un bridge sans accès Node pour :
 - navigation interne, historique et rechargement ;
 - redirection des fenêtres internes dans l’iframe ;
 - thème et mutations DOM ;
-- mesure des débordements ;
+- audit runtime borné de huit familles de défauts visuels ;
 - smoke-test du contenu réellement peint, y compris pseudo-éléments et Shadow DOM ouverts ;
 - centrage et mise en évidence d’un sélecteur.
 
@@ -100,9 +100,13 @@ Les règles implémentées sont :
 - contraste textuel calculable sous le seuil ;
 - erreur JavaScript capturée pendant la session.
 
-Chaque constat contient règle, route, viewport, sélecteur, rectangle, styles bornés, mesures et confiance. Un clic demande au `WebContentsView` de chercher le sélecteur, centrer l’élément et poser un contour temporaire.
+Chaque constat contient règle, route complète, viewport, sélecteur, rectangle, styles bornés, mesures et confiance. La troncature, le nombre de nœuds inspectés et les plafonds réels sont propagés au renderer. Un clic restaure d’abord la route, puis demande au `WebContentsView` de chercher le sélecteur, centrer l’élément et poser un contour temporaire ; l’interface indique honnêtement si le DOM a changé.
 
-Le moteur mesure des défauts objectifs. Il ne compare pas la page à une maquette, ne note pas son esthétique, ne lance ni Lighthouse ni axe-core et ne parcourt pas automatiquement les autres routes. Une capture bornée de la route auditée peut être fournie à l’assistant local.
+Une route nouvellement visitée déclenche automatiquement son propre balayage. Le processus principal remplace un ancien résultat de cette route, conserve les autres et construit ainsi un historique de session exportable. Il ne suit cependant aucun lien de lui-même : la couverture correspond aux routes effectivement visitées.
+
+Le moteur mesure des défauts objectifs. Il ne compare pas la page à une maquette, ne note pas son esthétique et ne lance ni Lighthouse ni axe-core. Une capture bornée de la dernière route auditée peut être fournie à l’assistant local.
+
+Le runner local utilise un collecteur distinct mais aligné : `TreeWalker` borné, déduplication par règle/sélecteur, huit règles runtime, preuves géométriques et seuils explicites. Le renderer traite même ce message comme non fiable, remplace ses dimensions par le viewport choisi et rejette règles, routes ou volumes hors contrat avant de les afficher.
 
 ## Proposition déterministe et staging
 
@@ -142,7 +146,7 @@ Responsiver ne contient pas de modèle. L’adaptateur se connecte à un service
 
 L’adresse doit être HTTP et loopback. `localhost` est transformé en `127.0.0.1`, les identifiants, query strings, fragments et redirections sont refusés. Il n’existe aucun fournisseur cloud ou fallback.
 
-Le contexte est construit par Responsiver : nom, type de source, route, viewport, jusqu’à cinquante constats après validation, sélection bornée de fichiers non secrets et capture PNG/JPEG éventuelle. Les prompts, réponses et tailles sont plafonnés.
+Le contexte est construit par Responsiver : nom, type de source, route, viewport, constats après validation, sélection bornée de fichiers non secrets et capture PNG/JPEG éventuelle. Avant l’envoi, le renderer montre les chemins exacts et permet de désactiver les fichiers et la capture séparément. Les prompts, réponses et tailles sont plafonnés.
 
 Le modèle reçoit une instruction lui rappelant que le contenu du projet est non fiable. La réponse attendue est un JSON avec explication et propositions de fichiers complets. Les chemins, extensions, tailles et contenus sont revalidés. Le modèle n’obtient jamais de terminal, outil système ou accès direct au disque.
 
@@ -152,7 +156,7 @@ Le moteur local est un processus séparé. Responsiver ne déclenche aucun tél�
 
 ## Compagnon Chrome
 
-L’extension Manifest V3 demande seulement `activeTab` et `nativeMessaging`. Après un clic, le service worker construit une demande `open-url` contenant URL HTTP(S), titre, viewport, DPR, UUID et date.
+L’extension Manifest V3 demande seulement `activeTab` et `nativeMessaging`. Après un clic, le service worker accepte une URL HTTPS publique ou HTTP(S) loopback, puis construit une demande `open-url` contenant URL, titre, viewport, DPR, UUID et date. Le host applique une seconde fois la même politique.
 
 Le Native Messaging Host :
 
@@ -160,11 +164,11 @@ Le Native Messaging Host :
 - limite chaque message à 64 Kio ;
 - applique un schéma fermé ;
 - écrit atomiquement dans `extension-inbox`, privé en `0700/0600` sur POSIX ;
-- borne la file à 128 éléments et ne met jamais l’URL dans le nom du fichier.
+- borne la file à 128 éléments, purge les entrées âgées de plus de dix minutes avant chaque nouvel écrit et ne met jamais l’URL dans le nom du fichier.
 
 Le consommateur Electron réclame chaque fichier par renommage, le relit sans suivre de symlink, revalide le contrat et refuse les demandes âgées de plus de dix minutes. Une demande acceptée ouvre une session distante et focalise la fenêtre.
 
-Le host ne lance pas l’application. Le parcours actuel exige une installation manuelle et un moteur Node accessible sur macOS/Linux. Aucun exécutable autonome Windows n’est encore produit. Le détail se trouve dans [compagnon-chrome.md](compagnon-chrome.md).
+Le host répond `validated: true`, `delivery: queued`, `desktopAcknowledged: false` : seule sa validation locale est acquittée. Il ne lance pas l’application. Le parcours actuel exige une installation manuelle et un moteur Node accessible sur macOS/Linux. Aucun exécutable autonome Windows n’est encore produit. Le détail se trouve dans [compagnon-chrome.md](compagnon-chrome.md).
 
 ## Persistance, confidentialité et fermeture
 
@@ -172,7 +176,7 @@ L’historique JSON stocke seulement chemins, entrée, compteurs et dates. Les s
 
 Fermer une session locale arrête ses serveurs et nettoie son stockage navigateur. Fermer une session distante détache le debugger, retire le CSS injecté, efface son stockage et ferme le `WebContentsView`.
 
-Les rapports et exports ne sont créés qu’après choix explicite d’une destination. Le fichier source ne peut être modifié que par l’action explicite de l’espace code.
+Les rapports et exports ne sont créés qu’après choix explicite d’une destination. Pour une URL, le rapport agrège les routes visitées, leurs constats et le mode réseau réel ; il ne prétend pas être « hors ligne ». Le fichier source ne peut être modifié que par l’action explicite de l’espace code.
 
 ## Projets backend, bases et Docker
 

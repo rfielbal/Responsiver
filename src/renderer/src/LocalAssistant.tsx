@@ -1,4 +1,4 @@
-import { useState, type FormEvent, type ReactElement } from 'react'
+import { useEffect, useState, type FormEvent, type ReactElement } from 'react'
 import type { LocalAiResponse, LocalAiStatus, ProjectSnapshot, RemoteViewport } from '../../shared/contracts'
 
 interface LocalAssistantProps {
@@ -18,9 +18,14 @@ interface ChatMessage {
   response?: LocalAiResponse
 }
 
+interface AssistantContextFile {
+  path: string
+  content: string
+}
+
 const assistantSourcePattern = /\.(?:css|scss|sass|less|html?|twig|php|jsx?|tsx?|vue|svelte|astro)$/i
 
-async function collectLocalContextFiles(project: ProjectSnapshot): Promise<Array<{ path: string; content: string }>> {
+async function collectLocalContextFiles(project: ProjectSnapshot): Promise<AssistantContextFile[]> {
   if (project.source.readOnly || !project.source.localRoot) return []
   const listed = await window.responsiver.listWorkspaceFiles(project.id)
   const issuePaths = new Set(project.issues.map((issue) => issue.source?.file).filter((path): path is string => Boolean(path)))
@@ -53,6 +58,36 @@ export default function LocalAssistant({ project, route, viewport, screenshotDat
   const [draft, setDraft] = useState('')
   const [busy, setBusy] = useState(false)
   const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [contextFiles, setContextFiles] = useState<AssistantContextFile[]>([])
+  const [contextLoading, setContextLoading] = useState(false)
+  const [includeFiles, setIncludeFiles] = useState(workspaceEnabled)
+  const [includeScreenshot, setIncludeScreenshot] = useState(Boolean(screenshotDataUrl))
+
+  const prepareContext = async (): Promise<void> => {
+    if (!workspaceEnabled) {
+      setContextFiles([])
+      return
+    }
+    setContextLoading(true)
+    try {
+      setContextFiles(await collectLocalContextFiles(project))
+    } catch {
+      setContextFiles([])
+      onNotice('Le contexte source n’a pas pu être préparé. Aucun fichier ne sera transmis au moteur local.')
+    } finally {
+      setContextLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    setIncludeFiles(workspaceEnabled)
+    setIncludeScreenshot(Boolean(screenshotDataUrl))
+    void prepareContext()
+  }, [project.id, workspaceEnabled])
+
+  useEffect(() => {
+    if (!screenshotDataUrl) setIncludeScreenshot(false)
+  }, [screenshotDataUrl])
 
   const changeProvider = (next: 'ollama' | 'llama.cpp'): void => {
     setProvider(next)
@@ -79,7 +114,7 @@ export default function LocalAssistant({ project, route, viewport, screenshotDat
     setMessages((current) => [...current, { id: `user-${Date.now()}`, author: 'user', text: prompt }])
     setBusy(true)
     try {
-      const files = workspaceEnabled ? await collectLocalContextFiles(project) : []
+      const files = includeFiles && workspaceEnabled ? contextFiles : []
       const response = await window.responsiver.sendLocalAi({
         provider,
         endpoint,
@@ -92,7 +127,7 @@ export default function LocalAssistant({ project, route, viewport, screenshotDat
           viewport,
           findings: project.issues.slice(0, 30).map(({ id, title, description, rule, proposal, source }) => ({ id, title, description, rule, proposal, source })),
           files,
-          screenshotDataUrl: screenshotDataUrl ?? null
+          screenshotDataUrl: includeScreenshot ? screenshotDataUrl ?? null : null
         }
       })
       setMessages((current) => [...current, { id: `assistant-${Date.now()}`, author: 'assistant', text: response.text, response }])
@@ -117,9 +152,16 @@ export default function LocalAssistant({ project, route, viewport, screenshotDat
       <label><span>Adresse loopback</span><input value={endpoint} onChange={(event) => { setEndpoint(event.target.value); setStatus(null) }} spellCheck={false} /></label>
       <button className="button button--secondary button--full" onClick={() => void probe()} disabled={busy}>Vérifier le moteur local</button>
       {status?.available && <label><span>Modèle installé</span>{status.models.length ? <select value={model} onChange={(event) => setModel(event.target.value)}>{status.models.map((name) => <option key={name}>{name}</option>)}</select> : <input value={model} onChange={(event) => setModel(event.target.value)} placeholder="Nom du modèle chargé" />}</label>}
-      <div className="ai-privacy"><strong>0 donnée envoyée au cloud</strong><span>Aucun compte · aucun fallback distant · aucune clé</span></div>
+      <div className="ai-privacy"><strong>Connexion limitée à l’adresse loopback affichée</strong><span>Aucun fallback distant. Le moteur choisi peut toutefois journaliser ou relayer les requêtes selon sa propre configuration.</span></div>
+    </section>
+    <section className="ai-context" aria-label="Contexte envoyé à l’assistant local">
+      <header><div><span className="overline">Contexte contrôlé</span><strong>Ce qui sera transmis</strong></div><button type="button" className="text-button" onClick={() => void prepareContext()} disabled={!workspaceEnabled || contextLoading}>{contextLoading ? 'Préparation…' : 'Actualiser'}</button></header>
+      <label><input type="checkbox" checked={includeFiles} onChange={(event) => setIncludeFiles(event.target.checked)} disabled={!workspaceEnabled || !contextFiles.length} /><span><strong>Sources sélectionnées</strong><small>{contextFiles.length ? `${contextFiles.length} fichier${contextFiles.length > 1 ? 's' : ''} · ${Math.round(contextFiles.reduce((total, file) => total + new TextEncoder().encode(file.content).byteLength, 0) / 1024)} Ko maximum préparés` : workspaceEnabled ? 'Aucun fichier source éligible' : 'Sources locales non associées'}</small></span></label>
+      {includeFiles && contextFiles.length > 0 && <details><summary>Voir les chemins exacts</summary><ul>{contextFiles.map((file) => <li key={file.path}><code>{file.path}</code></li>)}</ul></details>}
+      <label><input type="checkbox" checked={includeScreenshot} onChange={(event) => setIncludeScreenshot(event.target.checked)} disabled={!screenshotDataUrl} /><span><strong>Capture du rendu</strong><small>{screenshotDataUrl ? 'Image de la route actuellement analysée' : 'Aucune capture disponible'}</small></span></label>
+      <p>La route, le viewport et jusqu’à 30 constats sont toujours inclus dans la requête. Aucun terminal ni accès autonome aux fichiers n’est accordé au modèle.</p>
     </section>
     <div className="ai-messages">{messages.length ? messages.map((message) => <article className={`ai-message ai-message--${message.author}`} key={message.id}><span>{message.author === 'user' ? 'Vous' : `${provider} · local`}</span><p>{message.text}</p>{message.response?.proposedFiles.map((file) => <div className="ai-file-proposal" key={file.path}><code>{file.path}</code><small>{file.explanation}</small><button onClick={() => void previewFile(file.path, file.content)} disabled={busy || !workspaceEnabled}>Prévisualiser dans le code</button></div>)}</article>) : <div className="ai-empty"><strong>Une IA qui travaille sur des preuves</strong><p>Elle reçoit les constats, la route, le viewport et, si disponible, la capture. Elle ne possède ni terminal ni accès direct aux fichiers.</p></div>}</div>
-    <form className="ai-prompt" onSubmit={submit}><textarea rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Ex. Analyse la hiérarchie visuelle mobile et propose une correction minimale…" disabled={!status?.available || busy} /><footer><small>{screenshotDataUrl ? 'Capture locale incluse' : 'Constats et géométrie uniquement'}</small><button className="button button--primary" disabled={!status?.available || !model || !draft.trim() || busy}>{busy ? 'Analyse locale…' : 'Envoyer localement'}</button></footer></form>
+    <form className="ai-prompt" onSubmit={submit}><textarea rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Ex. Analyse la hiérarchie visuelle mobile et propose une correction minimale…" disabled={!status?.available || busy} /><footer><small>{includeScreenshot && screenshotDataUrl ? 'Capture incluse' : includeFiles && contextFiles.length ? `${contextFiles.length} source${contextFiles.length > 1 ? 's' : ''} incluse${contextFiles.length > 1 ? 's' : ''}` : 'Constats et géométrie uniquement'}</small><button className="button button--primary" disabled={!status?.available || !model || !draft.trim() || busy}>{busy ? 'Analyse locale…' : 'Envoyer localement'}</button></footer></form>
   </div>
 }

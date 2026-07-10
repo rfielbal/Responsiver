@@ -19,7 +19,10 @@ try {
   page.setDefaultTimeout(20_000)
   await page.getByLabel('Chemin local').fill(resolve(projectPath))
   await page.locator('.path-bar').getByRole('button', { name: 'Ouvrir' }).click()
-  await page.locator('.project-identity').waitFor({ state: 'visible' })
+  await page.waitForFunction(() => {
+    const name = document.querySelector('.project-identity strong')?.textContent?.trim()
+    return Boolean(name && name !== 'Aucun projet ouvert')
+  })
   const projectName = (await page.locator('.project-identity strong').textContent())?.trim() || selectedName
   const output = join(root, 'output', 'playwright')
   await mkdir(output, { recursive: true })

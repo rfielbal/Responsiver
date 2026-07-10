@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState, type FormEvent, type ReactElement } from 'react'
 
-import type { ProjectPreparationProgress, RecentProjectSummary, RemoteAuditResult, RemotePageState, RemoteViewport } from '../../shared/contracts'
+import type { ProjectPreparationProgress, RecentProjectSummary, RemoteAuditResult, RemotePageState, RemoteViewport, RuntimeAudit } from '../../shared/contracts'
 import LocalAssistant from './LocalAssistant'
 import RemotePreview from './RemotePreview'
 
@@ -75,24 +75,6 @@ interface StagingSnapshot {
   instructions: string[]
   changedFiles: string[]
   createdAt: string
-}
-
-interface RuntimeOverflow {
-  selector: string
-  tag: string
-  label: string
-  left: number
-  right: number
-  width: number
-}
-
-interface RuntimeAudit {
-  path: string
-  viewportWidth: number
-  viewportHeight: number
-  documentWidth: number
-  overflowCount: number
-  overflows: RuntimeOverflow[]
 }
 
 interface RuntimeRenderState {
@@ -233,6 +215,81 @@ function documentPath(value: string): string {
   return path.endsWith('/') ? `${path}index.html` : path
 }
 
+const runtimeAuditRules = new Set<RuntimeAudit['findings'][number]['rule']>([
+  'layout.viewport-overflow',
+  'layout.clipped-content',
+  'layout.truncated-text',
+  'interaction.small-target',
+  'layout.fixed-obstruction',
+  'media.image-error',
+  'media.image-distortion',
+  'accessibility.low-contrast'
+])
+
+function cleanRuntimeText(value: unknown, maximum: number): string {
+  return typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, maximum) : ''
+}
+
+function cleanRuntimeNumber(value: unknown, minimum: number, maximum: number, fallback = 0): number {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.min(maximum, Math.max(minimum, value)) : fallback
+}
+
+export function sanitizeRuntimeAudit(value: unknown, device: Device): RuntimeAudit | null {
+  if (!value || typeof value !== 'object') return null
+  const source = value as Record<string, unknown>
+  if (source.version !== 2 || !Array.isArray(source.findings)) return null
+  const routeValue = cleanRuntimeText(source.route ?? source.path, 4_096)
+  const route = routeValue.startsWith('/') && !routeValue.startsWith('//') ? routeValue : '/'
+  const viewport = { width: device.width, height: device.height, mobile: device.family !== 'computer' }
+  const findings: RuntimeAudit['findings'] = []
+  for (const entryValue of source.findings.slice(0, 120)) {
+    if (!entryValue || typeof entryValue !== 'object') continue
+    const entry = entryValue as Record<string, unknown>
+    if (typeof entry.rule !== 'string' || !runtimeAuditRules.has(entry.rule as RuntimeAudit['findings'][number]['rule'])) continue
+    const selector = cleanRuntimeText(entry.selector, 320)
+    if (!selector) continue
+    const rectValue = entry.rect && typeof entry.rect === 'object' ? entry.rect as Record<string, unknown> : {}
+    const rule = entry.rule as RuntimeAudit['findings'][number]['rule']
+    findings.push({
+      id: `sanitized-${findings.length}-${cleanRuntimeText(entry.id, 100) || rule}`,
+      rule,
+      severity: entry.severity === 'error' ? 'error' : 'warning',
+      title: cleanRuntimeText(entry.title, 180) || rule,
+      description: cleanRuntimeText(entry.description, 420),
+      proposal: cleanRuntimeText(entry.proposal, 420),
+      confidence: cleanRuntimeNumber(entry.confidence, 0, 1),
+      selector,
+      tag: cleanRuntimeText(entry.tag, 40),
+      label: cleanRuntimeText(entry.label, 100),
+      rect: {
+        x: cleanRuntimeNumber(rectValue.x, -100_000, 100_000),
+        y: cleanRuntimeNumber(rectValue.y, -100_000, 100_000),
+        width: cleanRuntimeNumber(rectValue.width, 0, 100_000),
+        height: cleanRuntimeNumber(rectValue.height, 0, 100_000)
+      },
+      route,
+      viewport
+    })
+  }
+  const overflowFindings = findings.filter((finding) => finding.rule === 'layout.viewport-overflow')
+  return {
+    version: 2,
+    path: route,
+    route,
+    viewportWidth: viewport.width,
+    viewportHeight: viewport.height,
+    viewport,
+    documentWidth: cleanRuntimeNumber(source.documentWidth, 0, 100_000, viewport.width),
+    overflowCount: overflowFindings.length,
+    overflows: [],
+    findingCount: findings.length,
+    findings,
+    inspectedNodes: Math.round(cleanRuntimeNumber(source.inspectedNodes, 0, 2_500)),
+    truncated: source.truncated === true || (source.findings as unknown[]).length > 120,
+    limits: { maxNodes: 2_500, maxFindings: 120, maxFindingsPerRule: 24, maxLegacyOverflows: 12, maxContrastChecks: 600 }
+  }
+}
+
 function deviceForIssue(issue: ProjectIssue, current: Device): Pick<Device, 'family' | 'width' | 'height'> | null {
   const exact = issue.viewport.match(/(\d{3,4})\s*[×x]\s*(\d{3,4})/i)
   if (exact) {
@@ -330,7 +387,10 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
         const value = luminance(data.background ?? '')
         if (value !== null) onThemeChange?.(value < 0.42 ? 'dark' : 'light')
       }
-      if (data.type === 'audit' && typeof data.overflowCount === 'number') onAudit?.(data as RuntimeAudit)
+      if (data.type === 'audit') {
+        const audit = sanitizeRuntimeAudit(data, device)
+        if (audit) onAudit?.(audit)
+      }
       if (data.type === 'render-status') {
         const status = data.status ?? (data.state === 'visible' ? 'ready' : data.state === 'empty' ? 'empty' : undefined)
         if (status) {
@@ -347,7 +407,7 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
     }
     window.addEventListener('message', listener)
     return () => window.removeEventListener('message', listener)
-  }, [onAudit, onEscape, onExternal, onPathChange, onRenderStatus, onThemeChange, origin])
+  }, [device, onAudit, onEscape, onExternal, onPathChange, onRenderStatus, onThemeChange, origin])
 
   const post = (type: string, payload: Record<string, string> = {}): void => frameRef.current?.contentWindow?.postMessage({ channel: 'responsiver-preview', type, ...payload }, origin ?? '*')
   const source = origin ? `${origin}${path}` : undefined
@@ -506,6 +566,7 @@ export default function App(): ReactElement {
   const draftRevision = useRef(0)
   const activeProjectId = useRef<string | null>(null)
   const fullscreenButtonRef = useRef<HTMLButtonElement>(null)
+  const remoteAudits = useRef(new Map<string, RemoteAuditResult>())
 
   async function refreshRecentProjects(): Promise<void> {
     if (!api().listRecentProjects) {
@@ -529,6 +590,13 @@ export default function App(): ReactElement {
   const familyDevices = devices.filter((device) => device.family === family)
   const routeIssues = useMemo(() => {
     if (!project) return []
+    const remoteProject = project.source.kind === 'remote-url' || project.source.kind === 'linked-localhost'
+    if (remoteProject) {
+      return project.issues.filter((issue) => {
+        const routePath = (issue as ProjectIssue & IssueExtra).routePath ?? issue.evidence?.route
+        return !routePath || routePath === activePath
+      })
+    }
     const currentPath = documentPath(activePath)
     const knownRoute = project.routes.find((route) => route.path === activePath) ?? project.routes.find((route) => documentPath(route.path) === currentPath)
     const issuePath = documentPath(knownRoute?.path ?? project.entryPath ?? project.routes[0]?.path ?? activePath)
@@ -642,6 +710,7 @@ export default function App(): ReactElement {
     setRuntimeAudit(null)
     setRuntimeRenderStatus(null)
     setRemoteAudit(null)
+    remoteAudits.current.clear()
     setRemoteState(null)
     setWorkspaceOrigin(null)
     setInspectorTab('findings')
@@ -788,9 +857,27 @@ export default function App(): ReactElement {
     if (isRemote) {
       setProposalContext({ kind: 'issue', issueId: issue.id })
       setPreviewMode('source')
+      const route = extra.routePath ?? issue.evidence?.route
+      if (route && route !== remoteState?.path && project?.source.url) {
+        try {
+          const target = new URL(route, project.source.url).href
+          const state = await window.responsiver.navigateRemote('url', target)
+          setRemoteState(state)
+          setActivePath(state.path)
+          const previousAudit = remoteAudits.current.get(state.path)
+          if (previousAudit) setRemoteAudit(previousAudit)
+        } catch {
+          flash('La route du constat n’a pas pu être restaurée dans la session sécurisée.')
+          return
+        }
+      }
       const selector = issue.evidence?.selector
-      if (selector) await window.responsiver.focusRemoteFinding(selector).catch(() => false)
-      flash(selector ? 'Viewport restauré et élément distant mis en évidence.' : 'La route et le viewport du constat sont affichés.')
+      const focus = selector ? await window.responsiver.focusRemoteFinding(selector).catch(() => null) : null
+      flash(!selector
+        ? 'La route et le viewport du constat sont affichés.'
+        : focus?.found
+          ? 'Route et viewport restaurés ; l’élément mesuré est mis en évidence.'
+          : 'La route et le viewport sont restaurés, mais l’élément a changé ou n’existe plus dans le DOM actuel.')
       return
     }
     if (!project?.capabilities?.staging || !extra.fix || extra.fix.kind === 'manual') {
@@ -917,6 +1004,34 @@ export default function App(): ReactElement {
     } catch { flash('La copie est indisponible dans ce contexte.') }
   }
 
+  async function copyRemoteSummary(): Promise<void> {
+    if (!project || !isRemote) return
+    const text = [
+      `# Rapport Responsiver — ${project.name}`,
+      project.source.url ? `URL : ${project.source.url}` : '',
+      `Routes auditées : ${remoteAudits.current.size}`,
+      `Constats : ${project.issues.length}`,
+      project.analysis.truncated ? 'Couverture : partielle (limite de sécurité atteinte)' : 'Couverture : mesures terminées sur les routes visitées',
+      '',
+      ...project.issues.flatMap((issue) => [
+        `## ${issue.title}`,
+        `Route : ${issue.routePath ?? issue.evidence?.route ?? '/'}`,
+        `Viewport : ${issue.viewport}`,
+        `Règle : ${issue.rule}`,
+        issue.description,
+        `Solution à vérifier : ${issue.proposal}`,
+        ''
+      ])
+    ].join('\n')
+    try {
+      if (api().copyText) await api().copyText!(text)
+      else await navigator.clipboard.writeText(text)
+      flash('La synthèse de l’audit URL a été copiée.')
+    } catch {
+      flash('La synthèse n’a pas pu être copiée.')
+    }
+  }
+
   async function exportAction(kind: 'patch' | 'changed' | 'copy' | 'report'): Promise<void> {
     if (!project) return
     setBusy(true)
@@ -933,8 +1048,8 @@ export default function App(): ReactElement {
 
   function go(next: Destination): void {
     if (next !== 'projects' && !project) { setDestination('projects'); flash('Ouvrez d’abord un projet.'); return }
-    if ((next === 'review' || next === 'export') && project?.source.kind !== 'local-project') {
-      flash('La révision exportable exige un projet local. Utilisez Code pour un localhost associé ou consultez les solutions du rapport URL.')
+    if (next === 'review' && project?.source.kind !== 'local-project') {
+      flash('La comparaison de staging exige un projet local. Le rapport URL reste disponible dans Exporter.')
       return
     }
     setDestination(next)
@@ -974,17 +1089,69 @@ export default function App(): ReactElement {
     setActivePath(path)
   }
 
+  function applyRuntimeAudit(audit: RuntimeAudit): void {
+    setRuntimeAudit(audit)
+    const viewportLabel = `${audit.viewport.width} × ${audit.viewport.height}`
+    const runtimeIssues: ProjectIssue[] = audit.findings.map((finding) => ({
+      id: `runtime:${finding.id}:${audit.viewport.width}x${audit.viewport.height}`,
+      title: finding.title,
+      description: finding.description,
+      severity: 'attention',
+      coverage: finding.confidence >= 0.9 ? 'standard' : 'heuristique',
+      viewport: viewportLabel,
+      routePath: finding.route,
+      rule: finding.rule,
+      proposal: finding.proposal,
+      confidence: finding.confidence >= 0.9 ? 'certain' : finding.confidence >= 0.7 ? 'probable' : 'review',
+      evidence: {
+        selector: finding.selector,
+        route: finding.route,
+        viewport: { width: finding.viewport.width, height: finding.viewport.height },
+        rectangle: finding.rect,
+        measurements: {
+          runtime: true,
+          tag: finding.tag,
+          label: finding.label,
+          inspectedNodes: audit.inspectedNodes,
+          truncated: audit.truncated
+        },
+        screenshotDataUrl: null
+      }
+    }))
+    setProject((current) => {
+      if (!current || current.source.kind !== 'local-project') return current
+      const sameScope = (issue: ProjectIssue): boolean => issue.id.startsWith('runtime:') && issue.routePath === audit.route
+      const previousScope = current.issues.filter(sameScope)
+      const unchanged = previousScope.length === runtimeIssues.length && previousScope.every((issue, index) => issue.id === runtimeIssues[index]?.id && issue.description === runtimeIssues[index]?.description)
+      const truncated = current.analysis.truncated || audit.truncated
+      if (unchanged && truncated === current.analysis.truncated) return current
+      return {
+        ...current,
+        issues: [...current.issues.filter((issue) => !sameScope(issue)), ...runtimeIssues],
+        analysis: { ...current.analysis, truncated }
+      }
+    })
+  }
+
   function applyRemoteAudit(result: RemoteAuditResult): void {
+    remoteAudits.current.set(result.path, result)
     setRemoteAudit(result)
     setActivePath(result.path)
     setProject((current) => current ? {
       ...current,
       analyzedAt: result.generatedAt,
-      issues: result.findings,
+      issues: [
+        ...current.issues.filter((issue) => ((issue as ProjectIssue & IssueExtra).routePath ?? issue.evidence?.route) !== result.path),
+        ...result.findings
+      ],
       source: { ...current.source, url: result.url },
-      routes: current.routes.some((route) => documentPath(route.path) === documentPath(result.path))
+      routes: current.routes.some((route) => route.path === result.path)
         ? current.routes
-        : [...current.routes, { path: result.path, label: result.path || 'Page courante' }]
+        : [...current.routes, { path: result.path, label: result.path || 'Page courante' }],
+      analysis: {
+        ...current.analysis,
+        truncated: [...remoteAudits.current.values()].some((audit) => audit.truncated)
+      }
     } : current)
     setSelectedIssueId(result.findings[0]?.id ?? null)
   }
@@ -999,7 +1166,7 @@ export default function App(): ReactElement {
   return <div className="app-shell">
     <aside className="nav-rail" aria-label="Navigation principale">
       <button className="brand" onClick={() => go('projects')} aria-label="Responsiver — Projets"><Mark /><span><strong>Responsiver</strong><small>Responsive workbench</small></span></button>
-      <nav>{destinations.map((item) => <button key={item.id} className={`${destination === item.id ? 'nav-link is-active' : 'nav-link'}${isRemote && (item.id === 'review' || item.id === 'export') ? ' is-limited' : ''}`} onClick={() => go(item.id)} aria-current={destination === item.id ? 'page' : undefined}><Icon name={item.icon} /><span>{item.label}</span>{item.id === 'review' && counts.changes > 0 && <b>{counts.changes}</b>}</button>)}</nav>
+      <nav>{destinations.map((item) => <button key={item.id} className={`${destination === item.id ? 'nav-link is-active' : 'nav-link'}${isRemote && item.id === 'review' ? ' is-limited' : ''}`} onClick={() => go(item.id)} aria-current={destination === item.id ? 'page' : undefined}><Icon name={item.icon} /><span>{item.label}</span>{item.id === 'review' && counts.changes > 0 && <b>{counts.changes}</b>}</button>)}</nav>
       <div className="rail-foot"><span><Icon name="shield" size={15} /> Local strict par défaut</span><small>v0.6 · open source</small></div>
     </aside>
 
@@ -1040,12 +1207,12 @@ export default function App(): ReactElement {
               {isRemote ? <RemotePreview projectId={project.id} device={currentDevice} visible={destination === 'lab'} allowUpscale={stageFullscreen} onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onAudit={applyRemoteAudit} onState={(state) => { setRemoteState(state); setActivePath(state.path) }} onNotice={flash} /> : labMode === 'device' && previewMode === 'before-after' && proposal ? <div className="before-after-grid" aria-label="Comparaison avant et après le correctif">
                 <div className="comparison-pane"><header><span>Avant</span><strong>Source</strong></header><PreviewFrame compact project={project} origin={project.previewOrigin} device={currentDevice} path={activePath} label="Avant — Source" focusSelector={focusedSelector} onPathChange={changePreviewPath} onThemeChange={setRuntimeTheme} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} /></div>
                 <div className="comparison-pane comparison-pane--after"><header><span>Après</span><strong>Proposition non validée</strong></header><PreviewFrame compact project={project} origin={proposal.previewOrigin} device={currentDevice} path={activePath} label="Après — Proposition" focusSelector={focusedSelector} onPathChange={changePreviewPath} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} /></div>
-              </div> : labMode === 'device' ? <PreviewFrame project={project} origin={activeOrigin} device={currentDevice} path={activePath} focusSelector={focusedSelector} themeOverride={nativeThemeTarget} resizable allowUpscale={stageFullscreen} onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onPathChange={changePreviewPath} onThemeChange={activeOrigin === project.previewOrigin ? setRuntimeTheme : undefined} onAudit={setRuntimeAudit} onRenderStatus={setRuntimeRenderStatus} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} /> : <div className="comparison-grid">{compareDevices.map((device) => <PreviewFrame key={device.id} project={project} origin={activeOrigin} device={device} path={activePath} compact focusSelector={focusedSelector} themeOverride={nativeThemeTarget} label={device.family === 'smartphone' ? 'Smartphone' : device.family === 'tablet' ? 'Tablette' : 'Ordinateur'} onPathChange={changePreviewPath} onThemeChange={activeOrigin === project.previewOrigin ? setRuntimeTheme : undefined} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} />)}</div>}
+              </div> : labMode === 'device' ? <PreviewFrame project={project} origin={activeOrigin} device={currentDevice} path={activePath} focusSelector={focusedSelector} themeOverride={nativeThemeTarget} resizable allowUpscale={stageFullscreen} onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onPathChange={changePreviewPath} onThemeChange={activeOrigin === project.previewOrigin ? setRuntimeTheme : undefined} onAudit={applyRuntimeAudit} onRenderStatus={setRuntimeRenderStatus} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} /> : <div className="comparison-grid">{compareDevices.map((device) => <PreviewFrame key={device.id} project={project} origin={activeOrigin} device={device} path={activePath} compact focusSelector={focusedSelector} themeOverride={nativeThemeTarget} label={device.family === 'smartphone' ? 'Smartphone' : device.family === 'tablet' ? 'Tablette' : 'Ordinateur'} onPathChange={changePreviewPath} onThemeChange={activeOrigin === project.previewOrigin ? setRuntimeTheme : undefined} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} />)}</div>}
             </div>
           </div>
           {scopedProject && <Inspector project={scopedProject} activeIssueCount={routeIssues.length} totalIssueCount={project.issues.length} showAllIssues={showAllIssues} onShowAllIssues={setShowAllIssues} tab={inspectorTab} onTab={setInspectorTab} selectedIssue={selectedIssue} selectedIds={selectedIssueIds} onPreviewIssue={(issue) => void previewIssue(issue)} onToggleIssue={toggleAcceptedIssue} detectedTheme={detectedTheme} themeTarget={themeTarget} previewThemeTarget={previewThemeTarget} onPreviewTheme={(target) => void previewTheme(target)} onRemoveTheme={removeTheme} proposal={proposal} proposalContext={proposalContext} previewBusy={previewBusy} staging={staging} runtimeAudit={runtimeAudit} runtimeRenderStatus={runtimeRenderStatus} instructions={instructions} onRemoveInstruction={removeInstruction} messages={messages} draft={draft} onDraft={setDraft} onSubmit={submitInstruction} busy={busy} onAcceptProposal={acceptProposal} onRejectProposal={rejectProposal} onBuild={() => void buildStaging()} onClear={() => void clearStaging()} assistantRoute={remoteState?.path ?? activePath} assistantViewport={{ width: currentDevice.width, height: currentDevice.height, deviceScaleFactor: 1, mobile: currentDevice.family !== 'computer', touch: currentDevice.family !== 'computer' }} assistantScreenshot={remoteAudit?.screenshotDataUrl ?? null} workspaceEnabled={workspaceEnabled} onWorkspacePreviewOrigin={setWorkspaceOrigin} onNotice={flash} onOpenCode={() => go('code')} />}
         </div>
-        <footer className="activity-bar"><span><i className="status-dot status-dot--ok" /> {project.routes.length} page{project.routes.length > 1 ? 's' : ''}</span>{project.capabilities?.buildRequired ? <span className="activity-alert" title="Responsiver n’exécute jamais les scripts arbitraires d’un projet sans consentement. Ouvrez plutôt le fichier HTML généré dans dist ou out.">Sources à compiler · choisir dist/out</span> : <span className={counts.blockers ? 'activity-alert' : ''}>{counts.blockers} bloquant{counts.blockers > 1 ? 's' : ''}</span>}<span>{isRemote ? remoteAudit ? `${remoteAudit.findings.length} constats sur ${remoteAudit.viewports.length} largeurs` : 'Audit visuel en préparation' : runtimeAudit ? `${runtimeAudit.overflowCount} débordement${runtimeAudit.overflowCount > 1 ? 's' : ''} à ${runtimeAudit.viewportWidth}px` : 'Audit visuel en attente'}</span><span className="activity-end"><Icon name="shield" size={13} /> {project.source.network === 'local-only' ? 'Hors ligne' : project.source.network === 'localhost' ? 'Réseau localhost autorisé' : 'Session réseau éphémère'}</span></footer>
+        <footer className="activity-bar"><span><i className="status-dot status-dot--ok" /> {isRemote ? `${remoteAudits.current.size} route${remoteAudits.current.size > 1 ? 's' : ''} auditée${remoteAudits.current.size > 1 ? 's' : ''}` : `${project.routes.length} page${project.routes.length > 1 ? 's' : ''}`}</span>{project.capabilities?.buildRequired ? <span className="activity-alert" title="Responsiver n’exécute jamais les scripts arbitraires d’un projet sans consentement. Ouvrez plutôt le fichier HTML généré dans dist ou out.">Sources à compiler · choisir dist/out</span> : <span className={counts.blockers ? 'activity-alert' : ''}>{counts.blockers} bloquant{counts.blockers > 1 ? 's' : ''}</span>}<span>{isRemote ? remoteAudit ? `${project.issues.length} constats cumulés · ${remoteAudit.viewports.length} largeurs` : 'Audit visuel en préparation' : runtimeAudit ? `${runtimeAudit.findingCount ?? runtimeAudit.overflowCount} constat${(runtimeAudit.findingCount ?? runtimeAudit.overflowCount) > 1 ? 's' : ''} à ${runtimeAudit.viewportWidth}px` : 'Audit visuel en attente'}</span><span className="activity-end"><Icon name="shield" size={13} /> {project.source.network === 'local-only' ? 'Hors ligne' : project.source.network === 'localhost' ? 'Serveur local · dépendances web autorisées' : 'Session réseau éphémère'}</span></footer>
       </div>}
 
       {destination === 'code' && project && <div className="code-page">
@@ -1057,7 +1224,7 @@ export default function App(): ReactElement {
             <div className="code-preview-body">
               {isRemote
                 ? <RemotePreview projectId={project.id} device={currentDevice} visible={destination === 'code'} embedded automaticAudit={false} onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onAudit={applyRemoteAudit} onState={(state) => { setRemoteState(state); setActivePath(state.path) }} onNotice={flash} />
-                : <PreviewFrame compact project={project} origin={workspaceOrigin ?? project.previewOrigin} device={currentDevice} path={activePath} resizable onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onPathChange={changePreviewPath} onThemeChange={setRuntimeTheme} onAudit={setRuntimeAudit} onRenderStatus={setRuntimeRenderStatus} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} />}
+                : <PreviewFrame compact project={project} origin={workspaceOrigin ?? project.previewOrigin} device={currentDevice} path={activePath} resizable onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onPathChange={changePreviewPath} onThemeChange={setRuntimeTheme} onAudit={applyRuntimeAudit} onRenderStatus={setRuntimeRenderStatus} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} />}
             </div>
             <footer><span><i /> Overlay en mémoire</span><code>{currentDevice.width} × {currentDevice.height}</code></footer>
           </aside>
@@ -1065,7 +1232,9 @@ export default function App(): ReactElement {
       </div>}
 
       {destination === 'review' && project && <ReviewView project={project} staging={staging} sourceOrigin={project.previewOrigin} path={activePath} device={currentDevice} acceptedCount={counts.selected} onBuild={() => void buildStaging()} onClear={() => void clearStaging()} onCopy={() => void copyPatch()} busy={busy} />}
-      {destination === 'export' && project && <ExportView project={project} staging={staging} selectedCount={counts.selected} busy={busy} onCopy={() => void copyPatch()} onExport={exportAction} onReview={() => go('review')} />}
+      {destination === 'export' && project && (isRemote
+        ? <RemoteReportView project={project} auditedRouteCount={remoteAudits.current.size} busy={busy} onCopy={() => void copyRemoteSummary()} onExport={() => void exportAction('report')} onLab={() => go('lab')} />
+        : <ExportView project={project} staging={staging} selectedCount={counts.selected} busy={busy} onCopy={() => void copyPatch()} onExport={exportAction} onReview={() => go('review')} />)}
     </main>
     {showPreparation && preparation && <PreparationOverlay progress={preparation} />}
     {notice && <div className="toast" role="status"><Icon name="info" size={16} /> <span>{notice}</span><button aria-label="Fermer" onClick={() => setNotice(null)}><Icon name="close" size={14} /></button></div>}
@@ -1074,12 +1243,13 @@ export default function App(): ReactElement {
 
 function PreparationOverlay({ progress }: { progress: ProjectPreparationProgress }): ReactElement {
   const percentage = Math.max(8, Math.min(100, Math.round((progress.step / Math.max(progress.total, 1)) * 100)))
+  const networkSession = /url|chromium|localhost|distant|session isolée/i.test(`${progress.label} ${progress.detail ?? ''}`)
   return <div className="preparation-overlay" role="dialog" aria-modal="true" aria-labelledby="preparation-title" aria-describedby="preparation-detail">
     <section className="preparation-card">
-      <header><div className="preparation-mark"><Mark /><span className="preparation-orbit" /></div><div><span className="overline">Préparation locale</span><h2 id="preparation-title">Le laboratoire prend forme</h2></div><span className="preparation-step">{progress.step}/{progress.total}</span></header>
+      <header><div className="preparation-mark"><Mark /><span className="preparation-orbit" /></div><div><span className="overline">Préparation contrôlée</span><h2 id="preparation-title">Le laboratoire prend forme</h2></div><span className="preparation-step">{progress.step}/{progress.total}</span></header>
       <div className="preparation-progress" aria-hidden="true"><i style={{ width: `${percentage}%` }} /></div>
       <div className="preparation-copy" aria-live="polite"><span className="loading-mark" /><div><strong>{progress.label}</strong><p id="preparation-detail">{progress.detail ?? 'Responsiver inspecte le projet sans envoyer ni modifier aucun fichier.'}</p></div></div>
-      <footer><span><Icon name="shield" size={14} /> Analyse hors ligne</span><span>Sources intactes</span><span>Aucun script de build lancé</span></footer>
+      <footer><span><Icon name="shield" size={14} /> {networkSession ? 'Session réseau isolée' : 'Analyse hors ligne'}</span><span>Sources intactes</span><span>Aucun script de build lancé</span></footer>
     </section>
   </div>
 }
@@ -1225,6 +1395,7 @@ function Inspector({ project, activeIssueCount, totalIssueCount, showAllIssues, 
     <div className="inspector-content">
       {tab === 'findings' && <><div className="inspector-heading"><div><span className="overline">Analyse déterministe</span><h2>Constats</h2></div>{runtimeAudit && <span className="live-chip"><i /> Direct</span>}</div>
         <div className="issue-scope" role="group" aria-label="Portée des constats"><button className={!showAllIssues ? 'is-active' : ''} onClick={() => onShowAllIssues(false)}>Page active <b>{activeIssueCount}</b></button><button className={showAllIssues ? 'is-active' : ''} onClick={() => onShowAllIssues(true)}>Toutes les pages <b>{totalIssueCount}</b></button></div>
+        {project.analysis?.truncated && <div className="runtime-alert runtime-alert--errors" role="status"><Icon name="info" size={16} /><div><strong>Analyse partielle signalée</strong><span>Une limite de sécurité sur le nombre de fichiers, de nœuds ou de constats a été atteinte. Les résultats visibles restent valides, mais ne couvrent pas nécessairement toute la page.</span></div></div>}
         {project.previewReadiness?.status === 'degraded' && <div className="runtime-alert"><Icon name="info" size={16} /><div><strong>Prévisualisation disponible avec limites</strong><span>{project.previewReadiness.summary} Les points concernés figurent dans les constats ci-dessous.</span></div></div>}
         {project.previewBasePath && <div className="runtime-alert runtime-alert--artifact"><Icon name="info" size={16} /><div><strong>Audit sur une sortie compilée</strong><span>Les corrections ciblent {project.previewBasePath}. Un prochain build peut les écraser : reportez ensuite les changements utiles dans les sources.</span></div></div>}
         {runtimeRenderStatus && runtimeRenderStatus.failureCount > 0 && <div className="runtime-alert runtime-alert--errors" aria-live="polite"><Icon name="finding" size={16} /><div><strong>{runtimeRenderStatus.failureCount} erreur{runtimeRenderStatus.failureCount > 1 ? 's' : ''} observée{runtimeRenderStatus.failureCount > 1 ? 's' : ''} pendant le rendu</strong><span>{runtimeRenderStatus.firstFailure ?? 'Le site reste navigable ; vérifiez les scripts et ressources signalés dans la console du projet.'}</span></div></div>}
@@ -1302,6 +1473,26 @@ function ReviewView({ project, staging, sourceOrigin, path, device, acceptedCoun
       <section className="visual-comparison"><div><span>Source</span><PreviewFrame compact project={project} origin={sourceOrigin} device={device} path={path} /></div><div><span>Staging</span><PreviewFrame compact project={project} origin={staging.previewOrigin} device={device} path={path} /></div></section>
       <section className="diff-panel"><header><div><span className="overline">Patch unifié</span><strong>{staging.changedFiles.join(' · ') || 'responsiver-theme.css'}</strong></div><button className="icon-button" onClick={onCopy} aria-label="Copier le patch"><Icon name="copy" size={15} /></button></header><pre>{staging.patch || staging.generatedCss || 'Aucun contenu textuel.'}</pre></section>
     </>}
+  </div>
+}
+
+function RemoteReportView({ project, auditedRouteCount, busy, onCopy, onExport, onLab }: {
+  project: ProjectSnapshot & ProjectExtra
+  auditedRouteCount: number
+  busy: boolean
+  onCopy: () => void
+  onExport: () => void
+  onLab: () => void
+}): ReactElement {
+  const rules = new Map<string, number>()
+  for (const issue of project.issues) rules.set(issue.rule, (rules.get(issue.rule) ?? 0) + 1)
+  const leadingRules = [...rules.entries()].sort((left, right) => right[1] - left[1]).slice(0, 6)
+  return <div className="standard-page remote-report-page">
+    <header className="page-head"><div><span className="overline">Audit URL · lecture seule</span><h1>Rapport exploitable</h1><p>Les constats des routes visitées sont réunis avec leur viewport, leur preuve DOM et une solution à vérifier. Aucun code du site distant n’est modifié.</p></div><span className="export-readiness is-ready"><i /> Rapport prêt</span></header>
+    {project.analysis.truncated && <div className="artifact-warning"><Icon name="info" size={16} /><div><strong>Couverture partielle, résultats conservés</strong><span>Au moins une route a atteint un plafond de sécurité. Les constats exportés restent valides, mais le rapport ne prétend pas couvrir chaque nœud de la page.</span></div></div>}
+    <section className="remote-report-ledger"><header><div><span className="overline">Périmètre observé</span><h2>{project.name}</h2></div><code>{project.source.url}</code></header><div><span><b>{auditedRouteCount}</b> route{auditedRouteCount > 1 ? 's' : ''}</span><span><b>{project.issues.length}</b> constat{project.issues.length > 1 ? 's' : ''}</span><span><b>{rules.size}</b> famille{rules.size > 1 ? 's' : ''} de règle</span><span><b>0</b> écriture distante</span></div></section>
+    <div className="remote-report-grid"><section><header><span className="overline">Répartition</span><h2>Signaux principaux</h2></header>{leadingRules.length ? <ol>{leadingRules.map(([rule, count]) => <li key={rule}><code>{rule}</code><span>{count}</span></li>)}</ol> : <div className="empty-panel"><Icon name="check" /><strong>Aucun motif connu détecté</strong><span>Le rapport documente tout de même les routes et dimensions auditées.</span></div>}</section><section><header><span className="overline">Livraison</span><h2>Deux formats lisibles</h2></header><p>Copiez une synthèse Markdown pour votre ticket, ou exportez le rapport JSON complet afin de conserver les preuves et solutions route par route.</p><div><button className="button button--secondary" onClick={onCopy} disabled={busy}><Icon name="copy" /> Copier la synthèse</button><button className="button button--primary" onClick={onExport} disabled={busy}><Icon name="export" /> Exporter le JSON</button></div></section></div>
+    <footer className="export-foot"><div><Icon name="shield" /><span><strong>Session éphémère</strong><small>Le rapport indique explicitement le mode réseau utilisé ; aucune donnée de session n’est conservée.</small></span></div><button className="text-button" onClick={onLab}>Revenir au laboratoire <Icon name="arrow" size={15} /></button></footer>
   </div>
 }
 
