@@ -6,7 +6,9 @@ import test from 'node:test'
 import { analyzeProject } from '../src/main/project-analyzer.ts'
 import type { ProjectPreparationProgress } from '../src/shared/contracts.ts'
 import {
+  assessComplementaryTheme,
   buildProjectStaging,
+  generateComplementaryThemeCss,
   interpretLocalInstruction,
   suggestedComplementaryTheme
 } from '../src/main/project-transformer.ts'
@@ -34,6 +36,8 @@ async function createFixture(): Promise<Fixture> {
   --surface: #1d1f1b;
   --text: #f3f1ea;
   --accent: #e36a43;
+  --background-gradient: linear-gradient(#11120f, #1d1f1b);
+  --surface-opacity: .82;
 }
 body { background: var(--background); color: var(--text); }
 .navigation { min-width: 720px; white-space: nowrap; }
@@ -57,14 +61,17 @@ test('l’analyse choisit la racine, scope les routes et conserve des identifian
   assert.equal(first.theme.detected, 'dark')
   assert.equal(suggestedComplementaryTheme(first.theme), 'light')
   assert.deepEqual(first.issues.map((issue) => issue.id), second.issues.map((issue) => issue.id))
-  assert.ok(first.routes.some((route) => route.path === '/demos/isolated/index.html'))
+  assert.equal(first.routes.some((route) => route.path === '/demos/isolated/index.html'), false)
 
   const rootMinimum = first.issues.find((issue) => issue.rule === 'css.min-width-mobile' && issue.routePath === '/index.html')
-  const demoWidth = first.issues.find((issue) => issue.rule === 'css.fixed-width' && issue.routePath === '/demos/isolated/index.html')
   const external = first.issues.find((issue) => issue.rule === 'network.external-resource' && issue.routePath === '/index.html')
   assert.ok(rootMinimum?.fix)
-  assert.ok(demoWidth)
   assert.ok(external)
+
+  const explicitDemo = await analyzeProject(fixture.root, { preferredEntryPath: '/demos/isolated/index.html' })
+  assert.equal(explicitDemo.entryPath, '/demos/isolated/index.html')
+  assert.ok(explicitDemo.routes.some((route) => route.path === '/demos/isolated/index.html'))
+  assert.ok(explicitDemo.issues.some((issue) => issue.rule === 'css.fixed-width' && issue.routePath === '/demos/isolated/index.html'))
 })
 
 test('un squelette sans rendu est bloqué avec un diagnostic explicite', async (context) => {
@@ -142,12 +149,11 @@ test('un artefact compilé local remplace prudemment le shell source', async (co
 
   const fixedWidth = project.issues.find((issue) => issue.rule === 'css.fixed-width')
   assert.ok(fixedWidth)
-  const staging = await buildProjectStaging(root, project, { issueIds: [fixedWidth.id], themeTarget: 'dark', instructions: [] })
-  assert.ok(staging.snapshot.changedFiles.includes('dist/index.html'))
+  const staging = await buildProjectStaging(root, project, { issueIds: [fixedWidth.id], themeTarget: null, instructions: [] })
+  assert.ok(staging.snapshot.changedFiles.includes('dist/assets/app.css'))
   assert.equal(staging.snapshot.changedFiles.includes('index.html'), false)
-  assert.equal(staging.snapshot.generatedFile, 'dist/.responsiver/responsiver.generated.css')
-  assert.match(staging.overrides.get('dist/index.html')?.toString('utf8') ?? '', /href="\.responsiver\/responsiver\.generated\.css"/)
-  assert.match(staging.overrides.get('dist/.responsiver/responsiver.generated.css')?.toString('utf8') ?? '', /Variante sombre déterministe/)
+  assert.equal(staging.snapshot.generatedFile, null)
+  assert.match(staging.overrides.get('dist/assets/app.css')?.toString('utf8') ?? '', /min\(100%, 900px\)/)
 
   const explicitSource = await analyzeProject(root, { preferredEntryPath: '/index.html' })
   assert.equal(explicitSource.entryPath, '/index.html')
@@ -318,6 +324,11 @@ test('le staging produit un patch et une variante claire sans toucher aux source
   const fixture = await createFixture()
   context.after(() => rm(fixture.root, { recursive: true, force: true }))
   const project = await analyzeProject(fixture.root)
+  const themeCss = generateComplementaryThemeCss(project, 'light')
+  assert.match(themeCss, /Contrastes vérifiés/)
+  assert.doesNotMatch(themeCss, /\n\s*--accent\s*:/)
+  assert.doesNotMatch(themeCss, /--background-gradient|--surface-opacity/)
+  assert.doesNotMatch(themeCss, /\[class\*="card"|\bimg\b|\bfilter\s*:/i)
   const selectedIssues = project.issues
     .filter((issue) => issue.routePath === '/index.html' && ['css.min-width-mobile', 'css.nowrap'].includes(issue.rule))
     .map((issue) => issue.id)
@@ -359,6 +370,23 @@ test('un thème existant n’est jamais proposé comme doublon', async (context)
   assert.equal(staging.snapshot.generatedCss, '')
   assert.equal(staging.snapshot.changes.length, 0)
   assert.equal(staging.overrides.size, 0)
+})
+
+test('la génération de thème refuse une palette sans rôles fond et texte fiables', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'responsiver-theme-unsafe-'))
+  await writeFile(join(root, 'index.html'), '<!doctype html><html><head><meta name="viewport" content="width=device-width"><link rel="stylesheet" href="styles.css"></head><body>Marque</body></html>')
+  await writeFile(join(root, 'styles.css'), ':root { --button-bg: #e0cdb9; --text-primary: #101010; } body { background: #f7f2e9; color: var(--text-primary); }')
+  context.after(() => rm(root, { recursive: true, force: true }))
+
+  const project = await analyzeProject(root)
+  const assessment = assessComplementaryTheme(project, 'dark')
+  assert.equal(project.theme.detected, 'light')
+  assert.equal(assessment.safe, false)
+  assert.match(assessment.reason, /fond\/texte|Génération refusée/)
+  await assert.rejects(
+    buildProjectStaging(root, project, { issueIds: [], themeTarget: 'dark', instructions: [] }),
+    /Génération refusée/
+  )
 })
 
 test('un token de palette inutilisé ne crée pas un faux second thème', async (context) => {
@@ -415,6 +443,21 @@ test('les médias, srcset et URL CSS distants sont diagnostiqués sans exposer l
 
 test('la conversation locale reste déterministe et refuse les demandes inconnues', () => {
   assert.equal(interpretLocalInstruction('Autorise le menu à revenir à la ligne').recognized, true)
+  const stableNavigation = interpretLocalInstruction('Sur mobile, stabilise le menu dans une rangée défilante sans masquer ses liens.')
+  assert.equal(stableNavigation.recognized, true)
+  assert.match(stableNavigation.css ?? '', /overflow-x:\s*auto/)
+  const boundedTitle = interpretLocalInstruction('Sur mobile, borne la taille des grands titres disproportionnés.')
+  assert.equal(boundedTitle.recognized, true)
+  assert.match(boundedTitle.css ?? '', /font-size:\s*clamp/)
+  assert.match(interpretLocalInstruction('Jusqu’à 1024 px, borne la taille des grands titres disproportionnés.').css ?? '', /max-width:\s*1024px/)
+  const targetedTitle = interpretLocalInstruction('Cible h1.hero__title. Jusqu’à 1024 px, borne la taille des grands titres disproportionnés.')
+  assert.match(targetedTitle.css ?? '', /:where\(h1\.hero__title\)/)
+  assert.doesNotMatch(targetedTitle.css ?? '', /\[class\*="title"/)
+  const targetedNavigation = interpretLocalInstruction('Cible nav.menu. Jusqu’à 1024 px, stabilise le menu dans une rangée défilante sans masquer ses liens.')
+  assert.match(targetedNavigation.css ?? '', /:where\(nav\.menu, nav\.menu ul, nav\.menu ol\)/)
+  assert.match(targetedNavigation.css ?? '', /:where\(nav\.menu a, nav\.menu button\)/)
+  assert.match(targetedNavigation.css ?? '', /min-inline-size:\s*0\s*!important/)
+  assert.doesNotMatch(targetedNavigation.css ?? '', /\[class\*="nav"/)
   assert.equal(interpretLocalInstruction('Mets un accent terracotta').recognized, true)
   assert.equal(interpretLocalInstruction('Réinvente tout avec une IA').recognized, false)
 })

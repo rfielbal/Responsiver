@@ -1,11 +1,89 @@
-import type { LocalAiRequest, LocalAiResponse, LocalAiStatus } from '../shared/contracts'
+import type { LocalAiRequest, LocalAiResponse, LocalAiStatus, LocalAiStatusCode } from '../shared/contracts'
 
 const maxResponseBytes = 4 * 1024 * 1024
 const maxPromptLength = 12_000
 const maxContextBytes = 700_000
 const maxScreenshotLength = 12 * 1024 * 1024
+const probeTimeoutMs = 8_000
 const requestTimeoutMs = 120_000
 const secretPathPattern = /(^|\/)(?:\.env(?:\.|$)|id_(?:rsa|dsa|ecdsa|ed25519)$|[^/]+\.(?:pem|key|p12|pfx|sqlite|sqlite3|sql|dump))|(?:^|\/)(?:secrets?|credentials?)(?:\/|$)/i
+
+interface LocalAiTransportOptions {
+  /** Réservé aux tests d’intégration ; la sonde et l’inférence ont leurs propres valeurs de production. */
+  timeoutMs?: number
+}
+
+class LocalAiConnectionError extends Error {
+  readonly code: Exclude<LocalAiStatusCode, 'ready' | 'no-model'>
+  readonly action: string
+
+  constructor(code: LocalAiConnectionError['code'], detail: string, action: string) {
+    super(`${detail} ${action}`)
+    this.name = 'LocalAiConnectionError'
+    this.code = code
+    this.action = action
+  }
+
+  get detail(): string {
+    return this.message.slice(0, -(this.action.length + 1))
+  }
+}
+
+function providerLabel(provider: LocalAiRequest['provider']): string {
+  return provider === 'ollama' ? 'Ollama' : 'llama.cpp'
+}
+
+function errorCode(error: unknown): string | null {
+  if (!error || typeof error !== 'object') return null
+  const candidate = error as { code?: unknown; cause?: unknown }
+  if (typeof candidate.code === 'string') return candidate.code
+  return candidate.cause === error ? null : errorCode(candidate.cause)
+}
+
+function connectionFailure(error: unknown, provider: LocalAiRequest['provider'], endpoint: string): LocalAiConnectionError {
+  if (error instanceof LocalAiConnectionError) return error
+  const code = errorCode(error)
+  const name = error instanceof Error ? error.name : ''
+  if (name === 'TimeoutError' || name === 'AbortError' || code === 'UND_ERR_CONNECT_TIMEOUT') {
+    return new LocalAiConnectionError(
+      'timeout',
+      `${providerLabel(provider)} n’a pas répondu avant le délai autorisé à ${endpoint}.`,
+      'Vérifiez que le modèle est chargé et réessayez ; un premier chargement peut être plus long.'
+    )
+  }
+  if (code === 'ECONNREFUSED') {
+    return new LocalAiConnectionError(
+      'engine-unreachable',
+      `Aucun moteur IA n’écoute à ${endpoint}.`,
+      `Démarrez ${providerLabel(provider)} localement, puis vérifiez son port dans Responsiver.`
+    )
+  }
+  if (code === 'ECONNRESET' || code === 'EPIPE' || code === 'UND_ERR_SOCKET') {
+    return new LocalAiConnectionError(
+      'engine-unreachable',
+      `La connexion locale à ${providerLabel(provider)} a été interrompue.`,
+      'Vérifiez le journal du moteur et que le modèle reste chargé pendant la requête.'
+    )
+  }
+  return new LocalAiConnectionError(
+    'engine-unreachable',
+    `Responsiver ne parvient pas à joindre ${providerLabel(provider)} à ${endpoint}${code ? ` (${code})` : ''}.`,
+    'Vérifiez le moteur choisi, l’adresse loopback et le port ; aucun réglage CORS n’est nécessaire dans l’application desktop.'
+  )
+}
+
+function statusFailure(error: unknown, provider: LocalAiRequest['provider'], endpoint: string): LocalAiStatus {
+  const failure = connectionFailure(error, provider, endpoint)
+  return {
+    available: false,
+    provider,
+    endpoint,
+    models: [],
+    code: failure.code,
+    detail: failure.detail,
+    action: failure.action
+  }
+}
 
 function isLoopbackHostname(hostname: string): boolean {
   const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, '')
@@ -64,15 +142,53 @@ async function boundedText(response: Response, maximum = maxResponseBytes): Prom
   return new TextDecoder().decode(body)
 }
 
-async function localFetch(url: string, init: RequestInit = {}): Promise<Response> {
-  const response = await fetch(url, {
-    ...init,
-    redirect: 'error',
-    signal: AbortSignal.timeout(requestTimeoutMs),
-    headers: { 'content-type': 'application/json', ...(init.headers ?? {}) }
-  })
-  if (!response.ok) throw new Error(`Le moteur IA local a répondu avec le statut ${response.status}.`)
-  return response
+async function localFetch(url: string, provider: LocalAiRequest['provider'], init: RequestInit = {}, options: LocalAiTransportOptions = {}): Promise<Response> {
+  const endpoint = new URL(url).origin
+  const timeoutMs = typeof options.timeoutMs === 'number' && Number.isFinite(options.timeoutMs)
+    ? Math.min(requestTimeoutMs, Math.max(10, Math.round(options.timeoutMs)))
+    : requestTimeoutMs
+  let response: Response
+  try {
+    response = await fetch(url, {
+      ...init,
+      redirect: 'error',
+      signal: AbortSignal.timeout(timeoutMs),
+      headers: { 'content-type': 'application/json', ...(init.headers ?? {}) }
+    })
+  } catch (error) {
+    throw connectionFailure(error, provider, endpoint)
+  }
+  if (response.ok) return response
+  const route = new URL(url).pathname
+  const responseMessage = engineResponseMessage(await boundedText(response, 64 * 1024).catch(() => ''))
+  if (response.status === 404 && (route.endsWith('/api/chat') || route.endsWith('/v1/chat/completions')) && /model|modèle|not found|unknown/i.test(responseMessage ?? '')) {
+    throw new LocalAiConnectionError(
+      'engine-error',
+      `${providerLabel(provider)} répond, mais le modèle demandé est introuvable.`,
+      'Relancez la vérification puis sélectionnez un modèle actuellement installé ou chargé.'
+    )
+  }
+  if (response.status === 404 || response.status === 405) {
+    throw new LocalAiConnectionError(
+      'endpoint-not-found',
+      `${providerLabel(provider)} répond à ${endpoint}, mais la route ${route} est absente (HTTP ${response.status}).`,
+      'Vérifiez que le fournisseur sélectionné et le port correspondent au moteur, et saisissez son adresse de base sans route API.'
+    )
+  }
+  if (response.status === 401 || response.status === 403) {
+    throw new LocalAiConnectionError(
+      'access-denied',
+      `${providerLabel(provider)} refuse la requête locale (HTTP ${response.status}).`,
+      'Retirez le proxy ou l’authentification placée devant le moteur local, ou autorisez explicitement Responsiver sur cette instance.'
+    )
+  }
+  throw new LocalAiConnectionError(
+    'engine-error',
+    `${providerLabel(provider)} a échoué sur ${route} (HTTP ${response.status}).`,
+    response.status >= 500
+      ? 'Consultez le journal du moteur : le modèle peut être absent, arrêté ou trop volumineux pour la mémoire disponible.'
+      : 'Vérifiez la configuration locale du moteur et le modèle demandé.'
+  )
 }
 
 function parseJson(value: string): unknown {
@@ -81,6 +197,16 @@ function parseJson(value: string): unknown {
   } catch {
     return null
   }
+}
+
+function engineResponseMessage(value: string): string | null {
+  const body = parseJson(value) as { error?: unknown } | null
+  if (typeof body?.error === 'string') return body.error.slice(0, 2_000)
+  if (body?.error && typeof body.error === 'object') {
+    const message = (body.error as { message?: unknown }).message
+    if (typeof message === 'string') return message.slice(0, 2_000)
+  }
+  return null
 }
 
 function validateProvider(value: unknown): value is LocalAiRequest['provider'] {
@@ -97,26 +223,53 @@ function validRequestContext(value: unknown): value is LocalAiRequest['context']
     (context.files ?? []).every((file) => Boolean(file) && typeof file === 'object' && typeof file.path === 'string' && typeof file.content === 'string')
 }
 
-export async function probeLocalAi(providerValue: unknown, endpointValue: unknown): Promise<LocalAiStatus> {
+export async function probeLocalAi(providerValue: unknown, endpointValue: unknown, options: LocalAiTransportOptions = {}): Promise<LocalAiStatus> {
   if (!validateProvider(providerValue)) throw new Error('Le moteur IA local demandé est inconnu.')
   const endpoint = normalizeLocalAiEndpoint(endpointValue)
+  const probeOptions = { timeoutMs: options.timeoutMs ?? probeTimeoutMs }
   try {
     if (providerValue === 'ollama') {
-      const body = parseJson(await boundedText(await localFetch(endpointUrl(endpoint, '/api/tags'), { method: 'GET', headers: {} }))) as { models?: Array<{ name?: unknown; model?: unknown }> } | null
-      const models = (body?.models ?? []).map((model) => typeof model.name === 'string' ? model.name : typeof model.model === 'string' ? model.model : '').filter(Boolean).slice(0, 100)
-      return { available: true, provider: 'ollama', endpoint, models, detail: models.length ? `${models.length} modèle${models.length > 1 ? 's' : ''} localement disponible${models.length > 1 ? 's' : ''}.` : 'Ollama répond, mais aucun modèle local n’est installé.' }
+      const body = parseJson(await boundedText(await localFetch(endpointUrl(endpoint, '/api/tags'), providerValue, { method: 'GET', headers: {} }, probeOptions))) as { models?: unknown } | null
+      if (!body || !Array.isArray(body.models)) {
+        throw new LocalAiConnectionError(
+          'invalid-response',
+          'Le service répond, mais son catalogue n’est pas au format Ollama attendu.',
+          'Vérifiez que cette adresse et ce port désignent bien Ollama, sans proxy qui transforme la réponse.'
+        )
+      }
+      const models = body.models.map((model) => {
+        if (!model || typeof model !== 'object') return ''
+        const candidate = model as { name?: unknown; model?: unknown }
+        return typeof candidate.name === 'string' ? candidate.name : typeof candidate.model === 'string' ? candidate.model : ''
+      }).filter(Boolean).slice(0, 100)
+      return {
+        available: true,
+        provider: 'ollama',
+        endpoint,
+        models,
+        code: models.length ? 'ready' : 'no-model',
+        detail: models.length ? `${models.length} modèle${models.length > 1 ? 's' : ''} localement disponible${models.length > 1 ? 's' : ''}.` : 'Ollama répond, mais aucun modèle local n’est installé.',
+        action: models.length ? null : 'Installez au moins un modèle dans Ollama, puis relancez cette vérification.'
+      }
     }
-    await localFetch(endpointUrl(endpoint, '/health'), { method: 'GET', headers: {} })
+    const health = parseJson(await boundedText(await localFetch(endpointUrl(endpoint, '/health'), providerValue, { method: 'GET', headers: {} }, probeOptions))) as { status?: unknown } | null
+    if (health?.status !== 'ok') {
+      throw new LocalAiConnectionError(
+        'invalid-response',
+        'Le service répond, mais son endpoint /health n’est pas au format llama.cpp attendu.',
+        'Vérifiez que cette adresse et ce port désignent bien llama-server.'
+      )
+    }
     let models: string[] = []
     try {
-      const body = parseJson(await boundedText(await localFetch(endpointUrl(endpoint, '/v1/models'), { method: 'GET', headers: {} }))) as { data?: Array<{ id?: unknown }> } | null
+      const body = parseJson(await boundedText(await localFetch(endpointUrl(endpoint, '/v1/models'), providerValue, { method: 'GET', headers: {} }, probeOptions))) as { data?: Array<{ id?: unknown }> } | null
       models = (body?.data ?? []).map((model) => typeof model.id === 'string' ? model.id : '').filter(Boolean).slice(0, 100)
     } catch {
       // Le endpoint /health suffit pour les versions de llama.cpp sans catalogue.
     }
-    return { available: true, provider: 'llama.cpp', endpoint, models, detail: 'Le moteur llama.cpp local répond sans transfert distant.' }
+    return { available: true, provider: 'llama.cpp', endpoint, models, code: 'ready', detail: 'Le moteur llama.cpp local répond sans transfert distant.', action: models.length ? null : 'Si aucun modèle n’est proposé, saisissez le nom du modèle déjà chargé par llama.cpp.' }
   } catch (error) {
-    return { available: false, provider: providerValue, endpoint, models: [], detail: error instanceof Error ? error.message : 'Le moteur IA local ne répond pas.' }
+    return statusFailure(error, providerValue, endpoint)
   }
 }
 
@@ -197,7 +350,7 @@ function parseResponse(raw: string, request: LocalAiRequest): LocalAiResponse {
   return { text: text.trim().slice(0, 30_000) || 'Le modèle local n’a fourni aucune explication.', model: request.model, provider: request.provider, proposedFiles }
 }
 
-export async function sendLocalAiRequest(value: unknown): Promise<LocalAiResponse> {
+export async function sendLocalAiRequest(value: unknown, options: LocalAiTransportOptions = {}): Promise<LocalAiResponse> {
   if (!value || typeof value !== 'object') throw new Error('La requête IA locale est invalide.')
   const request = value as LocalAiRequest
   if (!validateProvider(request.provider) || typeof request.model !== 'string' || !request.model.trim() || request.model.length > 300 || typeof request.prompt !== 'string' || !request.prompt.trim() || request.prompt.length > maxPromptLength || !validRequestContext(request.context)) {
@@ -211,24 +364,28 @@ export async function sendLocalAiRequest(value: unknown): Promise<LocalAiRespons
   if (request.provider === 'ollama') {
     const userMessage: { role: 'user'; content: string; images?: string[] } = { role: 'user', content: `${request.prompt.trim()}\n\nCONTEXTE RESPONSIVER\n${contextText}` }
     if (screenshot) userMessage.images = [screenshot.slice(screenshot.indexOf(',') + 1)]
-    const response = await localFetch(endpointUrl(endpoint, '/api/chat'), {
+    const response = await localFetch(endpointUrl(endpoint, '/api/chat'), request.provider, {
       method: 'POST',
       body: JSON.stringify({ model: request.model.trim(), stream: false, format: 'json', messages: [{ role: 'system', content: systemPrompt() }, userMessage], options: { temperature: 0.15 } })
-    })
+    }, options)
     const body = parseJson(await boundedText(response)) as { message?: { content?: unknown } } | null
-    if (typeof body?.message?.content !== 'string') throw new Error('Ollama n’a pas renvoyé de contenu exploitable.')
+    if (typeof body?.message?.content !== 'string') {
+      throw new LocalAiConnectionError('invalid-response', 'Ollama a répondu sans contenu de conversation exploitable.', 'Vérifiez le modèle choisi et sa compatibilité avec le mode conversation JSON.')
+    }
     return parseResponse(body.message.content, { ...request, endpoint, context })
   }
 
   const userContent: unknown = screenshot
     ? [{ type: 'text', text: `${request.prompt.trim()}\n\nCONTEXTE RESPONSIVER\n${contextText}` }, { type: 'image_url', image_url: { url: screenshot } }]
     : `${request.prompt.trim()}\n\nCONTEXTE RESPONSIVER\n${contextText}`
-  const response = await localFetch(endpointUrl(endpoint, '/v1/chat/completions'), {
+  const response = await localFetch(endpointUrl(endpoint, '/v1/chat/completions'), request.provider, {
     method: 'POST',
     body: JSON.stringify({ model: request.model.trim(), temperature: 0.15, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: systemPrompt() }, { role: 'user', content: userContent }] })
-  })
+  }, options)
   const body = parseJson(await boundedText(response)) as { choices?: Array<{ message?: { content?: unknown } }> } | null
   const content = body?.choices?.[0]?.message?.content
-  if (typeof content !== 'string') throw new Error('llama.cpp n’a pas renvoyé de contenu exploitable.')
+  if (typeof content !== 'string') {
+    throw new LocalAiConnectionError('invalid-response', 'llama.cpp a répondu sans choix de conversation exploitable.', 'Vérifiez que le serveur expose une API compatible OpenAI et que le modèle est chargé.')
+  }
   return parseResponse(content, { ...request, endpoint, context })
 }

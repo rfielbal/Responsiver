@@ -16,6 +16,7 @@ import type {
 import {
   REMOTE_AUDIT_BOOTSTRAP_SCRIPT,
   buildRemoteAuditScript,
+  consolidateRemoteAuditFindings,
   sanitizeRemoteAuditResult,
   type RemoteAuditFinding
 } from './remote-audit'
@@ -38,8 +39,8 @@ const maxResourceHostnames = 256
 const maxConcurrentResourceHostChecks = 16
 const resourceHostCacheMs = 10_000
 const maxAuditNodesPerViewport = 5_000
-const maxAuditFindingsPerViewport = 180
-const maxAuditFindingsTotal = 500
+const maxAuditFindingsPerViewport = 60
+const maxAuditFindingsTotal = 20
 const defaultViewport: RemoteViewport = { width: 393, height: 852, deviceScaleFactor: 1, mobile: true, touch: true }
 
 export interface RemoteSessionCallbacks {
@@ -137,6 +138,11 @@ function proposalFor(finding: RemoteAuditFinding): string {
     'responsive.missing-viewport': 'Ajouter une balise meta viewport déclarant width=device-width, puis vérifier le rendu sur un appareil mobile réel.',
     'layout.clipped-content': 'Réviser la taille du conteneur et sa règle overflow sans dévoiler un contenu volontairement masqué.',
     'layout.truncated-text': 'Autoriser un retour à la ligne ou dimensionner explicitement la zone de texte à ce breakpoint.',
+    'layout.navigation-wrap': 'À ce breakpoint, préférer une navigation repliable ou équilibrer explicitement les rangées avec flex-wrap, gap et des zones tactiles suffisantes.',
+    'layout.element-overlap': 'Supprimer la superposition involontaire en rétablissant le flux, le gap ou la grille du conteneur avant de modifier les z-index.',
+    'layout.density-hierarchy': 'Réduire le nombre de commandes visibles dans ce groupe ou augmenter gap et padding pour rétablir une hiérarchie claire.',
+    'layout.useful-area-overflow': 'Contraindre ce bloc avec max-inline-size: 100%, min-inline-size: 0 et un retour à la ligne au breakpoint concerné.',
+    'typography.disproportionate': 'Borner le titre avec font-size: clamp(...) et une line-height cohérente, puis contrôler ses métriques avec la police réellement chargée.',
     'typography.mobile-readability': 'Augmenter le corps ou l’interlignage du texte concerné, puis contrôler sa densité sur un petit écran.',
     'interaction.small-target': 'Porter la zone interactive à au moins 44 × 44 CSS px ou augmenter son espacement tactile.',
     'layout.fixed-obstruction': 'Réduire, déplacer ou rendre temporaire cet élément fixe sur les petits viewports.',
@@ -148,7 +154,7 @@ function proposalFor(finding: RemoteAuditFinding): string {
   return proposals[finding.rule]
 }
 
-function mapFinding(finding: RemoteAuditFinding): ProjectIssue {
+function mapFinding(finding: RemoteAuditFinding, affectedViewports: readonly RemoteAuditFinding['viewport'][] = [finding.viewport]): ProjectIssue {
   const evidenceText = finding.evidence.map((entry) => {
     const observed = entry.observed === undefined ? '' : ` · observé : ${String(entry.observed)}`
     const expected = entry.expected === undefined ? '' : ` · attendu : ${String(entry.expected)}`
@@ -156,13 +162,18 @@ function mapFinding(finding: RemoteAuditFinding): ProjectIssue {
   }).join(' ')
   const width = finding.viewport.width
   const height = finding.viewport.height
+  const viewportList = affectedViewports.map((viewport) => `${viewport.width} × ${viewport.height}`)
+  const viewportLabel = viewportList.length === 1
+    ? viewportList[0]
+    : `${Math.min(...affectedViewports.map((viewport) => viewport.width))}–${Math.max(...affectedViewports.map((viewport) => viewport.width))} px · ${viewportList.length} vues`
+  const affectedText = viewportList.length > 1 ? ` Observé sur ${viewportList.join(', ')}.` : ''
   return {
-    id: `${finding.id}-${width}x${height}`,
+    id: finding.id,
     title: finding.title,
-    description: [finding.description, evidenceText].filter(Boolean).join(' '),
+    description: `${[finding.description, evidenceText].filter(Boolean).join(' ')}${affectedText}`,
     severity: mapSeverity(finding),
     coverage: finding.confidence >= 0.9 ? 'standard' : 'heuristique',
-    viewport: `${width} × ${height}`,
+    viewport: viewportLabel,
     routePath: finding.route.path,
     rule: finding.rule,
     proposal: proposalFor(finding),
@@ -174,7 +185,9 @@ function mapFinding(finding: RemoteAuditFinding): ProjectIssue {
       rectangle: finding.rect,
       measurements: Object.fromEntries([
         ...Object.entries(finding.style).slice(0, 20),
-        ['confidence', Math.round(finding.confidence * 100)]
+        ['confidence', Math.round(finding.confidence * 100)],
+        ['affectedViewports', viewportList.join(', ')],
+        ['viewportCount', viewportList.length]
       ]),
       screenshotDataUrl: null
     }
@@ -184,17 +197,49 @@ function mapFinding(finding: RemoteAuditFinding): ProjectIssue {
 function uniqueIssues(issues: ProjectIssue[]): { issues: ProjectIssue[]; truncated: boolean } {
   const unique = new Map<string, ProjectIssue>()
   for (const issue of issues) unique.set(issue.id, issue)
-  const values = [...unique.values()]
-  return { issues: values.slice(0, maxAuditFindingsTotal), truncated: values.length > maxAuditFindingsTotal }
+  const severityScore: Record<ProjectIssue['severity'], number> = { bloquant: 60, attention: 40, information: 20 }
+  const rulePriority: Record<string, number> = {
+    'layout.element-overlap': 100,
+    'layout.useful-area-overflow': 96,
+    'media.image-error': 94,
+    'runtime.page-error': 93,
+    'layout.viewport-overflow': 92,
+    'layout.navigation-wrap': 88,
+    'typography.disproportionate': 86,
+    'layout.density-hierarchy': 82,
+    'layout.fixed-obstruction': 80,
+    'layout.truncated-text': 76,
+    'layout.clipped-content': 72,
+    'interaction.small-target': 70,
+    'typography.mobile-readability': 68,
+    'media.image-distortion': 66,
+    'responsive.missing-viewport': 64,
+    'accessibility.low-contrast': 40
+  }
+  const confidenceScore = (issue: ProjectIssue): number => issue.confidence === 'certain' ? 6 : issue.confidence === 'probable' ? 3 : 0
+  const values = [...unique.values()].sort((left, right) =>
+    (rulePriority[right.rule] ?? 50) + severityScore[right.severity] + confidenceScore(right) -
+    ((rulePriority[left.rule] ?? 50) + severityScore[left.severity] + confidenceScore(left)))
+  const perRule = new Map<string, number>()
+  const selected: ProjectIssue[] = []
+  for (const issue of values) {
+    if (selected.length >= maxAuditFindingsTotal) break
+    const count = perRule.get(issue.rule) ?? 0
+    const cap = issue.rule === 'layout.viewport-overflow' || issue.rule === 'layout.element-overlap' ? 5 : 3
+    if (count >= cap) continue
+    selected.push(issue)
+    perRule.set(issue.rule, count + 1)
+  }
+  return { issues: selected, truncated: selected.length < values.length }
 }
 
 export class RemoteBrowserSession {
   readonly owner: BrowserWindow
   readonly view: WebContentsView
   readonly mode: RemoteAuditMode
-  readonly linkedRoot: string | null
   readonly initial: NormalizedAuditUrl
   private readonly callbacks: RemoteSessionCallbacks
+  private linkedSourceRoot: string | null
   private currentApproved: NormalizedAuditUrl
   private currentViewport = defaultViewport
   private currentScale = 1
@@ -211,7 +256,7 @@ export class RemoteBrowserSession {
   private constructor(options: RemoteSessionCreateOptions, initial: NormalizedAuditUrl) {
     this.owner = options.owner
     this.mode = options.request.mode
-    this.linkedRoot = options.linkedRoot ?? null
+    this.linkedSourceRoot = options.linkedRoot ?? null
     this.callbacks = options
     this.initial = initial
     this.currentApproved = initial
@@ -540,6 +585,16 @@ export class RemoteBrowserSession {
     return this.state()
   }
 
+  get linkedRoot(): string | null {
+    return this.linkedSourceRoot
+  }
+
+  associateLinkedRoot(root: string): void {
+    if (this.closed) throw new Error('La session distante est fermée.')
+    if (this.mode !== 'localhost') throw new Error('Des sources locales ne peuvent être associées qu’à une session localhost.')
+    this.linkedSourceRoot = root
+  }
+
   projectSnapshot(issues: ProjectIssue[] = []): ProjectSnapshot {
     const state = this.state()
     const current = new URL(state.url)
@@ -674,7 +729,7 @@ export class RemoteBrowserSession {
     const originalScale = this.currentScale
     const requested = (viewportValues.length ? viewportValues : [originalViewport]).slice(0, 8).map(normalizeViewport)
     const auditUrl = this.safeCurrentUrl()
-    const issues: ProjectIssue[] = []
+    const rawFindings: RemoteAuditFinding[] = []
     let scannedNodes = 0
     let truncated = false
     let screenshotDataUrl: string | null = null
@@ -689,6 +744,7 @@ export class RemoteBrowserSession {
             maxNodes: maxAuditNodesPerViewport,
             maxFindings: maxAuditFindingsPerViewport,
             mobile: viewport.mobile === true,
+            touch: viewport.touch === true,
             expectedViewportWidth: viewport.width
           })),
           scriptTimeoutMs,
@@ -702,7 +758,7 @@ export class RemoteBrowserSession {
         })
         scannedNodes += result.scannedNodes
         truncated ||= result.truncated
-        issues.push(...result.findings.map(mapFinding))
+        rawFindings.push(...result.findings)
       }
       const image = await withTimeout(
         this.view.webContents.capturePage(),
@@ -727,7 +783,8 @@ export class RemoteBrowserSession {
       if (lateSettings) await this.applyViewport(lateSettings.viewport, lateSettings.scale).catch(() => undefined)
     }
     const state = this.state()
-    const consolidated = uniqueIssues(issues)
+    const groupedFindings = consolidateRemoteAuditFindings(rawFindings)
+    const consolidated = uniqueIssues(groupedFindings.map((group) => mapFinding(group.finding, group.viewports)))
     return {
       url: state.url,
       path: state.path,

@@ -5,6 +5,11 @@ export type RemoteAuditRule =
   | 'layout.viewport-overflow'
   | 'layout.clipped-content'
   | 'layout.truncated-text'
+  | 'layout.navigation-wrap'
+  | 'layout.element-overlap'
+  | 'layout.density-hierarchy'
+  | 'layout.useful-area-overflow'
+  | 'typography.disproportionate'
   | 'typography.mobile-readability'
   | 'interaction.small-target'
   | 'layout.fixed-obstruction'
@@ -67,6 +72,11 @@ export interface RemoteAuditResult {
   findings: readonly RemoteAuditFinding[]
 }
 
+export interface ConsolidatedRemoteAuditFinding {
+  finding: RemoteAuditFinding
+  viewports: readonly RemoteAuditViewport[]
+}
+
 export interface RemoteAuditScriptOptions {
   maxNodes?: number
   maxFindings?: number
@@ -75,6 +85,7 @@ export interface RemoteAuditScriptOptions {
   minimumContrast?: number
   minimumLargeTextContrast?: number
   mobile?: boolean
+  touch?: boolean
   expectedViewportWidth?: number
 }
 
@@ -91,6 +102,11 @@ const ruleMetadata: Readonly<Record<RemoteAuditRule, { category: RemoteAuditCate
   'layout.viewport-overflow': { category: 'layout', severity: 'error' },
   'layout.clipped-content': { category: 'layout', severity: 'warning' },
   'layout.truncated-text': { category: 'layout', severity: 'warning' },
+  'layout.navigation-wrap': { category: 'layout', severity: 'warning' },
+  'layout.element-overlap': { category: 'layout', severity: 'error' },
+  'layout.density-hierarchy': { category: 'layout', severity: 'warning' },
+  'layout.useful-area-overflow': { category: 'layout', severity: 'error' },
+  'typography.disproportionate': { category: 'accessibility', severity: 'warning' },
   'typography.mobile-readability': { category: 'accessibility', severity: 'warning' },
   'interaction.small-target': { category: 'interaction', severity: 'warning' },
   'layout.fixed-obstruction': { category: 'layout', severity: 'warning' },
@@ -104,6 +120,7 @@ const allowedStyleKeys = new Set([
   'position', 'display', 'overflow', 'overflowX', 'overflowY', 'whiteSpace', 'textOverflow',
   'lineClamp', 'width', 'height', 'minWidth', 'maxWidth', 'objectFit', 'color', 'backgroundColor',
   'fontSize', 'fontWeight', 'lineHeight', 'zIndex', 'pointerEvents'
+  , 'flexWrap', 'gap', 'letterSpacing'
 ])
 
 const DEFAULT_MAX_FINDINGS = 180
@@ -133,6 +150,7 @@ function normalizeScriptOptions(options: RemoteAuditScriptOptions): Required<Rem
       ? Math.min(7, Math.max(1, options.minimumLargeTextContrast))
       : 3,
     mobile: options.mobile === true,
+    touch: options.touch === true || options.mobile === true,
     expectedViewportWidth: clampInteger(options.expectedViewportWidth, 240, 3_840, 393)
   }
 }
@@ -186,6 +204,10 @@ const REMOTE_AUDIT_COLLECTOR_TEMPLATE = String.raw`(() => {
     path: String(location.pathname + location.search + location.hash).slice(0, 4096)
   };
   const findings = [];
+  const seenFindings = new Set();
+  const findingsPerRule = new Map();
+  const maxRawFindings = options.maxFindings * 3;
+  const maxFindingsPerRule = Math.max(6, Math.ceil(options.maxFindings / 5));
   let truncated = false;
   let scannedNodes = 0;
 
@@ -235,8 +257,13 @@ const REMOTE_AUDIT_COLLECTOR_TEMPLATE = String.raw`(() => {
     return (value >>> 0).toString(16).padStart(8, '0');
   };
   const add = (rule, element, title, description, style, evidence, confidence, severity, category) => {
-    if (findings.length >= options.maxFindings) { truncated = true; return; }
     const selector = selectorOf(element);
+    const key = rule + '\u001f' + selector;
+    if (seenFindings.has(key)) return;
+    const ruleCount = findingsPerRule.get(rule) || 0;
+    if (findings.length >= maxRawFindings || ruleCount >= maxFindingsPerRule) { truncated = true; return; }
+    seenFindings.add(key);
+    findingsPerRule.set(rule, ruleCount + 1);
     findings.push({
       id: 'remote-' + hash(rule + '\u001f' + route.url + '\u001f' + selector),
       rule, category, severity, title: clean(title), description: clean(description), route, viewport,
@@ -280,6 +307,64 @@ const REMOTE_AUDIT_COLLECTOR_TEMPLATE = String.raw`(() => {
   const hasOwnText = (element) => Array.from(element.childNodes || []).some((node) => node.nodeType === 3 && String(node.nodeValue || '').trim().length > 0);
   const targetSelector = 'a[href],button,input:not([type="hidden"]),select,textarea,summary,[role="button"],[role="link"],[tabindex]:not([tabindex="-1"])';
   const fixedCandidates = [];
+  const targetCandidates = [];
+  const navigationCandidates = [];
+  const collisionCandidates = [];
+  const disproportionateHeadings = new Set();
+  const semanticName = (element) => clean([
+    element && element.id || '',
+    element && element.className || '',
+    element && element.getAttribute && element.getAttribute('role') || ''
+  ].join(' '), 240).toLowerCase();
+  const intentionalViewport = (element) => /(?:carousel|slider|slideshow|marquee|ticker|scroller|viewport|track|rail)/.test(semanticName(element));
+  const insideIntentionalViewport = (element) => {
+    let current = element;
+    while (current && current !== document.documentElement) {
+      if (intentionalViewport(current)) return true;
+      current = current.parentElement;
+    }
+    return false;
+  };
+  const screenReaderOnly = (element, style, rect) => {
+    if (/(?:sr-only|screen-reader|visually-hidden|a11y-hidden)/.test(semanticName(element))) return true;
+    return rect.width <= 2 && rect.height <= 2 && (style.clip !== 'auto' || style.clipPath !== 'none' || style.position === 'absolute');
+  };
+  const fullyClippedByAncestor = (element, rect) => {
+    let current = element && element.parentElement;
+    while (current && current !== document.documentElement) {
+      const currentStyle = getComputedStyle(current);
+      const clipsX = /^(?:hidden|clip|auto|scroll)$/.test(currentStyle.overflowX);
+      const clipsY = /^(?:hidden|clip|auto|scroll)$/.test(currentStyle.overflowY);
+      if (clipsX || clipsY) {
+        const currentRect = current.getBoundingClientRect();
+        if (clipsX && (rect.right <= currentRect.left + 1 || rect.left >= currentRect.right - 1)) return true;
+        if (clipsY && (rect.bottom <= currentRect.top + 1 || rect.top >= currentRect.bottom - 1)) return true;
+      }
+      current = current.parentElement;
+    }
+    return false;
+  };
+  const overlapOf = (left, right) => {
+    const width = Math.max(0, Math.min(left.right, right.right) - Math.max(left.left, right.left));
+    const height = Math.max(0, Math.min(left.bottom, right.bottom) - Math.max(left.top, right.top));
+    return { width, height, area: width * height };
+  };
+  const paintedHorizontalRatio = (element, rect) => {
+    let left = Math.max(0, rect.left);
+    let right = Math.min(viewport.width, rect.right);
+    let current = element && element.parentElement;
+    while (current && current !== document.documentElement) {
+      const currentStyle = getComputedStyle(current);
+      if (/^(?:hidden|clip|auto|scroll)$/.test(currentStyle.overflowX)) {
+        const currentRect = current.getBoundingClientRect();
+        left = Math.max(left, currentRect.left);
+        right = Math.min(right, currentRect.right);
+      }
+      current = current.parentElement;
+    }
+    return Math.max(0, right - left) / Math.max(1, rect.width);
+  };
+  const nearestTargetGroup = (element) => element.closest('nav,[role="navigation"],[role="group"],ul,ol,[class*="actions" i],[class*="controls" i],[class*="dots" i]') || element.parentElement || element;
   const walker = document.createTreeWalker(document.documentElement, NodeFilter.SHOW_ELEMENT);
 
   if (options.mobile) {
@@ -298,20 +383,34 @@ const REMOTE_AUDIT_COLLECTOR_TEMPLATE = String.raw`(() => {
 
   let element = walker.currentNode;
   for (; element && scannedNodes < options.maxNodes; element = walker.nextNode()) {
-    if (findings.length >= options.maxFindings) { truncated = true; break; }
+    if (findings.length >= maxRawFindings) { truncated = true; break; }
     scannedNodes += 1;
     const style = getComputedStyle(element);
     const domRect = element.getBoundingClientRect();
     if (!visible(element, style, domRect)) continue;
+    const clippedFromPaint = fullyClippedByAncestor(element, domRect);
+    const intersectsUsefulWidth = domRect.right > 1 && domRect.left < viewport.width - 1;
+    const paintedRatio = paintedHorizontalRatio(element, domRect);
+    const documentOverflows = Math.max(document.documentElement.scrollWidth, document.body && document.body.scrollWidth || 0) > viewport.width + 1;
+
+    if ((element.matches('nav,[role="navigation"]'))) navigationCandidates.push({ element, style, rect: domRect });
+    if (!clippedFromPaint && paintedRatio >= 0.5 && intersectsUsefulWidth && element.matches('h1,h2,h3,h4,h5,h6,p,a[href],button,input:not([type="hidden"]),select,textarea,[role="button"]')) {
+      collisionCandidates.push({ element, style, rect: domRect });
+    }
 
     const beyondViewport = domRect.right > viewport.width + 1 || domRect.left < -1;
     const scrollOverflow = element.clientWidth > 0 && element.scrollWidth > element.clientWidth + 1;
-    if (beyondViewport && style.position !== 'fixed' && style.position !== 'sticky') {
-      add('layout.viewport-overflow', element, 'Élément hors du viewport', 'Le rendu dépasse horizontalement la largeur testée.',
+    if (beyondViewport && !clippedFromPaint && !insideIntentionalViewport(element) && style.position !== 'fixed' && style.position !== 'sticky' && (intersectsUsefulWidth || documentOverflows)) {
+      const visibleWidth = Math.max(0, Math.min(domRect.right, viewport.width) - Math.max(domRect.left, 0));
+      const usefulRatio = visibleWidth / Math.max(1, domRect.width);
+      const mostlyOutside = intersectsUsefulWidth && usefulRatio < 0.45;
+      add(mostlyOutside ? 'layout.useful-area-overflow' : 'layout.viewport-overflow', element,
+        mostlyOutside ? 'Contenu majoritairement hors de la zone utile' : 'Élément hors du viewport',
+        mostlyOutside ? 'Moins de la moitié de cet élément textuel ou interactif reste accessible dans la largeur utile.' : 'Le rendu dépasse horizontalement la largeur testée.',
         styleSnapshot(style, ['display', 'position', 'width', 'minWidth', 'maxWidth', 'overflowX']),
-        [{ kind: 'geometry', summary: 'Bord horizontal en dehors du viewport', observed: round(Math.max(domRect.right - viewport.width, -domRect.left)), expected: 0 }],
+        [{ kind: 'geometry', summary: mostlyOutside ? 'Part visible dans la largeur utile' : 'Bord horizontal en dehors du viewport', observed: mostlyOutside ? round(usefulRatio * 100) + ' %' : round(Math.max(domRect.right - viewport.width, -domRect.left)), expected: mostlyOutside ? 'au moins 45 %' : 0 }],
         0.94, 'error', 'layout');
-    } else if (scrollOverflow && style.overflowX === 'visible' && element !== document.documentElement && element !== document.body) {
+    } else if (scrollOverflow && documentOverflows && !insideIntentionalViewport(element) && style.overflowX === 'visible' && element !== document.documentElement && element !== document.body) {
       add('layout.viewport-overflow', element, 'Contenu horizontal débordant', 'Le contenu est plus large que son conteneur sans mécanisme de défilement.',
         styleSnapshot(style, ['display', 'width', 'minWidth', 'maxWidth', 'overflowX']),
         [{ kind: 'geometry', summary: 'Largeur de défilement supérieure au conteneur', observed: element.scrollWidth, expected: element.clientWidth }],
@@ -321,7 +420,7 @@ const REMOTE_AUDIT_COLLECTOR_TEMPLATE = String.raw`(() => {
     const clipsX = style.overflowX === 'hidden' || style.overflowX === 'clip';
     const clipsY = style.overflowY === 'hidden' || style.overflowY === 'clip';
     const clipped = (clipsX && element.scrollWidth > element.clientWidth + 1) || (clipsY && element.scrollHeight > element.clientHeight + 1);
-    if (clipped) {
+    if (clipped && !screenReaderOnly(element, style, domRect) && !intentionalViewport(element)) {
       const text = String(element.textContent || '').trim();
       const truncationStyle = style.textOverflow === 'ellipsis' || style.whiteSpace === 'nowrap' || style.webkitLineClamp !== 'none';
       if (text && truncationStyle) {
@@ -337,13 +436,14 @@ const REMOTE_AUDIT_COLLECTOR_TEMPLATE = String.raw`(() => {
       }
     }
 
-    if (element.matches(targetSelector) && !element.hasAttribute('disabled') && style.pointerEvents !== 'none') {
-      if (domRect.width < options.minimumTargetSize || domRect.height < options.minimumTargetSize) {
-        add('interaction.small-target', element, 'Cible tactile trop petite', 'La zone interactive risque d’être difficile à activer sur écran tactile.',
-          styleSnapshot(style, ['display', 'width', 'height', 'pointerEvents']),
-          [{ kind: 'geometry', summary: 'Dimensions de la cible', observed: round(domRect.width) + ' × ' + round(domRect.height) + ' px', expected: options.minimumTargetSize + ' × ' + options.minimumTargetSize + ' px' }],
-          0.8, 'warning', 'interaction');
+    if (options.touch && element.matches(targetSelector) && !element.hasAttribute('disabled') && element.getAttribute('aria-disabled') !== 'true' && style.pointerEvents !== 'none') {
+      let effectiveRect = domRect;
+      const label = element.closest('label') || (element.id ? document.querySelector('label[for="' + escapeCss(element.id) + '"]') : null);
+      if (label) {
+        const labelRect = label.getBoundingClientRect();
+        if (labelRect.width > effectiveRect.width || labelRect.height > effectiveRect.height) effectiveRect = labelRect;
       }
+      targetCandidates.push({ element, style, rect: effectiveRect, group: nearestTargetGroup(element) });
     }
 
     if (style.position === 'fixed' || style.position === 'sticky') fixedCandidates.push({ element, style, rect: domRect });
@@ -388,7 +488,25 @@ const REMOTE_AUDIT_COLLECTOR_TEMPLATE = String.raw`(() => {
             undersized ? 0.78 : 0.7, 'warning', 'accessibility');
         }
       }
-      const foreground = parseRgb(style.color);
+      const fontSize = Number.parseFloat(style.fontSize) || 16;
+      const lineHeight = style.lineHeight === 'normal' ? fontSize * 1.2 : Number.parseFloat(style.lineHeight) || fontSize * 1.2;
+      const visualLineRatio = domRect.height / Math.max(1, lineHeight);
+      const heading = element.closest('h1,h2,h3,h4,h5,h6');
+      const compactTypography = options.mobile || options.touch && viewport.width <= 1100;
+      const overlyWideDisplay = compactTypography && fontSize >= 32 && ownTextLength >= 8 && domRect.width >= viewport.width * (options.mobile ? 0.88 : 0.72) && visualLineRatio > 1.65;
+      const extremeScale = compactTypography && fontSize > Math.max(options.mobile ? 72 : 84, viewport.width * (options.mobile ? 0.22 : 0.16)) && ownTextLength >= 10;
+      if ((overlyWideDisplay || extremeScale) && heading && !disproportionateHeadings.has(heading)) {
+        disproportionateHeadings.add(heading);
+        add('typography.disproportionate', heading, 'Échelle typographique disproportionnée',
+          'Le titre occupe une part dominante de la largeur et ses métriques de ligne gonflent fortement sa hauteur utile.',
+          styleSnapshot(style, ['fontSize', 'fontWeight', 'lineHeight', 'width', 'letterSpacing']), [
+            { kind: 'geometry', summary: 'Largeur occupée par le titre', observed: round(domRect.width / viewport.width * 100) + ' %', expected: 'inférieure à 88 % ou métriques de ligne régulières' },
+            { kind: 'style', summary: 'Hauteur visuelle / hauteur de ligne', observed: round(visualLineRatio), expected: 'inférieure à 1,65 pour une ligne' }
+          ], extremeScale ? 0.9 : 0.82, 'warning', 'accessibility');
+      }
+      const ownText = Array.from(element.childNodes || []).filter((node) => node.nodeType === 3).map((node) => clean(node.nodeValue)).join(' ').trim();
+      const decorativeBrandText = /^[★☆✦✧•·\s]+$/.test(ownText) || ownText.length <= 1 && /(?:avatar|brand|logo|mark|rating)/.test(semanticName(element) + ' ' + semanticName(element.parentElement));
+      const foreground = clippedFromPaint || paintedRatio < 0.5 || !intersectsUsefulWidth || decorativeBrandText ? null : parseRgb(style.color);
       const background = backgroundOf(element);
       if (foreground && background) {
         const ratio = contrast(foreground, background);
@@ -407,8 +525,107 @@ const REMOTE_AUDIT_COLLECTOR_TEMPLATE = String.raw`(() => {
   }
   if (element) truncated = true;
 
+  if (options.touch) {
+    const smallTargets = targetCandidates.filter((candidate) => Math.min(candidate.rect.width, candidate.rect.height) < 24 && !fullyClippedByAncestor(candidate.element, candidate.rect));
+    const crowded = smallTargets.filter((candidate) => smallTargets.some((other) => {
+      if (candidate === other || candidate.group !== other.group) return false;
+      const leftX = candidate.rect.left + candidate.rect.width / 2;
+      const leftY = candidate.rect.top + candidate.rect.height / 2;
+      const rightX = other.rect.left + other.rect.width / 2;
+      const rightY = other.rect.top + other.rect.height / 2;
+      return Math.hypot(leftX - rightX, leftY - rightY) < 24;
+    }));
+    const byGroup = new Map();
+    for (const candidate of crowded) {
+      const group = byGroup.get(candidate.group) || [];
+      group.push(candidate);
+      byGroup.set(candidate.group, group);
+    }
+    for (const [groupElement, candidates] of byGroup) {
+      if (candidates.length < 2) continue;
+      const minimum = Math.min(...candidates.map((candidate) => Math.min(candidate.rect.width, candidate.rect.height)));
+      const groupRect = groupElement.getBoundingClientRect();
+      const denseGroup = candidates.length >= 6 && groupRect.height < 96;
+      add(denseGroup ? 'layout.density-hierarchy' : 'interaction.small-target', groupElement,
+        denseGroup ? 'Groupe de commandes visuellement trop dense' : 'Groupe de cibles tactiles trop serré',
+        denseGroup
+          ? candidates.length + ' commandes compactes sont concentrées dans une zone qui ne laisse pas apparaître une hiérarchie ou un espacement suffisant.'
+          : candidates.length + ' cibles de moins de 24 CSS px sont assez proches pour rendre leur activation ambiguë.',
+        styleSnapshot(getComputedStyle(groupElement), ['display', 'width', 'height', 'gap', 'flexWrap']), [
+          { kind: 'geometry', summary: 'Plus petite cible du groupe', observed: round(minimum) + ' px', expected: '24 px ou espacement centre-à-centre de 24 px' },
+          { kind: 'geometry', summary: 'Nombre de cibles concernées', observed: candidates.length, expected: denseGroup ? 'moins de 6 dans cette zone' : 'cibles séparées' }
+        ], denseGroup ? 0.84 : 0.9, 'warning', denseGroup ? 'layout' : 'interaction');
+    }
+  }
+
+  for (const candidate of navigationCandidates) {
+    if (candidate.element.closest('footer') || /(?:legal|footer|breadcrumb|pagination)/.test(semanticName(candidate.element))) continue;
+    const items = Array.from(candidate.element.querySelectorAll(targetSelector)).map((item) => {
+      const itemStyle = getComputedStyle(item);
+      const rect = item.getBoundingClientRect();
+      return { item, style: itemStyle, rect };
+    }).filter(({ item, style, rect }) => visible(item, style, rect) && !fullyClippedByAncestor(item, rect));
+    if (items.length < 3) continue;
+    const rows = [];
+    for (const item of items.sort((left, right) => left.rect.top - right.rect.top || left.rect.left - right.rect.left)) {
+      let row = rows.find((candidateRow) => Math.abs(candidateRow.top - item.rect.top) <= 5);
+      if (!row) { row = { top: item.rect.top, items: [] }; rows.push(row); }
+      row.items.push(item);
+    }
+    const rowWidths = rows.map((row) => Math.max(...row.items.map((item) => item.rect.right)) - Math.min(...row.items.map((item) => item.rect.left)));
+    const firstWidth = rowWidths[0] || 1;
+    const lastWidth = rowWidths[rowWidths.length - 1] || firstWidth;
+    const minimumFont = Math.min(...items.map((item) => Number.parseFloat(item.style.fontSize) || 16));
+    const hasOverlap = items.some((item, index) => items.slice(index + 1).some((other) => {
+      const overlap = overlapOf(item.rect, other.rect);
+      return overlap.width > 4 && overlap.height > 4;
+    }));
+    const overflowAmount = Math.max(0, -candidate.rect.left, candidate.rect.right - viewport.width, candidate.rect.width - viewport.width);
+    const extendsViewport = overflowAmount > 4 && !/^(?:auto|scroll)$/.test(candidate.style.overflowX);
+    const awkwardWrap = options.mobile && rows.length > 1 && items.length >= 5 && lastWidth / firstWidth < 0.62;
+    const unreadable = minimumFont < 12;
+    if (!hasOverlap && !unreadable && !extendsViewport && rows.length < 3 && !awkwardWrap) continue;
+    add('layout.navigation-wrap', candidate.element, 'Navigation déséquilibrée à cette largeur',
+      hasOverlap
+        ? 'Des commandes de navigation se chevauchent.'
+        : extendsViewport
+          ? 'Le bloc de navigation dépasse la largeur visible de ' + round(overflowAmount) + ' CSS px et repousse ou masque une partie de l’interface.'
+        : unreadable
+          ? 'La navigation réduit son texte sous 12 CSS px pour tenir dans la largeur.'
+          : awkwardWrap
+            ? 'Le retour à la ligne laisse une dernière rangée nettement plus courte et casse la hiérarchie du menu.'
+            : 'La navigation se répartit sur au moins trois rangées et occupe une hauteur disproportionnée.',
+      styleSnapshot(candidate.style, ['display', 'width', 'height', 'gap', 'flexWrap', 'fontSize']), [
+        { kind: 'geometry', summary: 'Rangées de navigation', observed: rows.length, expected: '1 rangée, ou 2 rangées équilibrées' },
+        { kind: 'style', summary: 'Plus petit texte de navigation', observed: round(minimumFont) + ' px', expected: 'au moins 12 px' },
+        { kind: 'geometry', summary: 'Largeur relative de la dernière rangée', observed: round(lastWidth / firstWidth * 100) + ' %', expected: 'au moins 62 %' }
+      ], hasOverlap || unreadable ? 0.92 : 0.8, hasOverlap ? 'error' : 'warning', 'layout');
+  }
+
+  const collisionParents = new Set();
+  for (let index = 0; index < collisionCandidates.length; index += 1) {
+    const left = collisionCandidates[index];
+    const parent = left.element.parentElement;
+    if (!parent || collisionParents.has(parent) || intentionalViewport(parent) || /(?:hero|overlay|modal|dialog|badge)/.test(semanticName(parent))) continue;
+    for (let otherIndex = index + 1; otherIndex < Math.min(collisionCandidates.length, index + 40); otherIndex += 1) {
+      const right = collisionCandidates[otherIndex];
+      if (right.element.parentElement !== parent) continue;
+      const overlap = overlapOf(left.rect, right.rect);
+      const smallerArea = Math.max(1, Math.min(left.rect.width * left.rect.height, right.rect.width * right.rect.height));
+      if (overlap.width <= 6 || overlap.height <= 6 || overlap.area / smallerArea < 0.16) continue;
+      collisionParents.add(parent);
+      add('layout.element-overlap', parent, 'Éléments de contenu qui se chevauchent',
+        'Deux éléments textuels ou interactifs frères occupent la même zone de lecture de façon significative.',
+        styleSnapshot(getComputedStyle(parent), ['display', 'position', 'width', 'height', 'overflow', 'zIndex']), [
+          { kind: 'geometry', summary: 'Surface recouverte du plus petit élément', observed: round(overlap.area / smallerArea * 100) + ' %', expected: '0 %' },
+          { kind: 'geometry', summary: 'Éléments concernés', observed: selectorOf(left.element) + ' ↔ ' + selectorOf(right.element), expected: 'zones distinctes' }
+        ], 0.9, 'error', 'layout');
+      break;
+    }
+  }
+
   for (const candidate of fixedCandidates) {
-    if (findings.length >= options.maxFindings) { truncated = true; break; }
+    if (findings.length >= maxRawFindings) { truncated = true; break; }
     const { element, style, rect } = candidate;
     const areaRatio = (rect.width * rect.height) / Math.max(1, viewport.width * viewport.height);
     const horizontalBand = rect.width >= viewport.width * 0.8 && rect.height >= viewport.height * 0.12;
@@ -427,6 +644,31 @@ const REMOTE_AUDIT_COLLECTOR_TEMPLATE = String.raw`(() => {
     add('runtime.page-error', document.documentElement, 'Erreur d’exécution dans la page', 'La page a émis une erreur JavaScript pendant cette session.',
       {}, [{ kind: 'runtime', summary: clean(runtimeError.message || runtimeError.kind), observed: clean(runtimeError.source || '') }],
       0.98, 'error', 'runtime');
+  }
+
+  const rulePriority = {
+    'layout.element-overlap': 100,
+    'layout.useful-area-overflow': 96,
+    'media.image-error': 94,
+    'runtime.page-error': 93,
+    'layout.viewport-overflow': 92,
+    'layout.navigation-wrap': 88,
+    'typography.disproportionate': 86,
+    'layout.density-hierarchy': 82,
+    'layout.fixed-obstruction': 80,
+    'layout.truncated-text': 76,
+    'layout.clipped-content': 72,
+    'interaction.small-target': 70,
+    'typography.mobile-readability': 68,
+    'media.image-distortion': 66,
+    'responsive.missing-viewport': 64,
+    'accessibility.low-contrast': 40
+  };
+  findings.sort((left, right) => (rulePriority[right.rule] || 50) - (rulePriority[left.rule] || 50) ||
+    (right.severity === 'error' ? 2 : 1) - (left.severity === 'error' ? 2 : 1) || right.confidence - left.confidence);
+  if (findings.length > options.maxFindings) {
+    findings.length = options.maxFindings;
+    truncated = true;
   }
 
   return { version: 1, route, viewport, scannedNodes, truncated, maxNodes: options.maxNodes, maxFindings: options.maxFindings, findings };
@@ -564,4 +806,42 @@ export function sanitizeRemoteAuditResult(raw: unknown, context: SanitizeRemoteA
     maxFindings: maximum,
     findings
   }
+}
+
+function findingImpact(finding: RemoteAuditFinding): number {
+  const severity = finding.severity === 'error' ? 300 : finding.severity === 'warning' ? 200 : 100
+  const viewportOverflow = Math.max(
+    0,
+    -finding.rect.x,
+    finding.rect.x + finding.rect.width - finding.viewport.width
+  )
+  const evidenceDelta = finding.evidence.reduce((largest, evidence) => {
+    if (typeof evidence.observed !== 'number' || typeof evidence.expected !== 'number') return largest
+    return Math.max(largest, Math.abs(evidence.observed - evidence.expected))
+  }, 0)
+  return severity + finding.confidence * 20 + Math.min(50, viewportOverflow) + Math.min(20, evidenceDelta)
+}
+
+/**
+ * Regroupe le même défaut DOM observé à plusieurs tailles. La clé reste
+ * localisable (route + règle + sélecteur) et la preuve conservée est celle qui
+ * présente l'impact géométrique le plus fort.
+ */
+export function consolidateRemoteAuditFindings(findings: readonly RemoteAuditFinding[]): ConsolidatedRemoteAuditFinding[] {
+  const groups = new Map<string, { finding: RemoteAuditFinding; viewports: Map<string, RemoteAuditViewport> }>()
+  for (const finding of findings) {
+    const key = `${finding.route.path}\u001f${finding.rule}\u001f${finding.selector}`
+    const viewportKey = `${finding.viewport.width}x${finding.viewport.height}@${finding.viewport.deviceScaleFactor}`
+    const current = groups.get(key)
+    if (!current) {
+      groups.set(key, { finding, viewports: new Map([[viewportKey, finding.viewport]]) })
+      continue
+    }
+    current.viewports.set(viewportKey, finding.viewport)
+    if (findingImpact(finding) > findingImpact(current.finding)) current.finding = finding
+  }
+  return [...groups.values()].map((group) => ({
+    finding: group.finding,
+    viewports: [...group.viewports.values()].sort((left, right) => left.width - right.width || left.height - right.height)
+  }))
 }

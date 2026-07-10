@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { chmod, lstat, mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdtemp, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -232,4 +232,112 @@ test('get, forget et les mutations concurrentes restent cohérents et atomiques'
   assert.equal((await readdir(join(fixture.root, 'state'))).some((name) => name.endsWith('.tmp')), false)
 
   if (process.platform !== 'win32') await chmod(fixture.historyPath, 0o600)
+})
+
+test('un fichier HTML déplacé est retrouvé par son nom, sans deviner un renommage arbitraire', async (context) => {
+  const fixture = await createFixture('responsiver-recents-html-recovery-')
+  context.after(() => rm(fixture.root, { recursive: true, force: true }))
+  const root = join(fixture.root, 'site')
+  const pages = join(root, 'pages')
+  await mkdir(pages, { recursive: true })
+  const selected = join(root, 'landing.html')
+  await writeFile(selected, '<!doctype html><title>Landing</title>')
+  const store = new RecentProjectsStore(fixture.historyPath)
+  const snapshot = projectSnapshot(root, 'Landing', '/landing.html')
+  const id = recentProjectId(root, snapshot.entryPath)
+  await store.upsert(selected, snapshot)
+
+  const moved = join(pages, 'landing.html')
+  await rename(selected, moved)
+  const afterMove = await store.get(id)
+  assert.equal(afterMove?.availability, 'available')
+  assert.equal(afterMove?.selectionPath, moved)
+
+  const renamed = join(pages, 'accueil.html')
+  await rename(moved, renamed)
+  const afterRename = await store.get(id)
+  assert.equal(afterRename?.availability, 'available')
+  assert.equal(afterRename?.selectionPath, root)
+})
+
+test('une racine renommée légèrement est retrouvée uniquement avec sa page d’entrée attendue', async (context) => {
+  const fixture = await createFixture('responsiver-recents-root-recovery-')
+  context.after(() => rm(fixture.root, { recursive: true, force: true }))
+  const formerRoot = join(fixture.root, 'Portfolio V.0.4')
+  const renamedRoot = join(fixture.root, 'Portfolio V.0.5')
+  await mkdir(formerRoot)
+  await writeFile(join(formerRoot, 'index.html'), '<!doctype html><title>Portfolio</title>')
+  const store = new RecentProjectsStore(fixture.historyPath)
+  const snapshot = projectSnapshot(formerRoot, 'Portfolio V.0.4')
+  const id = recentProjectId(formerRoot, snapshot.entryPath)
+  await store.upsert(formerRoot, snapshot)
+
+  await rename(formerRoot, renamedRoot)
+  const restored = await store.get(id)
+  assert.equal(restored?.availability, 'available')
+  assert.equal(restored?.selectionPath, renamedRoot)
+})
+
+test('une racine au nom seulement ressemblant ne remplace jamais le projet mémorisé', async (context) => {
+  const fixture = await createFixture('responsiver-recents-root-negative-')
+  context.after(() => rm(fixture.root, { recursive: true, force: true }))
+  const formerRoot = join(fixture.root, 'Site')
+  const unrelatedRoot = join(fixture.root, 'Site Jessica')
+  await mkdir(formerRoot)
+  await writeFile(join(formerRoot, 'index.html'), '<!doctype html><title>Site</title>')
+  const store = new RecentProjectsStore(fixture.historyPath)
+  const snapshot = projectSnapshot(formerRoot, 'Site')
+  const id = await store.upsert(formerRoot, snapshot)
+
+  await rename(formerRoot, unrelatedRoot)
+  const unresolved = await store.get(id)
+  assert.equal(unresolved?.availability, 'missing')
+  assert.equal(unresolved?.selectionPath, formerRoot)
+})
+
+test('les formes locales équivalentes d’iCloud restaurent aussi le fichier HTML choisi', async (context) => {
+  const fixture = await createFixture('responsiver-recents-icloud-variants-')
+  context.after(() => rm(fixture.root, { recursive: true, force: true }))
+  const mobileDocuments = join(fixture.root, 'Mobile Documents', 'com~apple~CloudDocs')
+  const cloudStorage = join(fixture.root, 'CloudStorage', 'iCloud Drive')
+  const formerRoot = join(mobileDocuments, 'Sites', 'Jessica')
+  const restoredRoot = join(cloudStorage, 'Sites', 'Jessica')
+  const selected = join(formerRoot, 'galerie.html')
+  await mkdir(formerRoot, { recursive: true })
+  await mkdir(join(cloudStorage, 'Sites'), { recursive: true })
+  await writeFile(selected, '<!doctype html><title>Galerie</title>')
+  const store = new RecentProjectsStore(fixture.historyPath, {
+    iCloudRoots: [mobileDocuments, cloudStorage]
+  })
+  const snapshot = projectSnapshot(formerRoot, 'Jessica', '/galerie.html')
+  const id = recentProjectId(formerRoot, snapshot.entryPath)
+  await store.upsert(selected, snapshot)
+
+  await rename(formerRoot, restoredRoot)
+  const restored = await store.get(id)
+  assert.equal(restored?.availability, 'available')
+  assert.equal(restored?.selectionPath, join(restoredRoot, 'galerie.html'))
+})
+
+test('un emplacement iCloud ou amovible absent reste temporairement indisponible sans être oublié', async (context) => {
+  const fixture = await createFixture('responsiver-recents-temporary-')
+  context.after(() => rm(fixture.root, { recursive: true, force: true }))
+  const cloudRoot = join(fixture.root, 'iCloud Drive')
+  const projectRoot = join(cloudRoot, 'Projet hors ligne')
+  await mkdir(projectRoot, { recursive: true })
+  await writeFile(join(projectRoot, 'index.html'), '<!doctype html><title>Hors ligne</title>')
+  const store = new RecentProjectsStore(fixture.historyPath, { iCloudRoots: [cloudRoot] })
+  const snapshot = projectSnapshot(projectRoot, 'Projet hors ligne')
+  const id = recentProjectId(projectRoot, snapshot.entryPath)
+  await store.upsert(projectRoot, snapshot)
+
+  await rm(projectRoot, { recursive: true })
+  assert.equal((await store.get(id))?.availability, 'unreadable')
+  assert.equal((await store.list()).some((entry) => entry.id === id), true)
+
+  await mkdir(projectRoot, { recursive: true })
+  await writeFile(join(projectRoot, 'index.html'), '<!doctype html><title>De retour</title>')
+  const restored = await store.get(id)
+  assert.equal(restored?.availability, 'available')
+  assert.equal(restored?.selectionPath, projectRoot)
 })

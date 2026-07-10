@@ -3,11 +3,11 @@ import { createHash } from 'node:crypto'
 import { cp, lstat, mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
 import { dirname, extname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import type { ExportResult, LocalAiRequest, LocalAiResponse, LocalAiStatus, ProjectPreparationProgress, ProjectSnapshot, RecentProjectSummary, RemoteAuditResult, RemoteFocusResult, RemoteOpenRequest, RemotePageState, RemoteViewBounds, RemoteViewport, StagingRequest, StagingSnapshot, WorkspaceApplyResult, WorkspaceDiff, WorkspaceFileSnapshot, WorkspaceFileSummary, WorkspaceSnapshot } from '../shared/contracts'
+import type { ExportResult, LocalAiRequest, LocalAiResponse, LocalAiStatus, ProjectPreparationProgress, ProjectSnapshot, RecentProjectSummary, RemoteAuditResult, RemoteFocusResult, RemoteOpenRequest, RemotePageState, RemoteSourceAssociationRequest, RemoteViewBounds, RemoteViewport, StagingRequest, StagingSnapshot, WorkspaceApplyResult, WorkspaceDiff, WorkspaceFileSnapshot, WorkspaceFileSummary, WorkspaceSnapshot } from '../shared/contracts'
 import { analyzeProject, createDemoProject } from './project-analyzer'
 import { startProjectServer, type ProjectServer } from './project-server'
 import { buildProjectStaging, type ProjectStaging } from './project-transformer'
-import { createRecentProjectsStore, recentProjectId, type RecentProjectsStore } from './recent-projects'
+import { createRecentProjectsStore, type RecentProjectsStore } from './recent-projects'
 import { assertPrivateExportDirectory, reservePrivateExportDirectory } from './secure-export'
 import { RemoteBrowserSession } from './remote-session'
 import { createWorkspaceEditor, type WorkspaceEditor } from './workspace-editor'
@@ -39,6 +39,7 @@ let mainWindow: BrowserWindow | undefined
 let activeSession: ActiveProjectSession | null = null
 let recentProjectsStore: RecentProjectsStore | null = null
 let sessionQueue: Promise<void> = Promise.resolve()
+let workspaceQueue: Promise<void> = Promise.resolve()
 let extensionInboxWatcher: ReturnType<typeof startExtensionInboxWatcher> | null = null
 const knownPreviewOrigins = new Set<string>()
 const maxClipboardLength = 10 * 1024 * 1024
@@ -52,6 +53,12 @@ if (userDataOverride && userDataOverride.length <= 4_096 && !userDataOverride.in
 function queueSessionOperation<T>(operation: () => Promise<T>): Promise<T> {
   const result = sessionQueue.then(operation, operation)
   sessionQueue = result.then(() => undefined, () => undefined)
+  return result
+}
+
+function queueWorkspaceOperation<T>(operation: () => Promise<T>): Promise<T> {
+  const result = workspaceQueue.then(operation, operation)
+  workspaceQueue = result.then(() => undefined, () => undefined)
   return result
 }
 
@@ -205,10 +212,13 @@ async function openLocalProject(selection: NormalizedProjectSelection, remember 
     await disposeSession(next)
     throw new Error('La fenêtre Responsiver a été fermée pendant l’ouverture du projet.')
   }
-  next.recentId = remember ? recentProjectId(next.project.root, next.project.entryPath) : null
   await replaceActiveSession(next)
   if (remember) {
-    await recentStore().upsert(selection.selectionPath, next.project).catch((error) => {
+    await recentStore().upsert(selection.selectionPath, next.project).then((memorizedId) => {
+      // L’identifiant actif atteste que l’écriture atomique de la nouvelle
+      // entrée a abouti. Il reste nul si l’historique est indisponible.
+      next.recentId = memorizedId
+    }).catch((error) => {
       console.warn('Historique local indisponible :', error instanceof Error ? error.message : 'erreur inconnue')
     })
   }
@@ -307,6 +317,49 @@ function currentRemoteSession(): { session: ActiveProjectSession; browser: Remot
   const session = currentSession()
   if (!session.remoteBrowser) throw new Error('Aucune session URL n’est active.')
   return { session, browser: session.remoteBrowser }
+}
+
+function validRemoteSourceAssociationRequest(value: unknown): value is RemoteSourceAssociationRequest {
+  if (!value || typeof value !== 'object') return false
+  const request = value as Partial<RemoteSourceAssociationRequest>
+  return typeof request.projectId === 'string' && request.projectId.length > 0 && request.projectId.length <= 300 &&
+    typeof request.root === 'string' && request.root.trim().length > 0 && request.root.length <= 4_096 && !request.root.includes('\0')
+}
+
+async function associateRemoteSource(value: unknown): Promise<ProjectSnapshot> {
+  if (!validRemoteSourceAssociationRequest(value)) throw new Error('La demande d’association des sources est invalide.')
+  const { session, browser } = currentRemoteSession()
+  assertExpectedProject(session, value.projectId)
+  if (browser.mode !== 'localhost') throw new Error('Seule une session localhost peut être associée à un dossier source local.')
+  const root = await normalizeLinkedRoot(value.root)
+  if (!root) throw new Error('Choisissez un dossier source local existant.')
+  if (activeSession !== session) throw new Error('La session a changé pendant la validation du dossier source.')
+  if (session.root === root && !session.project.source.readOnly) return session.project
+  if (session.workspace?.getSnapshot().dirtyCount) {
+    throw new Error('Des changements temporaires sont encore ouverts. Appliquez-les ou écartez-les avant de remplacer le dossier source.')
+  }
+
+  // L’association ne redémarre ni ne recharge le site. Elle remplace uniquement
+  // l’autorité locale utilisée par l’éditeur et efface un éventuel overlay CSS.
+  await browser.setWorkspaceCss('')
+  if (activeSession !== session) throw new Error('La session a changé pendant l’association du dossier source.')
+  const previousWorkspaceServer = session.workspaceServer
+  browser.associateLinkedRoot(root)
+  session.root = root
+  session.selectionPath = root
+  session.workspace = null
+  session.workspaceServer = null
+  const previous = session.project
+  const linked = browser.projectSnapshot(previous.issues)
+  session.project = {
+    ...linked,
+    routes: previous.routes,
+    theme: previous.theme,
+    analysis: previous.analysis
+  }
+  await closePreviewServer(previousWorkspaceServer)
+  mainWindow?.webContents.send('workspace:preview-origin', null)
+  return session.project
 }
 
 async function runRemoteAudit(value: unknown): Promise<RemoteAuditResult> {
@@ -824,8 +877,19 @@ function registerIpcHandlers(): void {
     return queueSessionOperation(async () => {
       const recent = await recentStore().get(id)
       if (!recent) throw new Error('Ce projet n’existe plus dans l’historique local.')
-      if (recent.availability !== 'available') throw new Error('Ce projet récent n’est plus accessible à cet emplacement.')
-      return prepareLocalProject(recent.selectionPath)
+      if (recent.availability === 'unreadable') throw new Error('Ce projet récent est temporairement indisponible à cet emplacement.')
+      if (recent.availability === 'missing') throw new Error('Le chemin de ce projet récent est introuvable.')
+      if (recent.availability === 'unsupported') throw new Error('L’entrée de ce projet récent n’est plus prise en charge.')
+      const project = await prepareLocalProject(recent.selectionPath)
+      // Une résolution iCloud, un déplacement ou un renommage produit une
+      // nouvelle identité canonique lors de l’analyse. L’ancienne référence
+      // n’est remplacée qu’après cette réouverture réussie ; une indisponibilité
+      // temporaire ne supprime donc jamais l’historique.
+      const memorizedId = activeSession?.recentId
+      if (memorizedId && memorizedId !== id) {
+        await recentStore().forget(id).catch(() => undefined)
+      }
+      return project
     })
   })
   ipcMain.handle('project:recent:forget', async (event, id: unknown): Promise<RecentProjectSummary[]> => {
@@ -839,6 +903,10 @@ function registerIpcHandlers(): void {
   ipcMain.handle('remote:open', async (event, request: unknown): Promise<ProjectSnapshot> => {
     requireTrustedWindow(event)
     return queueSessionOperation(() => openRemoteProject(request))
+  })
+  ipcMain.handle('remote:associate-root', async (event, request: unknown): Promise<ProjectSnapshot> => {
+    requireTrustedWindow(event)
+    return queueSessionOperation(() => queueWorkspaceOperation(() => associateRemoteSource(request)))
   })
   ipcMain.handle('remote:set-bounds', async (event, bounds: unknown): Promise<void> => {
     requireTrustedWindow(event)
@@ -857,7 +925,7 @@ function registerIpcHandlers(): void {
   })
   ipcMain.handle('remote:audit', async (event, viewports: unknown): Promise<RemoteAuditResult> => {
     requireTrustedWindow(event)
-    return queueSessionOperation(() => runRemoteAudit(viewports))
+    return queueSessionOperation(() => queueWorkspaceOperation(() => runRemoteAudit(viewports)))
   })
   ipcMain.handle('remote:focus', async (event, selector: unknown): Promise<RemoteFocusResult> => {
     requireTrustedWindow(event)
@@ -865,54 +933,62 @@ function registerIpcHandlers(): void {
   })
   ipcMain.handle('workspace:list', async (event, projectId: unknown): Promise<WorkspaceFileSummary[]> => {
     requireTrustedWindow(event)
-    return (await workspaceForSession(projectId)).workspace.listFiles()
+    return queueWorkspaceOperation(async () => (await workspaceForSession(projectId)).workspace.listFiles())
   })
   ipcMain.handle('workspace:read', async (event, projectId: unknown, path: unknown): Promise<WorkspaceFileSnapshot> => {
     requireTrustedWindow(event)
-    return workspaceFile(projectId, path)
+    return queueWorkspaceOperation(() => workspaceFile(projectId, path))
   })
   ipcMain.handle('workspace:replace', async (event, projectId: unknown, request: unknown): Promise<WorkspaceFileSnapshot> => {
     requireTrustedWindow(event)
-    return replaceWorkspaceFile(projectId, request)
+    return queueWorkspaceOperation(() => replaceWorkspaceFile(projectId, request))
   })
   ipcMain.handle('workspace:discard', async (event, projectId: unknown, path: unknown, expectedVersion: unknown): Promise<WorkspaceFileSnapshot> => {
     requireTrustedWindow(event)
-    if (!validWorkspacePath(path) || (expectedVersion !== undefined && (!Number.isSafeInteger(expectedVersion) || Number(expectedVersion) < 1))) throw new Error('La demande d’annulation est invalide.')
-    const { session, workspace } = await workspaceForSession(projectId)
-    const file = await workspace.discard(path, expectedVersion as number | undefined)
-    if (activeSession !== session) throw new Error('La session projet a changé pendant l’annulation du fichier.')
-    const previewOrigin = await refreshWorkspacePreview(session)
-    return { ...file, diff: await workspace.getDiff(path), previewOrigin }
+    return queueWorkspaceOperation(async () => {
+      if (!validWorkspacePath(path) || (expectedVersion !== undefined && (!Number.isSafeInteger(expectedVersion) || Number(expectedVersion) < 1))) throw new Error('La demande d’annulation est invalide.')
+      const { session, workspace } = await workspaceForSession(projectId)
+      const file = await workspace.discard(path, expectedVersion as number | undefined)
+      if (activeSession !== session) throw new Error('La session projet a changé pendant l’annulation du fichier.')
+      const previewOrigin = await refreshWorkspacePreview(session)
+      return { ...file, diff: await workspace.getDiff(path), previewOrigin }
+    })
   })
   ipcMain.handle('workspace:snapshot', async (event, projectId: unknown): Promise<WorkspaceSnapshot> => {
     requireTrustedWindow(event)
-    return (await workspaceForSession(projectId)).workspace.getSnapshot()
+    return queueWorkspaceOperation(async () => (await workspaceForSession(projectId)).workspace.getSnapshot())
   })
   ipcMain.handle('workspace:diff', async (event, projectId: unknown, path: unknown): Promise<WorkspaceDiff> => {
     requireTrustedWindow(event)
-    if (!validWorkspacePath(path)) throw new Error('Le fichier demandé est invalide.')
-    return (await workspaceForSession(projectId)).workspace.getDiff(path)
+    return queueWorkspaceOperation(async () => {
+      if (!validWorkspacePath(path)) throw new Error('Le fichier demandé est invalide.')
+      return (await workspaceForSession(projectId)).workspace.getDiff(path)
+    })
   })
   ipcMain.handle('workspace:apply-file', async (event, projectId: unknown, path: unknown, expectedVersion: unknown): Promise<WorkspaceApplyResult> => {
     requireTrustedWindow(event)
-    if (!validWorkspacePath(path) || (expectedVersion !== undefined && (!Number.isSafeInteger(expectedVersion) || Number(expectedVersion) < 1))) throw new Error('La demande d’application est invalide.')
-    const { session, workspace } = await workspaceForSession(projectId)
-    const result = await workspace.applyFile(path, expectedVersion as number | undefined)
-    if (activeSession !== session) throw new Error('La session projet a changé pendant l’application du fichier.')
-    await refreshWorkspacePreview(session)
-    if (session.remoteBrowser) session.remoteBrowser.navigate('reload').catch(() => undefined)
-    mainWindow?.webContents.send('workspace:applied', [result.path])
-    return result
+    return queueWorkspaceOperation(async () => {
+      if (!validWorkspacePath(path) || (expectedVersion !== undefined && (!Number.isSafeInteger(expectedVersion) || Number(expectedVersion) < 1))) throw new Error('La demande d’application est invalide.')
+      const { session, workspace } = await workspaceForSession(projectId)
+      const result = await workspace.applyFile(path, expectedVersion as number | undefined)
+      if (activeSession !== session) throw new Error('La session projet a changé pendant l’application du fichier.')
+      await refreshWorkspacePreview(session)
+      if (session.remoteBrowser) session.remoteBrowser.navigate('reload').catch(() => undefined)
+      mainWindow?.webContents.send('workspace:applied', [result.path])
+      return result
+    })
   })
   ipcMain.handle('workspace:apply-all', async (event, projectId: unknown): Promise<WorkspaceApplyResult[]> => {
     requireTrustedWindow(event)
-    const { session, workspace } = await workspaceForSession(projectId)
-    const results = await workspace.applyAll()
-    if (activeSession !== session) throw new Error('La session projet a changé pendant l’application des fichiers.')
-    await refreshWorkspacePreview(session)
-    if (session.remoteBrowser) session.remoteBrowser.navigate('reload').catch(() => undefined)
-    mainWindow?.webContents.send('workspace:applied', results.map((result) => result.path))
-    return results
+    return queueWorkspaceOperation(async () => {
+      const { session, workspace } = await workspaceForSession(projectId)
+      const results = await workspace.applyAll()
+      if (activeSession !== session) throw new Error('La session projet a changé pendant l’application des fichiers.')
+      await refreshWorkspacePreview(session)
+      if (session.remoteBrowser) session.remoteBrowser.navigate('reload').catch(() => undefined)
+      mainWindow?.webContents.send('workspace:applied', results.map((result) => result.path))
+      return results
+    })
   })
   ipcMain.handle('ai:local-probe', async (event, provider: unknown, endpoint: unknown): Promise<LocalAiStatus> => {
     requireTrustedWindow(event)

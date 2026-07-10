@@ -135,6 +135,13 @@ export interface RemoteOpenRequest {
   linkedRoot?: string | null
 }
 
+export interface RemoteSourceAssociationRequest {
+  /** Identifiant anti-course de la session affichée par le renderer. */
+  projectId: string
+  /** Racine locale explicitement choisie par l’utilisateur. */
+  root: string
+}
+
 export interface RemoteViewport {
   width: number
   height: number
@@ -242,12 +249,24 @@ export interface WorkspaceApplyResult {
   version: number
 }
 
+export type LocalAiStatusCode =
+  | 'ready'
+  | 'no-model'
+  | 'engine-unreachable'
+  | 'timeout'
+  | 'endpoint-not-found'
+  | 'access-denied'
+  | 'engine-error'
+  | 'invalid-response'
+
 export interface LocalAiStatus {
   available: boolean
   provider: 'ollama' | 'llama.cpp' | null
   endpoint: string
   models: string[]
+  code: LocalAiStatusCode
   detail: string
+  action: string | null
 }
 
 export interface LocalAiRequest {
@@ -341,6 +360,11 @@ export type RuntimeAuditRule =
   | 'layout.viewport-overflow'
   | 'layout.clipped-content'
   | 'layout.truncated-text'
+  | 'layout.navigation-wrap'
+  | 'layout.element-overlap'
+  | 'layout.density-hierarchy'
+  | 'layout.useful-area-overflow'
+  | 'typography.disproportionate'
   | 'interaction.small-target'
   | 'layout.fixed-obstruction'
   | 'media.image-error'

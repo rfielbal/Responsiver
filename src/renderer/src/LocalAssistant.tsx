@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent, type ReactElement } from 'react'
+import { useEffect, useRef, useState, type FormEvent, type ReactElement } from 'react'
 import type { LocalAiResponse, LocalAiStatus, ProjectSnapshot, RemoteViewport } from '../../shared/contracts'
 
 interface LocalAssistantProps {
@@ -24,6 +24,19 @@ interface AssistantContextFile {
 }
 
 const assistantSourcePattern = /\.(?:css|scss|sass|less|html?|twig|php|jsx?|tsx?|vue|svelte|astro)$/i
+
+function providerLabel(provider: LocalAiResponse['provider']): string {
+  return provider === 'ollama' ? 'Ollama' : 'llama.cpp'
+}
+
+function actionableError(error: unknown, fallback: string): string {
+  if (!(error instanceof Error) || !error.message.trim()) return fallback
+  const message = error.message
+    .replace(/^Error invoking remote method '[^']+': Error:\s*/i, '')
+    .replace(/^Error:\s*/i, '')
+    .trim()
+  return message && message.toLowerCase() !== 'fetch failed' ? message : fallback
+}
 
 async function collectLocalContextFiles(project: ProjectSnapshot): Promise<AssistantContextFile[]> {
   if (project.source.readOnly || !project.source.localRoot) return []
@@ -62,6 +75,7 @@ export default function LocalAssistant({ project, route, viewport, screenshotDat
   const [contextLoading, setContextLoading] = useState(false)
   const [includeFiles, setIncludeFiles] = useState(workspaceEnabled)
   const [includeScreenshot, setIncludeScreenshot] = useState(Boolean(screenshotDataUrl))
+  const probeGeneration = useRef(0)
 
   const prepareContext = async (): Promise<void> => {
     if (!workspaceEnabled) {
@@ -90,6 +104,7 @@ export default function LocalAssistant({ project, route, viewport, screenshotDat
   }, [screenshotDataUrl])
 
   const changeProvider = (next: 'ollama' | 'llama.cpp'): void => {
+    probeGeneration.current += 1
     setProvider(next)
     setEndpoint(next === 'ollama' ? 'http://127.0.0.1:11434' : 'http://127.0.0.1:8080')
     setStatus(null)
@@ -97,13 +112,21 @@ export default function LocalAssistant({ project, route, viewport, screenshotDat
   }
 
   const probe = async (): Promise<void> => {
+    const generation = probeGeneration.current + 1
+    probeGeneration.current = generation
     setBusy(true)
     try {
       const next = await window.responsiver.probeLocalAi(provider, endpoint)
+      if (generation !== probeGeneration.current) return
       setStatus(next)
       if (next.available && next.models.length && !next.models.includes(model)) setModel(next.models[0])
-      onNotice(next.detail)
-    } catch { onNotice('Seules les adresses loopback HTTP sont acceptées pour l’IA locale.') } finally { setBusy(false) }
+      onNotice([next.detail, next.action].filter(Boolean).join(' '))
+    } catch (error) {
+      if (generation !== probeGeneration.current) return
+      onNotice(actionableError(error, 'Adresse invalide : utilisez une adresse HTTP loopback complète, par exemple http://127.0.0.1:11434.'))
+    } finally {
+      if (generation === probeGeneration.current) setBusy(false)
+    }
   }
 
   const submit = async (event: FormEvent): Promise<void> => {
@@ -131,7 +154,9 @@ export default function LocalAssistant({ project, route, viewport, screenshotDat
         }
       })
       setMessages((current) => [...current, { id: `assistant-${Date.now()}`, author: 'assistant', text: response.text, response }])
-    } catch { onNotice('Le modèle local n’a pas répondu. Aucun fallback cloud n’a été utilisé.') } finally { setBusy(false) }
+    } catch (error) {
+      onNotice(actionableError(error, 'Le modèle local n’a pas répondu. Vérifiez qu’il est encore chargé ; aucun fallback cloud n’a été utilisé.'))
+    } finally { setBusy(false) }
   }
 
   const previewFile = async (path: string, content: string): Promise<void> => {
@@ -148,10 +173,11 @@ export default function LocalAssistant({ project, route, viewport, screenshotDat
   return <div className="local-assistant">
     <section className="ai-connection">
       <header><div><span className="overline">Mode local strict</span><h2>Assistant</h2></div><span className={status?.available ? 'ai-local-status is-online' : 'ai-local-status'}><i />{status?.available ? 'Connecté localement' : 'Hors ligne'}</span></header>
-      <div className="ai-provider-switch"><button className={provider === 'ollama' ? 'is-active' : ''} onClick={() => changeProvider('ollama')}>Ollama</button><button className={provider === 'llama.cpp' ? 'is-active' : ''} onClick={() => changeProvider('llama.cpp')}>llama.cpp</button></div>
-      <label><span>Adresse loopback</span><input value={endpoint} onChange={(event) => { setEndpoint(event.target.value); setStatus(null) }} spellCheck={false} /></label>
+      <div className="ai-provider-switch"><button className={provider === 'ollama' ? 'is-active' : ''} onClick={() => changeProvider('ollama')} disabled={busy}>Ollama</button><button className={provider === 'llama.cpp' ? 'is-active' : ''} onClick={() => changeProvider('llama.cpp')} disabled={busy}>llama.cpp</button></div>
+      <label><span>Adresse loopback</span><input value={endpoint} onChange={(event) => { probeGeneration.current += 1; setEndpoint(event.target.value); setStatus(null); setModel('') }} spellCheck={false} disabled={busy} /></label>
       <button className="button button--secondary button--full" onClick={() => void probe()} disabled={busy}>Vérifier le moteur local</button>
-      {status?.available && <label><span>Modèle installé</span>{status.models.length ? <select value={model} onChange={(event) => setModel(event.target.value)}>{status.models.map((name) => <option key={name}>{name}</option>)}</select> : <input value={model} onChange={(event) => setModel(event.target.value)} placeholder="Nom du modèle chargé" />}</label>}
+      {status?.available && <label><span>Modèle installé</span>{status.models.length ? <select value={model} onChange={(event) => setModel(event.target.value)} disabled={busy}>{status.models.map((name) => <option key={name}>{name}</option>)}</select> : <input value={model} onChange={(event) => setModel(event.target.value)} placeholder="Nom du modèle chargé" disabled={busy} />}</label>}
+      {status && <div className="ai-privacy" role="status"><strong>{status.detail}</strong>{status.action && <span>{status.action}</span>}</div>}
       <div className="ai-privacy"><strong>Connexion limitée à l’adresse loopback affichée</strong><span>Aucun fallback distant. Le moteur choisi peut toutefois journaliser ou relayer les requêtes selon sa propre configuration.</span></div>
     </section>
     <section className="ai-context" aria-label="Contexte envoyé à l’assistant local">
@@ -161,7 +187,7 @@ export default function LocalAssistant({ project, route, viewport, screenshotDat
       <label><input type="checkbox" checked={includeScreenshot} onChange={(event) => setIncludeScreenshot(event.target.checked)} disabled={!screenshotDataUrl} /><span><strong>Capture du rendu</strong><small>{screenshotDataUrl ? 'Image de la route actuellement analysée' : 'Aucune capture disponible'}</small></span></label>
       <p>La route, le viewport et jusqu’à 30 constats sont toujours inclus dans la requête. Aucun terminal ni accès autonome aux fichiers n’est accordé au modèle.</p>
     </section>
-    <div className="ai-messages">{messages.length ? messages.map((message) => <article className={`ai-message ai-message--${message.author}`} key={message.id}><span>{message.author === 'user' ? 'Vous' : `${provider} · local`}</span><p>{message.text}</p>{message.response?.proposedFiles.map((file) => <div className="ai-file-proposal" key={file.path}><code>{file.path}</code><small>{file.explanation}</small><button onClick={() => void previewFile(file.path, file.content)} disabled={busy || !workspaceEnabled}>Prévisualiser dans le code</button></div>)}</article>) : <div className="ai-empty"><strong>Une IA qui travaille sur des preuves</strong><p>Elle reçoit les constats, la route, le viewport et, si disponible, la capture. Elle ne possède ni terminal ni accès direct aux fichiers.</p></div>}</div>
+    <div className="ai-messages">{messages.length ? messages.map((message) => <article className={`ai-message ai-message--${message.author}`} key={message.id}><span>{message.author === 'user' ? 'Vous' : message.response ? `${providerLabel(message.response.provider)} · local` : 'Assistant local'}</span><p>{message.text}</p>{message.response?.proposedFiles.map((file) => <div className="ai-file-proposal" key={file.path}><code>{file.path}</code><small>{file.explanation}</small><button onClick={() => void previewFile(file.path, file.content)} disabled={busy || !workspaceEnabled}>Prévisualiser dans le code</button></div>)}</article>) : <div className="ai-empty"><strong>Une IA qui travaille sur des preuves</strong><p>Elle reçoit les constats, la route, le viewport et, si disponible, la capture. Elle ne possède ni terminal ni accès direct aux fichiers.</p></div>}</div>
     <form className="ai-prompt" onSubmit={submit}><textarea rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Ex. Analyse la hiérarchie visuelle mobile et propose une correction minimale…" disabled={!status?.available || busy} /><footer><small>{includeScreenshot && screenshotDataUrl ? 'Capture incluse' : includeFiles && contextFiles.length ? `${contextFiles.length} source${contextFiles.length > 1 ? 's' : ''} incluse${contextFiles.length > 1 ? 's' : ''}` : 'Constats et géométrie uniquement'}</small><button className="button button--primary" disabled={!status?.available || !model || !draft.trim() || busy}>{busy ? 'Analyse locale…' : 'Envoyer localement'}</button></footer></form>
   </div>
 }

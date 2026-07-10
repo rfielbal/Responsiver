@@ -52,6 +52,20 @@ interface ThemePalette {
   accent: string
 }
 
+export interface ThemeGenerationAssessment {
+  safe: boolean
+  reason: string
+  mappedRoles: ThemeVariable['role'][]
+  contrast: { textOnBackground: number; textOnSurface: number; mutedOnBackground: number }
+}
+
+export class ThemeGenerationError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ThemeGenerationError'
+  }
+}
+
 const palettes: Record<ThemeMode, ThemePalette> = {
   light: {
     background: '#f4f2ec',
@@ -86,11 +100,6 @@ const namedColors: Record<string, string> = {
   terracotta: '#b64d32',
   vert: '#367252',
   violet: '#7453a6'
-}
-
-const accessibleAccents: Record<ThemeMode, string[]> = {
-  light: ['#9e412d', '#315f8c', '#376548', '#684d8e', '#855712'],
-  dark: ['#ec8060', '#7fb0d8', '#78b894', '#b09add', '#e0b760']
 }
 
 function digest(value: string | Buffer): string {
@@ -167,7 +176,9 @@ function themeAlreadyExists(theme: ThemeProfile, target: ThemeMode): boolean {
 export function suggestedComplementaryTheme(theme: ThemeProfile): ThemeMode | null {
   if (theme.hasDark && !theme.hasLight) return 'light'
   if (theme.hasLight && !theme.hasDark) return 'dark'
-  if (!theme.hasDark && !theme.hasLight) return 'dark'
+  // Sans thème source fiable, une palette complémentaire ne peut pas préserver
+  // avec assez de certitude les surfaces, le texte et l'identité de marque.
+  if (!theme.hasDark && !theme.hasLight) return null
   return null
 }
 
@@ -190,6 +201,9 @@ function findInstructionColor(instruction: string): string | null {
 
 export function interpretLocalInstruction(instruction: string): InstructionInterpretation {
   const normalized = normalizeInstruction(instruction)
+  const requestedBreakpoint = Number(normalized.match(/(\d{3,4})\s*px/)?.[1] ?? 768)
+  const responsiveBreakpoint = Math.min(1_100, Math.max(320, Number.isFinite(requestedBreakpoint) ? requestedBreakpoint : 768))
+  const requestedSelector = instruction.match(/\bcible\s+((?:[a-z][\w-]*)?(?:[.#][\w-]+){1,4}|[a-z][\w-]*)/i)?.[1] ?? null
   const requestedTheme = extractRequestedTheme(instruction)
   if (requestedTheme) {
     return {
@@ -230,6 +244,16 @@ export function interpretLocalInstruction(instruction: string): InstructionInter
     }
   }
 
+  if (/(?:titre|hero|headline).*(?:born|limit|disproportion|mobile)|(?:born|limit).*(?:titre|hero|headline)/.test(normalized)) {
+    const titleSelector = requestedSelector ?? 'h1, [class*="title" i], [class*="headline" i], [class*="hero" i] h1'
+    return {
+      instruction,
+      recognized: true,
+      title: 'Borner les grands titres sur mobile',
+      css: `@media (max-width: ${responsiveBreakpoint}px) {\n  :where(${titleSelector}) {\n    font-size: clamp(2.25rem, 11vw, 4.25rem) !important;\n    line-height: 1 !important;\n    overflow-wrap: anywhere;\n  }\n}`
+    }
+  }
+
   if (/(?:texte|typographie|police).*(?:plus grand|agrand|gross)|augment.*(?:texte|typographie|police)/.test(normalized)) {
     return {
       instruction,
@@ -266,6 +290,21 @@ export function interpretLocalInstruction(instruction: string): InstructionInter
     }
   }
 
+  if (/(?:navigation|menu|liens?).*(?:rangee|defil|scroll)|(?:rangee|defil|scroll).*(?:navigation|menu)/.test(normalized)) {
+    const navigationContainers = requestedSelector
+      ? `${requestedSelector}, ${requestedSelector} ul, ${requestedSelector} ol`
+      : 'nav ul, nav ol, [class*="nav" i], [class*="menu" i]'
+    const navigationItems = requestedSelector
+      ? `${requestedSelector} a, ${requestedSelector} button`
+      : 'nav a, nav button, [class*="nav" i] a, [class*="menu" i] a'
+    return {
+      instruction,
+      recognized: true,
+      title: 'Stabiliser la navigation mobile',
+      css: `@media (max-width: ${responsiveBreakpoint}px) {\n  :where(${navigationContainers}) {\n    min-inline-size: 0 !important;\n    max-inline-size: 100%;\n    flex-wrap: nowrap !important;\n    overflow-x: auto;\n    overscroll-behavior-inline: contain;\n    scrollbar-width: thin;\n  }\n\n  :where(${navigationItems}) {\n    flex: 0 0 auto;\n    min-block-size: 2.75rem;\n  }\n}`
+    }
+  }
+
   if (/(?:navigation|menu|liens?).*(?:retour|ligne|wrap|debord)|(?:retour|ligne|wrap).*(?:navigation|menu)/.test(normalized)) {
     return {
       instruction,
@@ -279,7 +318,8 @@ export function interpretLocalInstruction(instruction: string): InstructionInter
 }
 
 function parseRgb(value: string): [number, number, number] | null {
-  const hex = value.match(/#([\da-f]{3,8})\b/i)?.[1]
+  const source = value.trim()
+  const hex = source.match(/^#([\da-f]{3,8})$/i)?.[1]
   if (hex) {
     const normalized = hex.length === 3 || hex.length === 4
       ? hex.slice(0, 3).split('').map((part) => `${part}${part}`).join('')
@@ -288,7 +328,7 @@ function parseRgb(value: string): [number, number, number] | null {
       return [0, 2, 4].map((offset) => Number.parseInt(normalized.slice(offset, offset + 2), 16)) as [number, number, number]
     }
   }
-  const rgb = value.match(/rgba?\(\s*(\d+(?:\.\d+)?)\s*[, ]\s*(\d+(?:\.\d+)?)\s*[, ]\s*(\d+(?:\.\d+)?)/i)
+  const rgb = source.match(/^rgba?\(\s*(\d+(?:\.\d+)?)\s*[, ]\s*(\d+(?:\.\d+)?)\s*[, ]\s*(\d+(?:\.\d+)?)(?:\s*[,/]\s*\d+(?:\.\d+)?)?\s*\)$/i)
   return rgb ? [Number(rgb[1]), Number(rgb[2]), Number(rgb[3])] : null
 }
 
@@ -310,21 +350,63 @@ function contrastRatio(first: string, second: string): number {
   return (lighter + 0.05) / (darker + 0.05)
 }
 
-function valueForRole(variable: ThemeVariable, palette: ThemePalette, index: number): string | null {
+function valueForRole(variable: ThemeVariable, palette: ThemePalette): string | null {
   switch (variable.role) {
     case 'background': return palette.background
-    case 'surface': return index % 2 === 0 ? palette.surface : palette.surfaceRaised
+    case 'surface': return /(?:raised|elevated|popover)/i.test(variable.name) ? palette.surfaceRaised : palette.surface
     case 'text': return palette.text
     case 'muted': return palette.muted
     case 'border': return palette.border
-    case 'accent': {
-      if (contrastRatio(variable.value, palette.background) >= 4.5) return variable.value
-      const alternatives = accessibleAccents[palette === palettes.dark ? 'dark' : 'light']
-      const stableIndex = [...variable.name].reduce((total, character) => total + character.charCodeAt(0), index) % alternatives.length
-      return alternatives[stableIndex]
-    }
+    // Les accents, logos et couleurs de marque sont laissés intacts. Si leur
+    // usage textuel n'est pas compatible avec la nouvelle surface, le contrôle
+    // visuel doit le signaler au lieu de recolorer silencieusement la marque.
+    case 'accent': return null
     case 'unknown': return null
   }
+}
+
+function resolvedThemeColor(variable: ThemeVariable, variables: ThemeVariable[], visited = new Set<string>()): string | null {
+  if (parseRgb(variable.value)) return variable.value
+  const reference = variable.value.match(/var\(\s*(--[\w-]+)/)?.[1]
+  if (!reference || visited.has(reference)) return null
+  const next = variables.find((candidate) => candidate.name === reference)
+  if (!next) return null
+  const nextVisited = new Set(visited)
+  nextVisited.add(reference)
+  return resolvedThemeColor(next, variables, nextVisited)
+}
+
+export function assessComplementaryTheme(project: ProjectSnapshot, target: ThemeMode): ThemeGenerationAssessment {
+  const palette = palettes[target]
+  const contrast = {
+    textOnBackground: contrastRatio(palette.text, palette.background),
+    textOnSurface: contrastRatio(palette.text, palette.surface),
+    mutedOnBackground: contrastRatio(palette.muted, palette.background)
+  }
+  const mapped = project.theme.variables.filter((variable) =>
+    variable.role !== 'unknown' && variable.role !== 'accent' && Boolean(resolvedThemeColor(variable, project.theme.variables)))
+  const mappedRoles = [...new Set(mapped.map((variable) => variable.role))]
+  const hasSurfaceFoundation = mappedRoles.includes('background') && mappedRoles.includes('text')
+  const palettePasses = contrast.textOnBackground >= 4.5 && contrast.textOnSurface >= 4.5 && contrast.mutedOnBackground >= 4.5
+
+  if (themeAlreadyExists(project.theme, target)) {
+    return { safe: false, reason: `La variante ${target === 'dark' ? 'sombre' : 'claire'} existe déjà.`, mappedRoles, contrast }
+  }
+  if (project.theme.detected === 'unknown') {
+    return { safe: false, reason: 'Le thème source n’est pas assez fiable pour générer une variante sans risque visuel.', mappedRoles, contrast }
+  }
+  if (!hasSurfaceFoundation) {
+    return {
+      safe: false,
+      reason: 'Génération refusée : aucun couple fiable de rôles fond/texte n’a été identifié. Les images et couleurs de marque restent inchangées.',
+      mappedRoles,
+      contrast
+    }
+  }
+  if (!palettePasses) {
+    return { safe: false, reason: 'Génération refusée : la palette déterministe ne satisfait pas les contrastes requis.', mappedRoles, contrast }
+  }
+  return { safe: true, reason: 'Rôles fond/texte identifiés et contrastes vérifiés.', mappedRoles, contrast }
 }
 
 function enrichAccentInstruction(css: string, variables: ThemeVariable[]): string {
@@ -338,18 +420,24 @@ function enrichAccentInstruction(css: string, variables: ThemeVariable[]): strin
 }
 
 export function generateComplementaryThemeCss(project: ProjectSnapshot, target: ThemeMode): string {
+  const assessment = assessComplementaryTheme(project, target)
+  if (!assessment.safe) throw new ThemeGenerationError(assessment.reason)
   const palette = palettes[target]
-  const semanticVariables = project.theme.variables.filter((variable) => variable.role !== 'unknown')
+  const semanticVariables = project.theme.variables.filter((variable) =>
+    variable.role !== 'unknown' && variable.role !== 'accent' && Boolean(resolvedThemeColor(variable, project.theme.variables)))
   const declarations = semanticVariables
-    .map((variable, index) => {
-      const value = valueForRole(variable, palette, index)
+    .map((variable) => {
+      const value = valueForRole(variable, palette)
       return value ? `  ${variable.name}: ${value};` : null
     })
     .filter((value): value is string => Boolean(value))
 
   const variableBlock = declarations.length > 0 ? `\n${declarations.join('\n')}` : ''
   const themeSelector = `html[${GENERATED_THEME_ATTRIBUTE}="${target}"]`
-  return `/* Variante ${target === 'dark' ? 'sombre' : 'claire'} déterministe — Responsiver */
+  return `/* Variante ${target === 'dark' ? 'sombre' : 'claire'} déterministe — Responsiver
+ * Contrastes vérifiés : texte/fond ${assessment.contrast.textOnBackground.toFixed(2)}:1 ; texte/surface ${assessment.contrast.textOnSurface.toFixed(2)}:1.
+ * Les images, filtres et couleurs de marque ne sont jamais modifiés automatiquement.
+ */
 ${themeSelector} {
   color-scheme: ${target};
   --responsiver-background: ${palette.background};
@@ -367,18 +455,8 @@ ${themeSelector} body {
   color: var(--responsiver-text);
 }
 
-${themeSelector} :where([class*="card" i], [class*="panel" i], [class*="surface" i], dialog) {
-  background-color: var(--responsiver-surface);
-  color: var(--responsiver-text);
-  border-color: var(--responsiver-border);
-}
-
-${themeSelector} :where(input, select, textarea, button) {
-  border-color: var(--responsiver-border);
-}
-
-${themeSelector} :where(a, button, [role="button"]) {
-  accent-color: var(--responsiver-accent);
+${themeSelector} :where(input, select, textarea) {
+  color-scheme: ${target};
 }`
 }
 

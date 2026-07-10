@@ -53,6 +53,8 @@ const MAX_MEDIA_FILES = 400
 const MAX_ROUTES = 120
 const MAX_STYLESHEETS = 240
 const MAX_ISSUES = 320
+const MAX_RETURNED_ISSUES = 60
+const MAX_RETURNED_ISSUES_PER_ROUTE = 18
 const MAX_TEXT_BYTES = 2_000_000
 const PROGRESS_TOTAL = 6
 const artifactDirectories = ['dist', 'build', 'out', '.output/public'] as const
@@ -60,6 +62,19 @@ const mediaExtensions = new Set([
   '.apng', '.avif', '.bmp', '.eot', '.gif', '.ico', '.jpeg', '.jpg', '.mp3', '.mp4', '.ogg',
   '.otf', '.png', '.svg', '.ttf', '.wav', '.webm', '.webp', '.woff', '.woff2'
 ])
+
+const auxiliaryRouteSegments = new Set([
+  'component', 'components', 'demo', 'demos', 'example', 'examples', 'fixture', 'fixtures',
+  'include', 'includes', 'partial', 'partials', 'storybook', 'test', 'tests'
+])
+
+function isAuxiliaryRouteFile(root: string, file: string): boolean {
+  const relativeFile = posixRelative(root, file).toLowerCase()
+  const segments = relativeFile.split('/')
+  const stem = basename(relativeFile, extname(relativeFile))
+  return segments.some((segment) => auxiliaryRouteSegments.has(segment)) ||
+    /^(?:demo|example|fixture|preview|storybook)(?:[-_.]|$)/.test(stem)
+}
 
 export interface AnalyzeProjectOptions {
   onProgress?: (progress: ProjectPreparationProgress) => void
@@ -222,6 +237,70 @@ function makeIssue(issue: Omit<ProjectIssue, 'id'>): ProjectIssue {
   }
 }
 
+function consolidateProjectIssues(issues: ProjectIssue[], preferredRoute?: string | null): ProjectIssue[] {
+  const groups = new Map<string, ProjectIssue[]>()
+  for (const issue of issues) {
+    const source = issue.source
+    const key = [
+      issue.rule,
+      issue.title,
+      source?.file ?? '',
+      source?.line ?? '',
+      issue.fix?.selector ?? '',
+      issue.fix?.property ?? '',
+      issue.fix?.before ?? ''
+    ].join('\u001f')
+    const group = groups.get(key)
+    if (group) group.push(issue)
+    else groups.set(key, [issue])
+  }
+
+  return [...groups.entries()].map(([key, group]) => {
+    if (group.length === 1) return group[0]
+    const routes = [...new Set(group.map((issue) => issue.routePath).filter((route): route is string => Boolean(route)))]
+    const representative = group.find((issue) => issue.routePath === preferredRoute) ?? group[0]
+    const routeSummary = routes.length > 1
+      ? ` Même règle partagée par ${routes.length} pages ; une seule occurrence est affichée pour éviter les doublons.`
+      : ''
+    return {
+      ...representative,
+      id: stableId('consolidated', key),
+      description: `${representative.description}${routeSummary}`,
+      evidence: representative.evidence
+        ? {
+            ...representative.evidence,
+            measurements: {
+              ...representative.evidence.measurements,
+              affectedRoutes: routes.length
+            }
+          }
+        : representative.evidence
+    }
+  })
+}
+
+function prioritizeProjectIssues(issues: ProjectIssue[], preferredRoute?: string | null): ProjectIssue[] {
+  const severityScore: Record<ProjectIssue['severity'], number> = { bloquant: 300, attention: 200, information: 100 }
+  const score = (issue: ProjectIssue): number => severityScore[issue.severity] +
+    (issue.coverage === 'standard' ? 24 : issue.coverage === 'heuristique' ? 12 : 0) +
+    (issue.confidence === 'certain' ? 10 : issue.confidence === 'probable' ? 5 : 0) +
+    (issue.fix?.confidence === 'safe' ? 4 : 0) +
+    (issue.routePath === preferredRoute ? 2 : 0)
+  const ordered = issues.map((issue, index) => ({ issue, index, score: score(issue) }))
+    .sort((left, right) => right.score - left.score || left.index - right.index)
+  const perRoute = new Map<string, number>()
+  const selected: ProjectIssue[] = []
+  for (const entry of ordered) {
+    if (selected.length >= MAX_RETURNED_ISSUES) break
+    const route = entry.issue.routePath ?? '__project__'
+    const count = perRoute.get(route) ?? 0
+    if (route !== '__project__' && count >= MAX_RETURNED_ISSUES_PER_ROUTE) continue
+    selected.push(entry.issue)
+    perRoute.set(route, count + 1)
+  }
+  return selected
+}
+
 function lineOf(declaration: { source?: { start?: { line?: number } } }): number {
   return declaration.source?.start?.line ?? 1
 }
@@ -256,6 +335,42 @@ function minimumMediaWidth(declaration: Declaration): number | null {
     parent = parent.parent
   }
   return null
+}
+
+function maximumMediaWidth(declaration: Declaration): number | null {
+  let parent = declaration.parent as unknown as CssAncestor | undefined
+  while (parent) {
+    if (parent.type === 'atrule' && parent.name?.toLowerCase() === 'media') {
+      const matches = [...(parent.params ?? '').matchAll(/max-width\s*:\s*(\d+(?:\.\d+)?)px/gi)]
+      if (matches.length > 0) return Math.min(...matches.map((match) => Number(match[1])))
+    }
+    parent = parent.parent
+  }
+  return null
+}
+
+function normalizedSelectors(value: string): string[] {
+  return value.split(',').map((selector) => selector.replace(/\s+/g, ' ').trim()).filter(Boolean)
+}
+
+function collectMobileWrappingOverrides(styles: StyleContext[]): Set<string> {
+  const selectors = new Set<string>()
+  for (const style of styles) {
+    let rootNode
+    try {
+      rootNode = postcss.parse(style.css, { from: style.inline ? undefined : style.file })
+    } catch {
+      continue
+    }
+    rootNode.walkDecls('white-space', (declaration) => {
+      const maxWidth = maximumMediaWidth(declaration)
+      if (maxWidth === null || maxWidth > 900 || /(?:^|\s)nowrap(?:\s|$)/i.test(declaration.value)) return
+      const selector = selectorOf(declaration)
+      if (!selector) return
+      for (const entry of normalizedSelectors(selector)) selectors.add(entry)
+    })
+  }
+  return selectors
 }
 
 function safeDecodeUri(value: string): string {
@@ -722,10 +837,14 @@ function issueFromDiagnostic(diagnostic: PreviewDiagnostic, routePath?: string):
 function roleOfVariable(name: string): ThemeVariable['role'] {
   const normalized = name.toLowerCase()
   if (/(?:^|[-_])(shadow|radius|spacing|duration|font|size|width|height|z)(?:$|[-_])/.test(normalized)) return 'unknown'
-  if (/(?:^|[-_])(bg|background|canvas|page|paper|base)(?:$|[-_])/.test(normalized)) return 'background'
-  if (/(?:^|[-_])(surface|panel|card|elevated|popover)(?:$|[-_])/.test(normalized)) return 'surface'
+  if (/^--(?:text|fg|foreground|ink)(?:$|[-_])/.test(normalized)) return 'text'
+  // Une couleur de bouton, de pilule ou de marque n'est pas une surface de page.
+  // La reclasser en accent évite qu'un thème généré efface l'identité visuelle.
+  if (/(?:^|[-_])(accent|active|brand|button|btn|cta|link|logo|nav|pill|primary|action)(?:$|[-_])/.test(normalized)) return 'accent'
   if (/(?:^|[-_])(muted|subtle|secondary|tertiary|disabled)(?:$|[-_])/.test(normalized)) return 'muted'
   if (/(?:^|[-_])(text|fg|foreground|ink)(?:$|[-_])/.test(normalized)) return 'text'
+  if (/(?:^|[-_])(bg|background|canvas|page|paper|base)(?:$|[-_])/.test(normalized)) return 'background'
+  if (/(?:^|[-_])(surface|panel|card|elevated|popover)(?:$|[-_])/.test(normalized)) return 'surface'
   if (/(?:^|[-_])(border|line|outline|stroke|divider)(?:$|[-_])/.test(normalized)) return 'border'
   if (/(?:^|[-_])(accent|brand|primary|action|link)(?:$|[-_])/.test(normalized)) return 'accent'
   if (/(?:^|[-_])(acid|blue|bleu|coral|corail|cyan|gold|jaune|orange|pink|rose|red|rouge|violet|purple|vert|green)(?:$|[-_])/.test(normalized)) return 'accent'
@@ -948,7 +1067,7 @@ async function expandLinkedStyles(
   return [...expanded]
 }
 
-function analyzeStylesheet(style: StyleContext): ProjectIssue[] {
+function analyzeStylesheet(style: StyleContext, mobileWrappingOverrides: ReadonlySet<string> = new Set()): ProjectIssue[] {
   const issues: ProjectIssue[] = []
   let rootNode
   try {
@@ -1030,7 +1149,10 @@ function analyzeStylesheet(style: StyleContext): ProjectIssue[] {
       /(?:^|\s)nowrap(?:\s|$)/i.test(declaration.value) &&
       !isDesktopOnly &&
       !isScreenReaderOnlyDeclaration(declaration, selector) &&
-      !isIntentionalAnimatedNoWrap(declaration, selector)
+      !isIntentionalAnimatedNoWrap(declaration, selector) &&
+      Boolean(selector && normalizedSelectors(selector).some((entry) => /(?:nav|menu|breadcrumb|heading|headline|title|toolbar|tabs?)/i.test(entry))) &&
+      !normalizedSelectors(selector ?? '').some((entry) => /(?:__|[-_])link(?:\b|[.:#])/i.test(entry) && !/breadcrumb/i.test(entry)) &&
+      !normalizedSelectors(selector ?? '').some((entry) => mobileWrappingOverrides.has(entry))
     ) {
       const fix: ProjectFix = selector ? {
         kind: 'css-media-override',
@@ -1066,6 +1188,7 @@ export async function analyzeProject(root: string, options: AnalyzeProjectOption
   const sourceFiles = sourceInventory.files
   const sourceHtmlFiles = sourceFiles
     .filter((file) => ['.html', '.htm'].includes(extname(file).toLowerCase()))
+    .filter((file) => !isAuxiliaryRouteFile(normalizedRoot, file))
     .sort((left, right) => entryScore(normalizedRoot, right) - entryScore(normalizedRoot, left))
   const explicitEntry = preferredEntryFile(normalizedRoot, new Set(sourceFiles), options.preferredEntryPath)
   const detectedCapabilities = await detectCapabilities(normalizedRoot, sourceFiles, sourceHtmlFiles.length > 0)
@@ -1092,6 +1215,7 @@ export async function analyzeProject(root: string, options: AnalyzeProjectOption
   const absoluteBase = artifact?.root ?? normalizedRoot
   const htmlFiles = analysisFiles
     .filter((file) => ['.html', '.htm'].includes(extname(file).toLowerCase()))
+    .filter((file) => file === explicitEntry || file === artifact?.entryFile || !isAuxiliaryRouteFile(normalizedRoot, file))
     .sort((left, right) => {
       if (left === explicitEntry) return -1
       if (right === explicitEntry) return 1
@@ -1262,9 +1386,10 @@ export async function analyzeProject(root: string, options: AnalyzeProjectOption
       }))
     }
 
+    const mobileWrappingOverrides = collectMobileWrappingOverrides(styleContexts)
     for (const styleContext of styleContexts) {
       scannedStyles += 1
-      issues.push(...analyzeStylesheet(styleContext).slice(0, Math.max(0, MAX_ISSUES - issues.length)))
+      issues.push(...analyzeStylesheet(styleContext, mobileWrappingOverrides).slice(0, Math.max(0, MAX_ISSUES - issues.length)))
     }
     const routeTheme = detectTheme(`${html}\n${styleContexts.map((style) => style.css).join('\n')}`)
     route.theme = routeTheme.detected
@@ -1273,7 +1398,11 @@ export async function analyzeProject(root: string, options: AnalyzeProjectOption
 
   // Les styles non liés sont signalés sans produire de faux correctifs. Cela évite
   // qu’un dossier demo/ ou storybook/ pollue les constats de la page réellement testée.
-  const unlinkedCssFiles = cssFiles.filter((file) => !linkedCssFiles.has(file))
+  const auxiliaryHtmlDirectories = new Set(analysisFiles
+    .filter((file) => ['.html', '.htm'].includes(extname(file).toLowerCase()) && isAuxiliaryRouteFile(normalizedRoot, file))
+    .map((file) => dirname(file)))
+  const unlinkedCssFiles = cssFiles.filter((file) => !linkedCssFiles.has(file) &&
+    ![...auxiliaryHtmlDirectories].some((directory) => isInsideRoot(directory, file)))
   if (unlinkedCssFiles.length > 0 && issues.length < MAX_ISSUES) {
     const file = unlinkedCssFiles[0]
     issues.push(makeIssue({
@@ -1432,42 +1561,7 @@ export async function analyzeProject(root: string, options: AnalyzeProjectOption
     issues.push(issueFromDiagnostic(diagnostic, diagnosticRoute))
   }
 
-  if (previewReadiness.status === 'ready' || previewReadiness.status === 'degraded') {
-    for (const routeContext of routeContexts) {
-      if (issues.length >= MAX_ISSUES) break
-      const hasResponsiveFinding = issues.some((issue) =>
-        issue.routePath === routeContext.route.path &&
-        (issue.severity === 'bloquant' || issue.severity === 'attention'))
-      if (hasResponsiveFinding) continue
-      issues.push(makeIssue({
-        title: 'Validation visuelle à exécuter',
-        description: 'Aucune règle statique bloquante n’a été détectée sur cette route. Le comportement réel doit encore être contrôlé sur plusieurs largeurs.',
-        severity: 'information',
-        coverage: 'manuel',
-        viewport: '320–1440 px',
-        routePath: routeContext.route.path,
-        source: { file: routeContext.relativeFile, line: 1 },
-        rule: 'manual.visual-sweep',
-        proposal: 'Balayer les viewports et compléter l’analyse par les débordements mesurés dans la preview.',
-        fix: { kind: 'manual', file: routeContext.relativeFile, confidence: 'review' }
-      }))
-    }
-  }
-
   if (issues.length >= MAX_ISSUES) truncated = true
-  if (issues.length === 0 && (previewReadiness.status === 'ready' || previewReadiness.status === 'degraded')) {
-    issues.push(makeIssue({
-      title: 'Validation visuelle à exécuter',
-      description: 'Aucune règle statique bloquante n’a été détectée. Le comportement réel doit encore être contrôlé sur plusieurs largeurs.',
-      severity: 'information',
-      coverage: 'manuel',
-      viewport: '320–1440 px',
-      routePath: routeContexts[0]?.route.path,
-      rule: 'manual.visual-sweep',
-      proposal: 'Balayer les viewports et compléter l’analyse par les débordements mesurés dans la preview.',
-      fix: { kind: 'manual', file: routeContexts[0]?.relativeFile ?? '', confidence: 'review' }
-    }))
-  }
 
   const capabilities: ProjectCapabilities = {
     ...detectedCapabilities,
@@ -1481,6 +1575,9 @@ export async function analyzeProject(root: string, options: AnalyzeProjectOption
   const entryPath = entryFile
     ? `/${artifact ? posixRelative(artifact.root, entryFile) : posixRelative(normalizedRoot, entryFile)}`
     : null
+  const consolidatedIssues = consolidateProjectIssues(issues, entryPath)
+  const returnedIssues = prioritizeProjectIssues(consolidatedIssues, entryPath)
+  if (returnedIssues.length < consolidatedIssues.length) truncated = true
   const routes = routeContexts
     .map((context) => context.route)
     .sort((left, right) => left.path === entryPath ? -1 : right.path === entryPath ? 1 : left.label.localeCompare(right.label, 'fr'))
@@ -1504,7 +1601,7 @@ export async function analyzeProject(root: string, options: AnalyzeProjectOption
     files: new Set([...sourceFiles, ...analysisFiles]).size,
     analyzedAt: new Date().toISOString(),
     source: { kind: 'local-project', readOnly: false, url: null, localRoot: normalizedRoot, network: 'local-only' },
-    issues,
+    issues: returnedIssues,
     previewHtml: null,
     previewOrigin: null,
     previewBasePath: artifact?.basePath ?? null,

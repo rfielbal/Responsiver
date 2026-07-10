@@ -13,6 +13,7 @@ import type {
   RemoteFocusResult,
   RemoteOpenRequest,
   RemotePageState,
+  RemoteSourceAssociationRequest,
   RemoteViewBounds,
   RemoteViewport,
   StagingRequest,
@@ -39,6 +40,7 @@ declare global {
     forgetRecentProject: (id: string) => Promise<RecentProjectSummary[]>
     onProjectPreparation: (listener: (progress: ProjectPreparationProgress) => void) => () => void
     openRemoteUrl: (request: RemoteOpenRequest) => Promise<ProjectSnapshot>
+    associateRemoteRoot: (request: RemoteSourceAssociationRequest) => Promise<ProjectSnapshot>
     setRemoteBounds: (bounds: RemoteViewBounds) => Promise<void>
     navigateRemote: (action: 'back' | 'forward' | 'reload' | 'url', value?: string) => Promise<RemotePageState>
     getRemoteState: () => Promise<RemotePageState>

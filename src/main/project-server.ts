@@ -86,9 +86,9 @@ const previewCsp = [
 /** Bornes du collecteur injecté dans les previews locales. */
 export const LOCAL_RUNTIME_AUDIT_LIMITS = Object.freeze({
   maxNodes: 2_500,
-  maxFindings: 120,
-  maxFindingsPerRule: 24,
-  maxLegacyOverflows: 12,
+  maxFindings: 60,
+  maxFindingsPerRule: 12,
+  maxLegacyOverflows: 8,
   maxContrastChecks: 600
 })
 
@@ -105,6 +105,7 @@ const bridge = `<style data-responsiver-bridge-style>
   const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
   const AUDIT_MAX_NODES = ${LOCAL_RUNTIME_AUDIT_LIMITS.maxNodes};
   const AUDIT_MAX_FINDINGS = ${LOCAL_RUNTIME_AUDIT_LIMITS.maxFindings};
+  const AUDIT_MAX_RAW_FINDINGS = AUDIT_MAX_FINDINGS * 3;
   const AUDIT_MAX_FINDINGS_PER_RULE = ${LOCAL_RUNTIME_AUDIT_LIMITS.maxFindingsPerRule};
   const AUDIT_MAX_LEGACY_OVERFLOWS = ${LOCAL_RUNTIME_AUDIT_LIMITS.maxLegacyOverflows};
   const AUDIT_MAX_CONTRAST_CHECKS = ${LOCAL_RUNTIME_AUDIT_LIMITS.maxContrastChecks};
@@ -234,6 +235,10 @@ const bridge = `<style data-responsiver-bridge-style>
     const seenOverflowElements = new Set();
     const seenLegacyOverflows = new Set();
     const fixedCandidates = [];
+    const targetCandidates = [];
+    const navigationCandidates = [];
+    const collisionCandidates = [];
+    const disproportionateHeadings = new Set();
     let overflowCount = 0;
     let contrastChecks = 0;
     let truncated = sampledNodes.length > AUDIT_MAX_NODES;
@@ -254,7 +259,7 @@ const bridge = `<style data-responsiver-bridge-style>
       const key = rule + '|' + selector;
       if (seenFindings.has(key)) return false;
       const ruleCount = findingsPerRule.get(rule) || 0;
-      if (findings.length >= AUDIT_MAX_FINDINGS || ruleCount >= AUDIT_MAX_FINDINGS_PER_RULE) {
+      if (findings.length >= AUDIT_MAX_RAW_FINDINGS || ruleCount >= AUDIT_MAX_FINDINGS_PER_RULE) {
         truncated = true;
         return false;
       }
@@ -328,6 +333,60 @@ const bridge = `<style data-responsiver-bridge-style>
       return (Math.max(foregroundLuminance, backgroundLuminance) + .05) / (Math.min(foregroundLuminance, backgroundLuminance) + .05);
     };
     const targetSelector = 'a[href],button,input:not([type="hidden"]),select,textarea,summary,[role="button"],[role="link"],[tabindex]:not([tabindex="-1"])';
+    const semanticName = (element) => clean([
+      element?.id || '',
+      typeof element?.className === 'string' ? element.className : '',
+      element?.getAttribute?.('role') || ''
+    ].join(' ')).toLowerCase();
+    const intentionalViewport = (element) => /(?:carousel|slider|slideshow|marquee|ticker|scroller|viewport|track|rail)/.test(semanticName(element));
+    const insideIntentionalViewport = (element) => {
+      let current = element;
+      while (current && current !== document.documentElement) {
+        if (intentionalViewport(current)) return true;
+        current = parentElementOf(current);
+      }
+      return false;
+    };
+    const screenReaderOnly = (element, style, rect) => {
+      if (/(?:sr-only|screen-reader|visually-hidden|a11y-hidden)/.test(semanticName(element))) return true;
+      return rect.width <= 2 && rect.height <= 2 && (style.clip !== 'auto' || style.clipPath !== 'none' || style.position === 'absolute');
+    };
+    const fullyClippedByAncestor = (element, rect) => {
+      let current = parentElementOf(element);
+      while (current && current !== document.documentElement) {
+        const currentStyle = getComputedStyle(current);
+        const clipsX = /^(?:hidden|clip|auto|scroll)$/.test(currentStyle.overflowX);
+        const clipsY = /^(?:hidden|clip|auto|scroll)$/.test(currentStyle.overflowY);
+        if (clipsX || clipsY) {
+          const currentRect = current.getBoundingClientRect();
+          if (clipsX && (rect.right <= currentRect.left + 1 || rect.left >= currentRect.right - 1)) return true;
+          if (clipsY && (rect.bottom <= currentRect.top + 1 || rect.top >= currentRect.bottom - 1)) return true;
+        }
+        current = parentElementOf(current);
+      }
+      return false;
+    };
+    const overlapOf = (left, right) => {
+      const width = Math.max(0, Math.min(left.right, right.right) - Math.max(left.left, right.left));
+      const height = Math.max(0, Math.min(left.bottom, right.bottom) - Math.max(left.top, right.top));
+      return { width, height, area: width * height };
+    };
+    const paintedHorizontalRatio = (element, rect) => {
+      let left = Math.max(0, rect.left);
+      let right = Math.min(viewportWidth, rect.right);
+      let current = parentElementOf(element);
+      while (current && current !== document.documentElement) {
+        const currentStyle = getComputedStyle(current);
+        if (/^(?:hidden|clip|auto|scroll)$/.test(currentStyle.overflowX)) {
+          const currentRect = current.getBoundingClientRect();
+          left = Math.max(left, currentRect.left);
+          right = Math.min(right, currentRect.right);
+        }
+        current = parentElementOf(current);
+      }
+      return Math.max(0, right - left) / Math.max(1, rect.width);
+    };
+    const nearestTargetGroup = (element) => element.closest('nav,[role="navigation"],[role="group"],ul,ol,[class*="actions" i],[class*="controls" i],[class*="dots" i]') || parentElementOf(element) || element;
 
     for (const element of nodes) {
       const style = getComputedStyle(element);
@@ -352,15 +411,29 @@ const bridge = `<style data-responsiver-bridge-style>
       }
 
       if (!visible(style, rect)) continue;
+      const clippedFromPaint = fullyClippedByAncestor(element, rect);
+      const intersectsUsefulWidth = rect.right > 1 && rect.left < viewportWidth - 1;
+      const paintedRatio = paintedHorizontalRatio(element, rect);
+      const documentOverflows = documentWidth > viewportWidth + 1;
+      if (element.matches('nav,[role="navigation"]')) navigationCandidates.push({ element, style, rect });
+      if (!clippedFromPaint && paintedRatio >= .5 && intersectsUsefulWidth && element.matches('h1,h2,h3,h4,h5,h6,p,a[href],button,input:not([type="hidden"]),select,textarea,[role="button"]')) {
+        collisionCandidates.push({ element, style, rect });
+      }
 
       const beyondViewport = rect.right > viewportWidth + 1 || rect.left < -1;
       const scrollOverflow = element.clientWidth > 0 && element.scrollWidth > element.clientWidth + 1;
-      if (beyondViewport && style.position !== 'fixed' && style.position !== 'sticky') {
+      if (beyondViewport && !clippedFromPaint && !insideIntentionalViewport(element) && style.position !== 'fixed' && style.position !== 'sticky' && (intersectsUsefulWidth || documentOverflows)) {
         recordOverflow(element, rect);
-        addFinding('layout.viewport-overflow', element, rect, 'error', 'Élément hors du viewport',
-          'Le rendu dépasse horizontalement la largeur testée.',
-          'Remplacer les dimensions rigides par des contraintes fluides et limiter la largeur au viewport.', .94);
-      } else if (scrollOverflow && style.overflowX === 'visible' && element !== document.documentElement && element !== document.body) {
+        const visibleWidth = Math.max(0, Math.min(rect.right, viewportWidth) - Math.max(rect.left, 0));
+        const usefulRatio = visibleWidth / Math.max(1, rect.width);
+        const mostlyOutside = intersectsUsefulWidth && usefulRatio < .45;
+        addFinding(mostlyOutside ? 'layout.useful-area-overflow' : 'layout.viewport-overflow', element, rect, 'error',
+          mostlyOutside ? 'Contenu majoritairement hors de la zone utile' : 'Élément hors du viewport',
+          mostlyOutside ? 'Moins de la moitié de cet élément textuel ou interactif reste accessible dans la largeur utile.' : 'Le rendu dépasse horizontalement la largeur testée.',
+          mostlyOutside
+            ? 'Contraindre ce bloc avec max-inline-size: 100%, min-inline-size: 0 et un retour à la ligne au breakpoint concerné.'
+            : 'Remplacer les dimensions rigides par des contraintes fluides et limiter la largeur au viewport.', .94);
+      } else if (scrollOverflow && documentOverflows && !insideIntentionalViewport(element) && style.overflowX === 'visible' && element !== document.documentElement && element !== document.body) {
         recordOverflow(element, rect);
         addFinding('layout.viewport-overflow', element, rect, 'warning', 'Contenu horizontal débordant',
           'Le contenu est plus large que son conteneur sans mécanisme de défilement.',
@@ -371,7 +444,7 @@ const bridge = `<style data-responsiver-bridge-style>
       const clipsY = style.overflowY === 'hidden' || style.overflowY === 'clip';
       const clippedX = clipsX && element.clientWidth > 0 && element.scrollWidth > element.clientWidth + 1;
       const clippedY = clipsY && element.clientHeight > 0 && element.scrollHeight > element.clientHeight + 1;
-      if (clippedX || clippedY) {
+      if ((clippedX || clippedY) && !screenReaderOnly(element, style, rect) && !intentionalViewport(element)) {
         const hasText = clean(element.textContent).length > 0;
         const lineClamp = style.webkitLineClamp;
         const truncationStyle = style.textOverflow === 'ellipsis' || clippedX && style.whiteSpace === 'nowrap' || Boolean(lineClamp && lineClamp !== 'none' && lineClamp !== '0');
@@ -387,21 +460,41 @@ const bridge = `<style data-responsiver-bridge-style>
       }
 
       if (viewport.mobile && element.matches(targetSelector) && !element.hasAttribute('disabled') && element.getAttribute('aria-disabled') !== 'true' && style.pointerEvents !== 'none') {
-        if (rect.width < AUDIT_MIN_TARGET_SIZE || rect.height < AUDIT_MIN_TARGET_SIZE) {
-          addFinding('interaction.small-target', element, rect, 'warning', 'Cible tactile trop petite',
-            'La zone interactive mesure ' + round(rect.width) + ' × ' + round(rect.height) + ' px sur ce viewport mobile.',
-            'Porter la zone activable à au moins ' + AUDIT_MIN_TARGET_SIZE + ' × ' + AUDIT_MIN_TARGET_SIZE + ' CSS px, espacement compris.', .84);
+        let effectiveRect = rect;
+        const label = element.closest('label') || (element.id ? document.querySelector('label[for="' + CSS.escape(element.id) + '"]') : null);
+        if (label) {
+          const labelRect = label.getBoundingClientRect();
+          if (labelRect.width > effectiveRect.width || labelRect.height > effectiveRect.height) effectiveRect = labelRect;
         }
+        targetCandidates.push({ element, style, rect: effectiveRect, group: nearestTargetGroup(element) });
       }
 
       if ((style.position === 'fixed' || style.position === 'sticky') && style.pointerEvents !== 'none') fixedCandidates.push({ element, style, rect });
 
       if (hasOwnText(element)) {
+        const ownTextLength = [...element.childNodes]
+          .filter((node) => node.nodeType === Node.TEXT_NODE)
+          .reduce((total, node) => total + clean(node.nodeValue).length, 0);
+        const fontSize = Number.parseFloat(style.fontSize) || 16;
+        const lineHeight = style.lineHeight === 'normal' ? fontSize * 1.2 : Number.parseFloat(style.lineHeight) || fontSize * 1.2;
+        const visualLineRatio = rect.height / Math.max(1, lineHeight);
+        const heading = element.closest('h1,h2,h3,h4,h5,h6');
+        const compactTypography = viewportWidth <= 1100;
+        const overlyWideDisplay = compactTypography && fontSize >= 32 && ownTextLength >= 8 && rect.width >= viewportWidth * (viewport.mobile ? .88 : .72) && visualLineRatio > 1.65;
+        const extremeScale = compactTypography && fontSize > Math.max(viewport.mobile ? 72 : 84, viewportWidth * (viewport.mobile ? .22 : .16)) && ownTextLength >= 10;
+        if ((overlyWideDisplay || extremeScale) && heading && !disproportionateHeadings.has(heading)) {
+          disproportionateHeadings.add(heading);
+          addFinding('typography.disproportionate', heading, heading.getBoundingClientRect(), 'warning', 'Échelle typographique disproportionnée',
+            'Le titre occupe une part dominante de la largeur et ses métriques de ligne gonflent fortement sa hauteur utile.',
+            'Borner le titre avec font-size: clamp(...) et une line-height cohérente, puis contrôler la police réellement chargée.', extremeScale ? .9 : .82);
+        }
         if (contrastChecks >= AUDIT_MAX_CONTRAST_CHECKS) {
           truncated = true;
         } else {
           contrastChecks += 1;
-          const foreground = parseOpaqueRgb(style.color);
+          const ownText = [...element.childNodes].filter((node) => node.nodeType === Node.TEXT_NODE).map((node) => clean(node.nodeValue)).join(' ').trim();
+          const decorativeBrandText = /^[★☆✦✧•·\s]+$/.test(ownText) || ownText.length <= 1 && /(?:avatar|brand|logo|mark|rating)/.test(semanticName(element) + ' ' + semanticName(parentElementOf(element)));
+          const foreground = clippedFromPaint || paintedRatio < .5 || !intersectsUsefulWidth || decorativeBrandText ? null : parseOpaqueRgb(style.color);
           const background = backgroundOf(element);
           if (foreground && background) {
             const ratio = contrastRatio(foreground, background);
@@ -416,6 +509,97 @@ const bridge = `<style data-responsiver-bridge-style>
             }
           }
         }
+      }
+    }
+
+    if (viewport.mobile) {
+      const smallTargets = targetCandidates.filter((candidate) => Math.min(candidate.rect.width, candidate.rect.height) < 24 && !fullyClippedByAncestor(candidate.element, candidate.rect));
+      const crowded = smallTargets.filter((candidate) => smallTargets.some((other) => {
+        if (candidate === other || candidate.group !== other.group) return false;
+        const leftX = candidate.rect.left + candidate.rect.width / 2;
+        const leftY = candidate.rect.top + candidate.rect.height / 2;
+        const rightX = other.rect.left + other.rect.width / 2;
+        const rightY = other.rect.top + other.rect.height / 2;
+        return Math.hypot(leftX - rightX, leftY - rightY) < 24;
+      }));
+      const byGroup = new Map();
+      for (const candidate of crowded) {
+        const group = byGroup.get(candidate.group) || [];
+        group.push(candidate);
+        byGroup.set(candidate.group, group);
+      }
+      for (const [groupElement, candidates] of byGroup) {
+        if (candidates.length < 2) continue;
+        const groupRect = groupElement.getBoundingClientRect();
+        const minimum = Math.min(...candidates.map((candidate) => Math.min(candidate.rect.width, candidate.rect.height)));
+        const denseGroup = candidates.length >= 6 && groupRect.height < 96;
+        addFinding(denseGroup ? 'layout.density-hierarchy' : 'interaction.small-target', groupElement, groupRect, 'warning',
+          denseGroup ? 'Groupe de commandes visuellement trop dense' : 'Groupe de cibles tactiles trop serré',
+          denseGroup
+            ? candidates.length + ' commandes compactes sont concentrées sans hiérarchie ou espacement suffisant.'
+            : candidates.length + ' cibles ont une dimension minimale de ' + round(minimum) + ' px et sont assez proches pour rendre leur activation ambiguë.',
+          denseGroup
+            ? 'Réduire les commandes simultanées ou augmenter gap et padding dans ce groupe.'
+            : 'Porter les zones activables à 24 CSS px minimum ou assurer 24 px entre leurs centres.', denseGroup ? .84 : .9);
+      }
+    }
+
+    for (const candidate of navigationCandidates) {
+      if (candidate.element.closest('footer') || /(?:legal|footer|breadcrumb|pagination)/.test(semanticName(candidate.element))) continue;
+      const items = [...candidate.element.querySelectorAll(targetSelector)].map((item) => {
+        const itemStyle = getComputedStyle(item);
+        const itemRect = item.getBoundingClientRect();
+        return { item, style: itemStyle, rect: itemRect };
+      }).filter(({ item, style, rect }) => visible(style, rect) && !fullyClippedByAncestor(item, rect));
+      if (items.length < 3) continue;
+      const rows = [];
+      for (const item of items.sort((left, right) => left.rect.top - right.rect.top || left.rect.left - right.rect.left)) {
+        let row = rows.find((candidateRow) => Math.abs(candidateRow.top - item.rect.top) <= 5);
+        if (!row) { row = { top: item.rect.top, items: [] }; rows.push(row); }
+        row.items.push(item);
+      }
+      const rowWidths = rows.map((row) => Math.max(...row.items.map((item) => item.rect.right)) - Math.min(...row.items.map((item) => item.rect.left)));
+      const firstWidth = rowWidths[0] || 1;
+      const lastWidth = rowWidths[rowWidths.length - 1] || firstWidth;
+      const minimumFont = Math.min(...items.map((item) => Number.parseFloat(item.style.fontSize) || 16));
+      const hasOverlap = items.some((item, index) => items.slice(index + 1).some((other) => {
+        const overlap = overlapOf(item.rect, other.rect);
+        return overlap.width > 4 && overlap.height > 4;
+      }));
+      const overflowAmount = Math.max(0, -candidate.rect.left, candidate.rect.right - viewportWidth, candidate.rect.width - viewportWidth);
+      const extendsViewport = overflowAmount > 4 && !/^(?:auto|scroll)$/.test(candidate.style.overflowX);
+      const awkwardWrap = viewport.mobile && rows.length > 1 && items.length >= 5 && lastWidth / firstWidth < .62;
+      const unreadable = minimumFont < 12;
+      if (!hasOverlap && !unreadable && !extendsViewport && rows.length < 3 && !awkwardWrap) continue;
+      addFinding('layout.navigation-wrap', candidate.element, candidate.rect, hasOverlap ? 'error' : 'warning', 'Navigation déséquilibrée à cette largeur',
+        hasOverlap
+          ? 'Des commandes de navigation se chevauchent.'
+          : extendsViewport
+            ? 'Le bloc de navigation dépasse la largeur visible de ' + round(overflowAmount) + ' CSS px et repousse ou masque une partie de l’interface.'
+          : unreadable
+            ? 'La navigation réduit son texte sous 12 CSS px pour tenir dans la largeur.'
+            : awkwardWrap
+              ? 'Le retour à la ligne laisse une dernière rangée nettement plus courte et casse la hiérarchie du menu.'
+              : 'La navigation se répartit sur au moins trois rangées et occupe une hauteur disproportionnée.',
+        'À ce breakpoint, préférer une navigation repliable ou équilibrer explicitement flex-wrap, gap et les zones tactiles.', hasOverlap || unreadable ? .92 : .8);
+    }
+
+    const collisionParents = new Set();
+    for (let index = 0; index < collisionCandidates.length; index += 1) {
+      const left = collisionCandidates[index];
+      const parent = parentElementOf(left.element);
+      if (!parent || collisionParents.has(parent) || intentionalViewport(parent) || /(?:hero|overlay|modal|dialog|badge)/.test(semanticName(parent))) continue;
+      for (let otherIndex = index + 1; otherIndex < Math.min(collisionCandidates.length, index + 40); otherIndex += 1) {
+        const right = collisionCandidates[otherIndex];
+        if (parentElementOf(right.element) !== parent) continue;
+        const overlap = overlapOf(left.rect, right.rect);
+        const smallerArea = Math.max(1, Math.min(left.rect.width * left.rect.height, right.rect.width * right.rect.height));
+        if (overlap.width <= 6 || overlap.height <= 6 || overlap.area / smallerArea < .16) continue;
+        collisionParents.add(parent);
+        addFinding('layout.element-overlap', parent, parent.getBoundingClientRect(), 'error', 'Éléments de contenu qui se chevauchent',
+          'Deux éléments textuels ou interactifs frères recouvrent ' + round(overlap.area / smallerArea * 100) + ' % du plus petit élément.',
+          'Rétablir le flux, le gap ou la grille du conteneur avant de modifier les z-index.', .9);
+        break;
       }
     }
 
@@ -439,6 +623,22 @@ const bridge = `<style data-responsiver-bridge-style>
           'Cet élément fixe ou collant couvre environ ' + Math.round(areaRatio * 100) + ' % du viewport visible.',
           'Réduire son emprise, le rendre repliable ou réserver explicitement l’espace qu’il occupe.', coversCenter || horizontalBand ? .84 : .74);
       }
+    }
+
+    const rulePriority = {
+      'layout.element-overlap': 100,
+      'layout.useful-area-overflow': 95,
+      'layout.viewport-overflow': 90,
+      'layout.navigation-wrap': 85,
+      'typography.disproportionate': 80,
+      'layout.density-hierarchy': 75,
+      'interaction.small-target': 70
+    };
+    findings.sort((left, right) => (right.severity === 'error' ? 2 : 1) - (left.severity === 'error' ? 2 : 1) ||
+      (rulePriority[right.rule] || 0) - (rulePriority[left.rule] || 0) || right.confidence - left.confidence);
+    if (findings.length > AUDIT_MAX_FINDINGS) {
+      findings.length = AUDIT_MAX_FINDINGS;
+      truncated = true;
     }
 
     const audit = {

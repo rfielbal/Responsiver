@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron'
-import type { ExportResult, LocalAiRequest, LocalAiResponse, LocalAiStatus, ProjectPreparationProgress, ProjectSnapshot, RecentProjectSummary, RemoteAuditResult, RemoteFocusResult, RemoteOpenRequest, RemotePageState, RemoteViewBounds, RemoteViewport, StagingRequest, StagingSnapshot, WorkspaceApplyResult, WorkspaceDiff, WorkspaceFileSnapshot, WorkspaceFileSummary, WorkspaceSnapshot } from '../shared/contracts'
+import type { ExportResult, LocalAiRequest, LocalAiResponse, LocalAiStatus, ProjectPreparationProgress, ProjectSnapshot, RecentProjectSummary, RemoteAuditResult, RemoteFocusResult, RemoteOpenRequest, RemotePageState, RemoteSourceAssociationRequest, RemoteViewBounds, RemoteViewport, StagingRequest, StagingSnapshot, WorkspaceApplyResult, WorkspaceDiff, WorkspaceFileSnapshot, WorkspaceFileSummary, WorkspaceSnapshot } from '../shared/contracts'
 
 function reportRuleIds(projectOrRuleIds?: ProjectSnapshot | string[], acceptedRuleIds?: string[]): string[] {
   return Array.isArray(projectOrRuleIds) ? projectOrRuleIds : acceptedRuleIds ?? []
@@ -21,6 +21,7 @@ if (process.isMainFrame) {
       return () => ipcRenderer.removeListener('project:preparation', handler)
     },
     openRemoteUrl: (request: RemoteOpenRequest): Promise<ProjectSnapshot> => ipcRenderer.invoke('remote:open', request),
+    associateRemoteRoot: (request: RemoteSourceAssociationRequest): Promise<ProjectSnapshot> => ipcRenderer.invoke('remote:associate-root', request),
     setRemoteBounds: (bounds: RemoteViewBounds): Promise<void> => ipcRenderer.invoke('remote:set-bounds', bounds),
     navigateRemote: (action: 'back' | 'forward' | 'reload' | 'url', value?: string): Promise<RemotePageState> => ipcRenderer.invoke('remote:navigate', action, value),
     getRemoteState: (): Promise<RemotePageState> => ipcRenderer.invoke('remote:state'),

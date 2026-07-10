@@ -12,6 +12,7 @@ import {
 import {
   REMOTE_AUDIT_BOOTSTRAP_SCRIPT,
   buildRemoteAuditScript,
+  consolidateRemoteAuditFindings,
   sanitizeRemoteAuditResult
 } from '../src/main/remote-audit.ts'
 
@@ -99,6 +100,11 @@ test('le script d’audit est borné et contient les détecteurs attendus', () =
     'layout.viewport-overflow',
     'layout.clipped-content',
     'layout.truncated-text',
+    'layout.navigation-wrap',
+    'layout.element-overlap',
+    'layout.density-hierarchy',
+    'layout.useful-area-overflow',
+    'typography.disproportionate',
     'typography.mobile-readability',
     'interaction.small-target',
     'layout.fixed-obstruction',
@@ -108,11 +114,30 @@ test('le script d’audit est borné et contient les détecteurs attendus', () =
     'runtime.page-error'
   ]) assert.match(script, new RegExp(rule.replace('.', '\\.')))
 
-  const mobileScript = buildRemoteAuditScript({ mobile: true, expectedViewportWidth: 390 })
+  const mobileScript = buildRemoteAuditScript({ mobile: true, touch: true, expectedViewportWidth: 390 })
   assert.match(mobileScript, /"mobile":true/)
+  assert.match(mobileScript, /"touch":true/)
   assert.match(mobileScript, /"expectedViewportWidth":390/)
   assert.match(mobileScript, /meta\[name="viewport" i\]/)
   assert.match(mobileScript, /fontSize < 12/)
+})
+
+test('les doublons multi-viewport gardent une seule preuve, la plus sévère', () => {
+  const first = sanitizeRemoteAuditResult({ findings: [{
+    rule: 'layout.viewport-overflow', title: 'Débordement', description: 'Petit', selector: '#hero',
+    rect: { x: 0, y: 0, width: 410, height: 100 }, style: {},
+    evidence: [{ kind: 'geometry', summary: 'Dépassement', observed: 20, expected: 0 }], confidence: .8
+  }] }, { url: 'https://example.com/page', viewport: { width: 390, height: 844 } })
+  const second = sanitizeRemoteAuditResult({ findings: [{
+    rule: 'layout.viewport-overflow', title: 'Débordement', description: 'Fort', selector: '#hero',
+    rect: { x: -40, y: 0, width: 460, height: 100 }, style: {},
+    evidence: [{ kind: 'geometry', summary: 'Dépassement', observed: 100, expected: 0 }], confidence: .94
+  }] }, { url: 'https://example.com/page', viewport: { width: 320, height: 720 } })
+
+  const grouped = consolidateRemoteAuditFindings([...first.findings, ...second.findings])
+  assert.equal(grouped.length, 1)
+  assert.equal(grouped[0]?.finding.description, 'Fort')
+  assert.deepEqual(grouped[0]?.viewports.map(({ width, height }) => [width, height]), [[320, 720], [390, 844]])
 })
 
 test('les constats mobile conservent preuves et niveau heuristique après assainissement', () => {
