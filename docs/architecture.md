@@ -1,11 +1,12 @@
-# Architecture de Responsiver 0.3
+# Architecture de Responsiver 0.4
 
 ```text
 Renderer React de confiance
   ├── projets / laboratoire / révision / export
-  ├── choix appareils et routes
-  └── iframe cross-origin sandboxée
-              │ messages navigation, thème et audit
+  ├── appareils, dimensions, redimensionnement et plein écran
+  ├── décision explicite : aperçu / accepter / écarter
+  └── iframes cross-origin sandboxées
+              │ messages navigation, thème, audit et ciblage
 Preload contextBridge typé
               │ IPC validé depuis la frame principale uniquement
 Electron main — ProjectSession
@@ -13,7 +14,8 @@ Electron main — ProjectSession
   ├── serveur source 127.0.0.1:port-aléatoire
   ├── transformeur déterministe
   │     └── Map<chemin, contenu> d’overlays
-  ├── serveur staging 127.0.0.1:autre-port
+  ├── serveur de proposition éphémère 127.0.0.1:port-aléatoire
+  ├── serveur de staging validé 127.0.0.1:autre-port
   └── exports explicites + contrôle des hashes
               │
         Projet source en lecture seule
@@ -21,7 +23,7 @@ Electron main — ProjectSession
 
 ## Session projet
 
-Le processus principal possède l’unique `ProjectSession` active : racine réelle, snapshot d’analyse, serveur source, staging et serveur corrigé. Ouvrir un autre projet ferme les deux serveurs précédents et efface leur stockage Chromium.
+Le processus principal possède l’unique `ProjectSession` active : racine réelle, snapshot d’analyse, serveur source, éventuel serveur de proposition et éventuel staging validé. Ouvrir un autre projet ferme les trois origines précédentes, lorsqu’elles existent, et libère leur état de preview éphémère.
 
 Une sélection peut être un dossier ou un fichier `.html/.htm`. Dans le second cas, son dossier devient la racine et le fichier choisi reste l’entrée prioritaire. Sans sélection explicite, l’analyseur privilégie `/index.html` à la racine et pénalise les chemins de démo, test, documentation ou Storybook.
 
@@ -29,7 +31,9 @@ Une sélection peut être un dossier ou un fichier `.html/.htm`. Dans le second 
 
 Chaque document HTML conserve son titre, sa route et ses feuilles CSS réellement liées, y compris leurs `@import` locaux. Les styles d’une démo n’alimentent donc plus les constats de la page principale. L’inspecteur affiche par défaut la page active et permet de basculer vers tout le projet.
 
-Les IDs des constats sont des empreintes stables de la règle, de la route et de la source. Les règles automatiques actuelles couvrent :
+Les IDs des constats sont des empreintes stables de la règle, de la route et de la source. Un constat peut aussi porter le sélecteur CSS de l’élément concerné. Lorsqu’il est ouvert dans le laboratoire, Responsiver active d’abord sa route, puis demande au bridge de chercher ce sélecteur, de centrer l’élément et de le mettre temporairement en évidence. Les pseudo-éléments et pseudo-classes dynamiques sont retirés pour obtenir un sélecteur interrogeable ; si aucun élément ne correspond, la route reste ouverte sans prétendre avoir trouvé la cible.
+
+Les règles automatiques actuelles couvrent :
 
 - absence de balise viewport ;
 - `min-width` rigide sur petit écran ;
@@ -48,13 +52,25 @@ Le HTML est transformé uniquement en mémoire pour injecter, avant les scripts 
 - navigation interne, historique et rechargement ;
 - redirection des `window.open()` internes dans l’iframe ;
 - observation du thème après mutations du DOM ;
-- mesure du `scrollWidth` et des éléments qui sortent du viewport.
+- mesure du `scrollWidth` et des éléments qui sortent du viewport ;
+- ciblage route + sélecteur et suppression de la mise en évidence précédente.
 
 Le renderer ne peut lire le DOM de l’iframe, car l’origine loopback est distincte. Le projet ne peut pas accéder au preload ou à IPC.
 
-## Staging non destructif
+Les dimensions de viewport restent des dimensions CSS réelles, même lorsque l’interface réduit visuellement l’iframe pour la faire tenir dans l’atelier. Les modèles d’appareils et les champs numériques peuvent être complétés par une manipulation directe des bords ou des angles ; le renderer convertit ce geste en largeur et hauteur personnalisées. Le plein écran agrandit la scène de travail sans ouvrir une origine différente et sans changer la route, le thème candidat ou la version observée.
 
-Le transformeur reçoit les IDs retenus, le thème cible et les instructions locales reconnues. Il produit :
+## Proposition éphémère, décision et staging
+
+Le cycle sépare volontairement quatre actions :
+
+1. **Analyser** produit des constats sans modifier le projet.
+2. **Prévisualiser** construit des overlays temporaires et démarre une origine de proposition. La source et la proposition sont alors affichables côte à côte sur la même route, la même taille et, si possible, le même sélecteur.
+3. **Accepter ou écarter** met à jour la sélection de décisions du renderer. Une simple consultation, un changement de thème dans le sélecteur ou l’ouverture d’un constat ne vaut jamais acceptation.
+4. **Construire le staging** matérialise uniquement les constats acceptés, le thème validé et les instructions locales retenues. Ce staging devient la seule base de révision et d’export.
+
+Une proposition éphémère remplace la proposition précédente et son serveur est fermé lorsqu’elle est effacée, remplacée, transformée en staging ou lorsque la session projet se termine. Elle n’est pas enregistrée dans le projet et ne peut pas être exportée directement.
+
+Pour une proposition comme pour le staging, le transformeur reçoit les IDs concernés, le thème cible et les instructions locales reconnues. Il produit :
 
 - des fichiers modifiés en mémoire ;
 - une feuille `.responsiver/responsiver.generated.css` si nécessaire ;
@@ -62,13 +78,17 @@ Le transformeur reçoit les IDs retenus, le thème cible et les instructions loc
 - la liste des changements et leur confiance ;
 - les empreintes SHA-256 des sources concernées.
 
-Le serveur staging lit d’abord les overlays, puis retombe sur le dossier source pour les autres assets. Source et staging ont des ports distincts et peuvent être comparés simultanément. Le thème et les instructions sont reliés par des chemins relatifs pour rester valides après export ; les pages principales reçoivent la variante, les démos indépendantes restent isolées.
+Les serveurs de proposition et de staging lisent d’abord leurs overlays, puis retombent sur le dossier source pour les autres assets. Source, proposition et staging ont des ports distincts et peuvent être comparés sans ambiguïté. Le thème et les instructions sont reliés par des chemins relatifs pour rester valides après export ; les pages principales reçoivent la variante, les démos indépendantes restent isolées.
 
 Avant tout export, les hashes sont recalculés. Un changement concurrent du projet invalide le staging. Les fichiers peuvent être livrés seuls, dans une copie complète, ou sous forme de patch ; l’original n’est jamais modifié.
 
 ## Thèmes et conversation locale
 
-Le profil de thème combine `color-scheme`, media queries, sélecteurs de thème, surfaces et variables CSS. La variante proposée est toujours complémentaire. Les variables sont classées par rôle — fond, surface, texte, contenu atténué, bordure, accent — puis une palette déterministe vérifie les contrastes connus. Il n’existe aucune inversion globale des couleurs.
+Le profil de thème combine `color-scheme`, media queries, sélecteurs de thème, surfaces et variables CSS. Une variante déjà présente n’est pas proposée comme une correction identique : un site sombre reçoit une candidate claire, un site clair une candidate sombre, et un site réellement double ne reçoit pas de doublon. Les variables sont classées par rôle — fond, surface, texte, contenu atténué, bordure, accent — puis une palette déterministe vérifie les contrastes connus. Il n’existe aucune inversion globale des couleurs.
+
+Choisir **Clair** ou **Sombre** dans le laboratoire met immédiatement la preview à jour. Si la variante manque, Responsiver reconstruit une proposition non validée ; l’utilisateur doit ensuite la valider ou l’écarter. Si elle existe déjà, le bridge active ses conventions natives courantes — attributs de thème, classes et règles `prefers-color-scheme` locales — uniquement pour l’aperçu, sans créer de changement artificiel à valider. Le thème généré et validé est séparé du thème actuellement observé et lui seul rejoint le staging final.
+
+Chaque transition Source → Proposition → Staging recrée l’iframe lorsque son origine change. Electron n’autorise son chargement initial que si la destination loopback appartient à la liste éphémère des serveurs de preview connus ; une fois le projet chargé, toute navigation initiée depuis `127.0.0.1` reste cantonnée à sa propre origine. Cette règle continue de protéger un document pendant les quelques millisecondes où son ancien serveur est déjà fermé. Le nettoyage d’une proposition transporte en outre son origine attendue, afin qu’une requête tardive ne puisse jamais fermer le serveur qui l’a remplacée.
 
 La conversation n’est pas un modèle de langage. Un parseur local reconnaît uniquement des intentions explicites : thème clair/sombre, couleur d’accent, densité, arrondis, taille typographique et retour à la ligne de navigation. Une demande inconnue est conservée et refusée honnêtement au lieu de générer du code arbitraire.
 
@@ -78,7 +98,7 @@ La conversation n’est pas un modèle de langage. Un parseur local reconnaît u
 - IPC disponible uniquement depuis la frame principale du renderer.
 - permissions navigateur refusées et nouvelles fenêtres interdites.
 - CSP distinctes pour l’application et la preview.
-- sorties réseau de preview limitées à sa propre origine et à Google Fonts HTTPS.
+- sorties réseau de chaque preview limitées à sa propre origine et à Google Fonts HTTPS.
 - stockage preview supprimé à la fermeture du serveur.
 - exports protégés contre traversée, symlink et destination interne au projet source.
 
@@ -86,4 +106,4 @@ Le JavaScript local du projet s’exécute pour préserver les interactions. Res
 
 ## Projets nécessitant un build
 
-La version 0.3 ne lance aucune commande provenant du projet. Cette décision évite l’exécution silencieuse de scripts arbitraires. Les frameworks compilés doivent fournir leur sortie statique (`dist`, `out`, `build`) ou un fichier HTML généré. Un futur runner de build devra être opt-in, afficher la commande exacte, limiter ses droits et obtenir un consentement explicite.
+La version 0.4 ne lance aucune commande provenant du projet. Cette décision évite l’exécution silencieuse de scripts arbitraires. Les frameworks compilés doivent fournir leur sortie statique (`dist`, `out`, `build`) ou un fichier HTML généré. Un futur runner de build devra être opt-in, afficher la commande exacte, limiter ses droits et obtenir un consentement explicite.

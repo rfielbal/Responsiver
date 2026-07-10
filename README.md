@@ -2,19 +2,22 @@
 
 Responsiver est un laboratoire desktop open source pour auditer, corriger et valider la responsivité d’un projet web sans envoyer son code vers un service distant.
 
-La version 0.3 ouvre un dossier ou un fichier HTML, sert le site sur une origine locale isolée, permet de naviguer réellement entre ses pages, mesure les débordements, prépare des corrections déterministes dans un staging en mémoire, puis exporte un patch ou une copie corrigée. Le dossier source n’est jamais réécrit.
+La version 0.4 ouvre un dossier ou un fichier HTML, sert le site sur des origines locales isolées, permet de naviguer réellement entre ses pages et mesure les débordements. Chaque correction peut être examinée dans une proposition éphémère, comparée à la source à l’endroit précis du constat, puis acceptée ou écartée. Seules les décisions validées alimentent le staging exportable ; le dossier source n’est jamais réécrit.
 
 ## Fonctionnalités
 
 - Ouverture par dossier, fichier HTML, chemin local ou glisser-déposer.
 - Détection prioritaire de la vraie entrée du site ; les dossiers `demo`, `examples` et assimilés ne prennent pas sa place.
 - Navigation fonctionnelle entre les pages, ancres et fenêtres internes du projet.
-- Aperçu smartphone, tablette et ordinateur avec modèles connus, dimensions libres et rotation.
-- Mode **Comparer** sur trois familles d’appareils.
+- Aperçu smartphone, tablette et ordinateur avec modèles connus, dimensions libres, rotation et redimensionnement direct par les bords ou les angles.
+- Plein écran pour inspecter le site sans perdre la route, la taille ou la version affichée.
+- Mode **Comparer** sur trois familles d’appareils, distinct de la comparaison **Avant / Après** d’un correctif.
 - Analyse HTML/CSS par route : viewport, largeurs fixes, `min-width`, `nowrap`, ressources distantes et vérification visuelle.
 - Audit runtime des éléments qui débordent réellement du viewport.
-- Staging source/corrigé non destructif et patch unifié lisible.
-- Génération du thème complémentaire : clair pour un site sombre, sombre pour un site clair, sans doublon si les deux existent.
+- Ouverture d’un constat sur sa route et, lorsqu’il existe, sur son sélecteur DOM mis en évidence dans la preview.
+- Comparaison contextualisée **Avant / Après** sur deux origines locales avant toute acceptation du correctif.
+- Proposition éphémère non exportable, sélection explicitement acceptée, puis staging final non destructif avec patch unifié lisible.
+- Prévisualisation immédiate d’un thème clair ou sombre : une variante absente devient une proposition à valider ou écarter, tandis qu’une variante native existante est activée sans générer de doublon.
 - Ajustements locaux sans IA pour la couleur, les espacements, les arrondis, l’échelle du texte et la navigation.
 - Export du patch, des seuls fichiers modifiés, d’une copie complète corrigée ou d’un rapport JSON portable.
 - Démo multi-page et interactive utilisant exactement le même runner que les projets importés.
@@ -52,7 +55,7 @@ npm run build
 npm audit
 ```
 
-Le test E2E lance Electron et couvre la démo, la navigation, le staging, le thème complémentaire, la conversation locale, la comparaison et l’export. `npm run test:e2e:packaged` exécute le même parcours sur l’application macOS déjà empaquetée.
+Le test E2E lance Electron et couvre la démo, la navigation, la proposition avant validation, le ciblage d’un constat, le thème complémentaire, le redimensionnement, le plein écran, le staging final, la comparaison et l’export. `npm run test:e2e:packaged` exécute le même parcours sur l’application macOS déjà empaquetée.
 
 Un projet réel peut être vérifié sans coder un scénario dédié :
 
@@ -72,9 +75,11 @@ Les paquets publics sont volontairement **non signés** tant qu’aucun certific
 
 ## Principes de correction
 
-Chaque proposition indique sa règle, sa route, son fichier, sa ligne et son niveau de confiance. Les transformations sont appliquées dans une carte d’overlays en mémoire. Les fichiers sources sont re-hachés avant export : si l’un d’eux a changé entre-temps, Responsiver refuse l’export et demande de reconstruire le staging.
+Chaque proposition indique sa règle, sa route, son fichier, sa ligne et son niveau de confiance. Cliquer sur un constat ouvre sa route, cible son sélecteur lorsque celui-ci est disponible et construit une comparaison Source / Proposition limitée aux choix en cours. Cette proposition est temporaire : la consulter ne la retient pas, et la refuser ne produit aucun changement persistant.
 
-Les corrections heuristiques restent à relire. Responsiver ne prétend pas qu’une largeur fixe ou un `nowrap` est toujours une erreur ; l’aperçu source/staging et le patch existent précisément pour garder la décision humaine.
+Les transformations acceptées et le thème explicitement validé sont ensuite appliqués dans une carte d’overlays en mémoire pour construire le staging final. Les fichiers sources sont re-hachés avant export : si l’un d’eux a changé entre-temps, Responsiver refuse l’export et demande de reconstruire le staging.
+
+Les corrections heuristiques restent à relire. Responsiver ne prétend pas qu’une largeur fixe ou un `nowrap` est toujours une erreur ; l’avant/après contextualisé, la validation explicite, l’aperçu source/staging et le patch existent précisément pour garder la décision humaine.
 
 ## Open source et obligations
 
