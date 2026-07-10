@@ -1,16 +1,19 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, session as electronSession, type IpcMainInvokeEvent } from 'electron'
 import { createHash } from 'node:crypto'
-import { constants as fsConstants } from 'node:fs'
-import { access, cp, lstat, mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
-import { dirname, extname, join, normalize, relative, resolve, sep } from 'node:path'
+import { cp, lstat, mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
+import { dirname, extname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import type { ExportResult, ProjectSnapshot, StagingRequest, StagingSnapshot } from '../shared/contracts'
+import type { ExportResult, ProjectPreparationProgress, ProjectSnapshot, RecentProjectSummary, StagingRequest, StagingSnapshot } from '../shared/contracts'
 import { analyzeProject, createDemoProject } from './project-analyzer'
 import { startProjectServer, type ProjectServer } from './project-server'
 import { buildProjectStaging, type ProjectStaging } from './project-transformer'
+import { createRecentProjectsStore, recentProjectId, type RecentProjectsStore } from './recent-projects'
+import { assertPrivateExportDirectory, reservePrivateExportDirectory } from './secure-export'
 
 interface ActiveProjectSession {
   root: string
+  selectionPath: string | null
+  recentId: string | null
   project: ProjectSnapshot
   sourceServer: ProjectServer | null
   proposalServer: ProjectServer | null
@@ -20,20 +23,39 @@ interface ActiveProjectSession {
 
 interface NormalizedProjectSelection {
   root: string
+  selectionPath: string
   preferredEntryPath: string | null
 }
 
 let mainWindow: BrowserWindow | undefined
 let activeSession: ActiveProjectSession | null = null
+let recentProjectsStore: RecentProjectsStore | null = null
 let sessionQueue: Promise<void> = Promise.resolve()
 const knownPreviewOrigins = new Set<string>()
 const maxClipboardLength = 10 * 1024 * 1024
 const ignoredCopyDirectories = new Set(['.git', 'node_modules'])
 
+const userDataOverride = process.env.RESPONSIVER_USER_DATA_DIR
+if (userDataOverride && userDataOverride.length <= 4_096 && !userDataOverride.includes('\0') && isAbsolute(userDataOverride)) {
+  app.setPath('userData', resolve(userDataOverride))
+}
+
 function queueSessionOperation<T>(operation: () => Promise<T>): Promise<T> {
   const result = sessionQueue.then(operation, operation)
   sessionQueue = result.then(() => undefined, () => undefined)
   return result
+}
+
+function notifyProjectPreparation(progress: ProjectPreparationProgress): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  mainWindow.webContents.send('project:preparation', progress)
+}
+
+function recentStore(): RecentProjectsStore {
+  if (!recentProjectsStore) {
+    recentProjectsStore = createRecentProjectsStore(join(app.getPath('userData'), 'recent-projects.v1.json'))
+  }
+  return recentProjectsStore
 }
 
 function originOf(value: string): string | null {
@@ -109,25 +131,52 @@ async function normalizeProjectSelection(value: unknown): Promise<NormalizedProj
   const selected = await realpath(value.trim()).catch(() => null)
   const selectedStat = selected ? await stat(selected).catch(() => null) : null
   if (!selected || !selectedStat) throw new Error('Choisissez un fichier ou un dossier local existant.')
-  if (selectedStat.isDirectory()) return { root: selected, preferredEntryPath: null }
+  if (selectedStat.isDirectory()) return { root: selected, selectionPath: selected, preferredEntryPath: null }
   if (!selectedStat.isFile() || !['.html', '.htm'].includes(extname(selected).toLowerCase())) {
     throw new Error('Responsiver accepte un dossier de projet ou un fichier HTML comme point d’entrée.')
   }
   const root = await realpath(dirname(selected))
-  return { root, preferredEntryPath: relativeWebPath(root, selected) }
+  return { root, selectionPath: selected, preferredEntryPath: relativeWebPath(root, selected) }
+}
+
+async function prepareLocalProject(value: unknown): Promise<ProjectSnapshot> {
+  notifyProjectPreparation({
+    phase: 'selection',
+    step: 1,
+    total: 6,
+    label: 'Validation du projet',
+    detail: 'Responsiver vérifie le chemin local et les droits de lecture.'
+  })
+  return openLocalProject(await normalizeProjectSelection(value))
 }
 
 async function createLocalSession(selection: NormalizedProjectSelection): Promise<ActiveProjectSession> {
-  const analyzed = await analyzeProject(selection.root)
-  const project: ProjectSnapshot = selection.preferredEntryPath
-    ? { ...analyzed, entryPath: selection.preferredEntryPath }
-    : analyzed
-  const sourceServer = project.entryPath
-    ? await startProjectServer(selection.root, { mode: 'source' })
+  const project = await analyzeProject(selection.root, {
+    preferredEntryPath: selection.preferredEntryPath,
+    onProgress: (progress) => {
+      if (progress.phase === 'ready' || progress.phase === 'blocked') return
+      notifyProjectPreparation(progress)
+    }
+  })
+  notifyProjectPreparation({
+    phase: 'preview',
+    step: 5,
+    total: 6,
+    label: project.capabilities.interactive ? 'Démarrage du runner local' : 'Diagnostic du rendu finalisé',
+    detail: project.capabilities.interactive
+      ? project.previewBasePath
+        ? `L’artefact ${project.previewBasePath} est monté sans exécuter sa chaîne de build.`
+        : 'Responsiver prépare une origine locale isolée pour la prévisualisation.'
+      : project.previewReadiness.summary
+  })
+  const sourceServer = project.entryPath && (project.previewReadiness.status === 'ready' || project.previewReadiness.status === 'degraded')
+    ? await startProjectServer(selection.root, { mode: 'source', previewBasePath: project.previewBasePath ?? undefined })
     : null
   if (sourceServer) knownPreviewOrigins.add(sourceServer.origin)
   return {
     root: selection.root,
+    selectionPath: selection.selectionPath,
+    recentId: null,
     project: { ...project, previewOrigin: sourceServer?.origin ?? null },
     sourceServer,
     proposalServer: null,
@@ -136,13 +185,29 @@ async function createLocalSession(selection: NormalizedProjectSelection): Promis
   }
 }
 
-async function openLocalProject(selection: NormalizedProjectSelection): Promise<ProjectSnapshot> {
+async function openLocalProject(selection: NormalizedProjectSelection, remember = true): Promise<ProjectSnapshot> {
   const next = await createLocalSession(selection)
   if (!mainWindow) {
     await disposeSession(next)
     throw new Error('La fenêtre Responsiver a été fermée pendant l’ouverture du projet.')
   }
+  next.recentId = remember ? recentProjectId(next.project.root, next.project.entryPath) : null
   await replaceActiveSession(next)
+  if (remember) {
+    await recentStore().upsert(selection.selectionPath, next.project).catch((error) => {
+      console.warn('Historique local indisponible :', error instanceof Error ? error.message : 'erreur inconnue')
+    })
+  }
+  const blocked = next.project.previewReadiness.status === 'blocked' || next.project.previewReadiness.status === 'needs-build'
+  notifyProjectPreparation({
+    phase: blocked ? 'blocked' : 'ready',
+    step: 6,
+    total: 6,
+    label: blocked ? 'Diagnostic terminé' : 'Laboratoire prêt',
+    detail: blocked
+      ? next.project.previewReadiness.summary
+      : `${next.project.issues.length} constat${next.project.issues.length > 1 ? 's' : ''} préparé${next.project.issues.length > 1 ? 's' : ''} · runner local actif.`
+  })
   return next.project
 }
 
@@ -159,10 +224,10 @@ async function resolveDemoRoot(): Promise<string | null> {
 
 async function openDemoProject(): Promise<ProjectSnapshot> {
   const demoRoot = await resolveDemoRoot()
-  if (demoRoot) return openLocalProject({ root: demoRoot, preferredEntryPath: '/index.html' })
+  if (demoRoot) return openLocalProject({ root: demoRoot, selectionPath: demoRoot, preferredEntryPath: '/index.html' }, false)
   if (!mainWindow) throw new Error('La fenêtre Responsiver a été fermée pendant l’ouverture de la démonstration.')
   const project = createDemoProject()
-  await replaceActiveSession({ root: '', project, sourceServer: null, proposalServer: null, stagedServer: null, staging: null })
+  await replaceActiveSession({ root: '', selectionPath: null, recentId: null, project, sourceServer: null, proposalServer: null, stagedServer: null, staging: null })
   return project
 }
 
@@ -182,10 +247,11 @@ function currentSession(): ActiveProjectSession {
 async function buildStaging(value: unknown): Promise<StagingSnapshot> {
   if (!validStagingRequest(value)) throw new Error('La demande de staging est invalide.')
   const session = currentSession()
+  if (!session.project.capabilities.staging) throw new Error('Ce projet ne possède pas encore de rendu exploitable à corriger.')
   const staging = await buildProjectStaging(session.root, session.project, value)
   if (activeSession !== session || !mainWindow) throw new Error('La session projet a changé pendant la construction du staging.')
   const stagedServer = session.project.entryPath
-    ? await startProjectServer(session.root, { mode: 'staged', overrides: staging.overrides })
+    ? await startProjectServer(session.root, { mode: 'staged', overrides: staging.overrides, previewBasePath: session.project.previewBasePath ?? undefined })
     : null
   if (activeSession !== session || !mainWindow) {
     await closePreviewServer(stagedServer)
@@ -207,10 +273,11 @@ async function buildStaging(value: unknown): Promise<StagingSnapshot> {
 async function previewStaging(value: unknown): Promise<StagingSnapshot> {
   if (!validStagingRequest(value)) throw new Error('La demande de prévisualisation est invalide.')
   const session = currentSession()
+  if (!session.project.capabilities.staging) throw new Error('Ce projet ne possède pas encore de rendu exploitable à prévisualiser.')
   const proposal = await buildProjectStaging(session.root, session.project, value)
   if (activeSession !== session || !mainWindow) throw new Error('La session projet a changé pendant la préparation de la prévisualisation.')
   const proposalServer = session.project.entryPath
-    ? await startProjectServer(session.root, { mode: 'proposal', overrides: proposal.overrides })
+    ? await startProjectServer(session.root, { mode: 'proposal', overrides: proposal.overrides, previewBasePath: session.project.previewBasePath ?? undefined })
     : null
   if (activeSession !== session || !mainWindow) {
     await closePreviewServer(proposalServer)
@@ -267,6 +334,7 @@ async function assertNoSymlinkInPath(root: string, target: string): Promise<void
 async function materializeOverrides(sourceRoot: string, destination: string, overrides: ReadonlyMap<string, Buffer>): Promise<number> {
   let written = 0
   for (const [relativePath, body] of overrides) {
+    await assertPrivateExportDirectory(destination, dirname(destination))
     const target = safeOverrideDestination(destination, relativePath)
     if (!target) throw new Error(`Chemin de correction invalide : ${relativePath}`)
     await assertNoSymlinkInPath(destination, target)
@@ -302,15 +370,8 @@ async function assertStagingSourcesUnchanged(session: ActiveProjectSession): Pro
 }
 
 function slug(value: string): string {
-  return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'projet'
-}
-
-async function uniqueDestination(parent: string, baseName: string): Promise<string> {
-  for (let suffix = 0; suffix < 1_000; suffix += 1) {
-    const candidate = join(parent, suffix === 0 ? baseName : `${baseName}-${suffix + 1}`)
-    if (!(await access(candidate, fsConstants.F_OK).then(() => true, () => false))) return candidate
-  }
-  throw new Error('Impossible de réserver un dossier d’export unique.')
+  const normalized = value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')
+  return normalized.slice(0, 120).replace(/-$/g, '') || 'projet'
 }
 
 async function chooseExportParent(owner: BrowserWindow, title: string): Promise<string | null> {
@@ -323,9 +384,9 @@ async function chooseExportParent(owner: BrowserWindow, title: string): Promise<
 }
 
 async function assertExportParentOutsideSource(parent: string, sourceRoot: string): Promise<void> {
-  const realParent = await realpath(parent)
-  const normalizedSource = normalize(sourceRoot.endsWith(sep) ? sourceRoot : `${sourceRoot}${sep}`)
-  if (realParent === sourceRoot || realParent.startsWith(normalizedSource)) {
+  const [realParent, realSource] = await Promise.all([realpath(parent), realpath(sourceRoot)])
+  const normalizedSource = normalize(realSource.endsWith(sep) ? realSource : `${realSource}${sep}`)
+  if (realParent === realSource || realParent.startsWith(normalizedSource)) {
     throw new Error('Choisissez un dossier situé hors du projet source pour préserver son intégrité.')
   }
 }
@@ -352,9 +413,11 @@ async function exportChangedFiles(owner: BrowserWindow): Promise<ExportResult | 
   const parent = await chooseExportParent(owner, 'Exporter uniquement les fichiers modifiés')
   if (!parent) return null
   await assertExportParentOutsideSource(parent, session.root)
-  const destination = await uniqueDestination(parent, `${slug(session.project.name)}-responsiver-modifications`)
-  await mkdir(destination, { recursive: true })
+  const destination = await reservePrivateExportDirectory(parent, `${slug(session.project.name)}-responsiver-modifications`)
+  await assertPrivateExportDirectory(destination, parent)
   const files = await materializeOverrides(session.root, destination, session.staging.overrides)
+  await assertPrivateExportDirectory(destination, parent)
+  await assertNoSymlinkInPath(destination, join(destination, 'responsiver.patch'))
   await writeFile(join(destination, 'responsiver.patch'), session.staging.snapshot.patch, { encoding: 'utf8', mode: 0o600 })
   return { path: destination, files }
 }
@@ -372,7 +435,8 @@ async function exportProjectCopy(owner: BrowserWindow): Promise<ExportResult | n
   const parent = await chooseExportParent(owner, 'Exporter une copie complète du projet corrigé')
   if (!parent) return null
   await assertExportParentOutsideSource(parent, session.root)
-  const destination = await uniqueDestination(parent, `${slug(session.project.name)}-responsiver`)
+  const destination = await reservePrivateExportDirectory(parent, `${slug(session.project.name)}-responsiver`)
+  await assertPrivateExportDirectory(destination, parent)
   await cp(session.root, destination, {
     recursive: true,
     errorOnExist: true,
@@ -380,7 +444,9 @@ async function exportProjectCopy(owner: BrowserWindow): Promise<ExportResult | n
     preserveTimestamps: true,
     filter: (source) => shouldCopyProjectPath(session.root, source)
   })
+  await assertPrivateExportDirectory(destination, parent)
   await materializeOverrides(session.root, destination, session.staging.overrides)
+  await assertPrivateExportDirectory(destination, parent)
   return { path: destination, files: session.project.files }
 }
 
@@ -464,6 +530,7 @@ function createWindow(): void {
     minHeight: 680,
     title: 'Responsiver',
     backgroundColor: '#eceae4',
+    autoHideMenuBar: process.platform !== 'darwin',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -493,7 +560,7 @@ function registerIpcHandlers(): void {
       properties: ['openDirectory']
     })
     if (selection.canceled || !selection.filePaths[0]) return null
-    return queueSessionOperation(async () => openLocalProject(await normalizeProjectSelection(selection.filePaths[0])))
+    return queueSessionOperation(() => prepareLocalProject(selection.filePaths[0]))
   })
 
   ipcMain.handle('project:choose-file', async (event): Promise<ProjectSnapshot | null> => {
@@ -505,16 +572,38 @@ function registerIpcHandlers(): void {
       filters: [{ name: 'Pages web', extensions: ['html', 'htm'] }]
     })
     if (selection.canceled || !selection.filePaths[0]) return null
-    return queueSessionOperation(async () => openLocalProject(await normalizeProjectSelection(selection.filePaths[0])))
+    return queueSessionOperation(() => prepareLocalProject(selection.filePaths[0]))
   })
 
   ipcMain.handle('project:open-path', async (event, path: unknown): Promise<ProjectSnapshot> => {
     requireTrustedWindow(event)
-    return queueSessionOperation(async () => openLocalProject(await normalizeProjectSelection(path)))
+    return queueSessionOperation(() => prepareLocalProject(path))
   })
   ipcMain.handle('project:demo', async (event): Promise<ProjectSnapshot> => {
     requireTrustedWindow(event)
     return queueSessionOperation(openDemoProject)
+  })
+  ipcMain.handle('project:recent:list', async (event): Promise<RecentProjectSummary[]> => {
+    requireTrustedWindow(event)
+    return recentStore().list(activeSession?.recentId)
+  })
+  ipcMain.handle('project:recent:open', async (event, id: unknown): Promise<ProjectSnapshot> => {
+    requireTrustedWindow(event)
+    if (typeof id !== 'string' || !/^recent-[a-f\d]{20}$/.test(id)) throw new Error('Le projet récent demandé est invalide.')
+    return queueSessionOperation(async () => {
+      const recent = await recentStore().get(id)
+      if (!recent) throw new Error('Ce projet n’existe plus dans l’historique local.')
+      if (recent.availability !== 'available') throw new Error('Ce projet récent n’est plus accessible à cet emplacement.')
+      return prepareLocalProject(recent.selectionPath)
+    })
+  })
+  ipcMain.handle('project:recent:forget', async (event, id: unknown): Promise<RecentProjectSummary[]> => {
+    requireTrustedWindow(event)
+    if (typeof id !== 'string' || !/^recent-[a-f\d]{20}$/.test(id)) throw new Error('Le projet récent demandé est invalide.')
+    return queueSessionOperation(async () => {
+      await recentStore().forget(id)
+      return recentStore().list(activeSession?.recentId)
+    })
   })
   ipcMain.handle('staging:build', async (event, request: unknown): Promise<StagingSnapshot> => {
     requireTrustedWindow(event)

@@ -30,9 +30,22 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - name: Valider la version du tag
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [[ "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "Le tag $GITHUB_REF_NAME ne correspond pas à package.json (v$version)." >&2
+            exit 1
+          fi
       - name: Installer les dépendances
         run: npm ci
-      - name: Vérifier puis empaqueter
+      - name: Vérifier les types
+        run: npm run typecheck
+      - name: Tester le moteur local
+        run: npm test
+      - name: Empaqueter
         run: npm run package
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
@@ -48,10 +61,45 @@ jobs:
             dist/*.deb
           if-no-files-found: error
 
+  inventorier:
+    name: Produire le SBOM
+    runs-on: ubuntu-latest
+    steps:
+      - name: Récupérer le dépôt
+        uses: actions/checkout@v4
+      - name: Installer Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Valider la version du tag
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [[ "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "Le tag $GITHUB_REF_NAME ne correspond pas à package.json (v$version)." >&2
+            exit 1
+          fi
+      - name: Installer les dépendances verrouillées
+        run: npm ci
+      - name: Générer et contrôler le SBOM SPDX
+        shell: bash
+        run: |
+          npm sbom --sbom-format spdx > sbom.spdx.json
+          node -e "const fs=require('node:fs'); const sbom=JSON.parse(fs.readFileSync('sbom.spdx.json','utf8')); if (!String(sbom.spdxVersion || '').startsWith('SPDX-') || !Array.isArray(sbom.packages) || sbom.packages.length === 0) process.exit(1)"
+          test -s sbom.spdx.json
+      - name: Conserver le SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: Responsiver-SBOM
+          path: sbom.spdx.json
+          if-no-files-found: error
+
   publier:
     name: Publier la release GitHub
     if: startsWith(github.ref, 'refs/tags/')
-    needs: empaqueter
+    needs: [empaqueter, inventorier]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -60,13 +108,59 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artefacts
+      - name: Préparer les artefacts et leurs empreintes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -n "$(find artefacts/Responsiver-macOS -type f -name '*.dmg' -print -quit)"
+          test -n "$(find artefacts/Responsiver-macOS -type f -name '*.zip' -print -quit)"
+          test -n "$(find artefacts/Responsiver-Windows -type f -name '*.exe' -print -quit)"
+          test -n "$(find artefacts/Responsiver-Windows -type f -name '*.zip' -print -quit)"
+          test -n "$(find artefacts/Responsiver-Linux -type f -name '*.AppImage' -print -quit)"
+          test -n "$(find artefacts/Responsiver-Linux -type f -name '*.deb' -print -quit)"
+          test -s artefacts/Responsiver-SBOM/sbom.spdx.json
+
+          mkdir release-assets
+          nombre=0
+          while IFS= read -r -d '' source; do
+            nom="$(basename "$source")"
+            if [[ -e "release-assets/$nom" ]]; then
+              echo "Deux artefacts portent le même nom : $nom" >&2
+              exit 1
+            fi
+            cp "$source" "release-assets/$nom"
+            nombre=$((nombre + 1))
+          done < <(find artefacts -type f \( -name '*.dmg' -o -name '*.zip' -o -name '*.exe' -o -name '*.AppImage' -o -name '*.deb' -o -name 'sbom.spdx.json' \) -print0 | sort -z)
+
+          if [[ "$nombre" -lt 7 ]]; then
+            echo "La release est incomplète : seulement $nombre artefacts préparés." >&2
+            exit 1
+          fi
+
+          (
+            cd release-assets
+            find . -maxdepth 1 -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum | sed 's#  \./#  #'
+          ) > release-assets/SHA256SUMS
+
+          test -s release-assets/SHA256SUMS
+          lignes="$(wc -l < release-assets/SHA256SUMS | tr -d ' ')"
+          if [[ "$lignes" -ne "$nombre" ]]; then
+            echo "Le manifeste SHA-256 ne couvre pas tous les artefacts ($lignes/$nombre)." >&2
+            exit 1
+          fi
+          (cd release-assets && sha256sum --check SHA256SUMS)
       - name: Créer ou compléter la release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          shopt -s globstar nullglob
-          fichiers=(artefacts/**/*.{dmg,zip,exe,AppImage,deb})
+          shopt -s nullglob
+          fichiers=(release-assets/*)
+          if [[ "${#fichiers[@]}" -lt 8 ]]; then
+            echo "La release ne contient pas tous les paquets, le SBOM et SHA256SUMS." >&2
+            exit 1
+          fi
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" "${fichiers[@]}" --clobber
           else

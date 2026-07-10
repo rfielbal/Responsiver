@@ -9,10 +9,12 @@ export const browserDemoProject: ProjectSnapshot = {
   analyzedAt: new Date().toISOString(),
   previewHtml,
   previewOrigin: null,
+  previewBasePath: null,
+  previewReadiness: { status: 'ready', strategy: 'static', summary: 'La démonstration statique est prête.', diagnostics: [] },
   entryPath: '/index.html',
   routes: [{ path: '/index.html', label: 'index.html', title: 'Atelier Atlas', theme: 'light' }],
   theme: { detected: 'light', hasDark: false, hasLight: true, evidence: ['Fond clair détecté dans la démo navigateur.'], variables: [] },
-  capabilities: { interactive: false, staging: false, framework: null, packageManager: null, buildRequired: false },
+  capabilities: { interactive: false, staging: false, framework: null, packageManager: null, buildRequired: false, previewStrategy: 'static' },
   analysis: { truncated: false, scannedFiles: 1, scannedStyles: 1 },
   issues: [
     {

@@ -2,6 +2,9 @@ export type Severity = 'bloquant' | 'attention' | 'information'
 export type Coverage = 'standard' | 'heuristique' | 'manuel'
 export type ThemeMode = 'dark' | 'light'
 export type ThemeDetection = ThemeMode | 'dual' | 'unknown'
+export type PreviewReadinessStatus = 'ready' | 'degraded' | 'blocked' | 'needs-build'
+export type PreviewStrategy = 'static' | 'artifact' | 'source' | 'unsupported'
+export type RecentProjectAvailability = 'available' | 'missing' | 'unreadable' | 'unsupported'
 
 export interface SourceLocation {
   file: string
@@ -36,6 +39,8 @@ export interface ProjectIssue {
 export interface ProjectRoute {
   path: string
   label: string
+  /** Chemin physique relatif à la racine du projet, distinct de l’URL d’un artefact monté. */
+  sourcePath?: string
   title?: string
   theme?: ThemeDetection
 }
@@ -60,6 +65,22 @@ export interface ProjectCapabilities {
   framework: string | null
   packageManager: string | null
   buildRequired: boolean
+  previewStrategy: PreviewStrategy
+}
+
+export interface PreviewDiagnostic {
+  code: string
+  severity: 'blocking' | 'warning' | 'info'
+  title: string
+  detail: string
+  file?: string
+}
+
+export interface PreviewReadiness {
+  status: PreviewReadinessStatus
+  strategy: PreviewStrategy
+  summary: string
+  diagnostics: PreviewDiagnostic[]
 }
 
 export interface ProjectSnapshot {
@@ -72,6 +93,8 @@ export interface ProjectSnapshot {
   issues: ProjectIssue[]
   previewHtml: string | null
   previewOrigin: string | null
+  previewBasePath: string | null
+  previewReadiness: PreviewReadiness
   entryPath: string | null
   routes: ProjectRoute[]
   theme: ThemeProfile
@@ -81,6 +104,30 @@ export interface ProjectSnapshot {
     scannedFiles: number
     scannedStyles: number
   }
+}
+
+export interface ProjectPreparationProgress {
+  phase: 'selection' | 'inventory' | 'routes' | 'responsive' | 'preview' | 'ready' | 'blocked'
+  step: number
+  total: number
+  label: string
+  detail?: string
+}
+
+export interface RecentProjectSummary {
+  id: string
+  name: string
+  selectionPath: string
+  root: string
+  entryPath: string | null
+  kind: string
+  files: number
+  routes: number
+  issues: number
+  analyzedAt: string
+  lastOpenedAt: string
+  availability: RecentProjectAvailability
+  isActive: boolean
 }
 
 export interface StagingRequest {

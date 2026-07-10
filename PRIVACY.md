@@ -12,13 +12,17 @@ Responsiver est conçu pour fonctionner localement.
 
 ## Ce qui reste sur l’ordinateur
 
-Les chemins choisis, fichiers analysés, aperçus, décisions de staging et rapports sont traités localement. Un rapport JSON n’est écrit qu’à l’emplacement explicitement sélectionné ; il omet le chemin absolu du projet et les origines temporaires de preview. Le dossier source n’est jamais écrit automatiquement par Responsiver.
+Les chemins choisis, fichiers analysés, aperçus, décisions de staging et rapports sont traités localement. Pour permettre la section **Anciens projets**, Responsiver conserve dans son dossier de données un petit JSON versionné : chemin canonique sélectionné, racine, entrée, nom, compteurs et dates d’analyse. Il ne contient jamais le code source, le HTML servi, le thème, les constats détaillés, un patch ou une correction. Chaque projet est réanalysé lors de sa réouverture et peut être retiré individuellement de l’historique sans toucher à ses fichiers.
 
-Les corrections sont conservées dans des overlays en mémoire. Lors d’un export, Responsiver écrit un nouveau patch ou un nouveau dossier à l’emplacement choisi. Les copies complètes et fichiers modifiés doivent être exportés hors du projet source.
+Sur les systèmes POSIX, le dossier de cet historique est restreint à `0700` et son fichier à `0600`. L’écriture est atomique et la lecture refuse les fichiers symboliques, surdimensionnés, corrompus ou de version inconnue.
+
+Un rapport JSON n’est écrit qu’à l’emplacement explicitement sélectionné ; il omet le chemin absolu du projet et les origines temporaires de preview. Le dossier source n’est jamais écrit automatiquement par Responsiver.
+
+Les corrections sont conservées dans des overlays en mémoire. Lors d’un export, Responsiver écrit un nouveau patch ou réserve atomiquement un nouveau dossier privé à l’emplacement choisi. Les copies complètes et fichiers modifiés doivent être exportés hors du projet source.
 
 ## Aperçu local interactif
 
-Un dossier importé est servi temporairement sur `127.0.0.1` afin que ses pages, scripts, formulaires et assets **locaux** restent utilisables. Le serveur est fermé au changement de projet et à la fermeture de l’application. Il ne rend accessible que des types de ressources web autorisés à l’intérieur du dossier choisi.
+Un dossier importé qualifié comme exploitable est servi temporairement sur `127.0.0.1` afin que ses pages, scripts, formulaires et assets **locaux** restent utilisables. Un projet incomplet ou nécessitant un build ne démarre aucun runner. Le serveur est fermé au changement de projet et à la fermeture de l’application. Il ne rend accessible que des types de ressources web autorisés à l’intérieur du dossier choisi ou de l’artefact compilé détecté.
 
 Le stockage navigateur associé à une origine de preview — cookies, stockage local, IndexedDB, service workers et cache — est effacé lorsque le serveur correspondant est fermé.
 

@@ -14,11 +14,18 @@ files:
 extraResources:
   - from: demo/atelier
     to: demo/atelier
+  - from: LICENSE
+    to: LICENSE
+  - from: NOTICE
+    to: NOTICE
+  - from: THIRD_PARTY_NOTICES.md
+    to: THIRD_PARTY_NOTICES.md
 
 mac:
   icon: build/icon.png
   identity: null
   category: public.app-category.developer-tools
+  artifactName: ${productName}-${version}-macOS-${arch}.${ext}
   extendInfo:
     NSAppTransportSecurity:
       NSAllowsArbitraryLoads: false
@@ -29,6 +36,7 @@ mac:
 
 win:
   icon: build/icon.png
+  artifactName: ${productName}-${version}-Windows-${arch}.${ext}
   target:
     - nsis
     - zip
@@ -36,6 +44,7 @@ win:
 linux:
   icon: build/icon.png
   category: Development
+  artifactName: ${productName}-${version}-Linux-${arch}.${ext}
   target:
     - AppImage
     - deb

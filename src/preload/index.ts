@@ -1,5 +1,5 @@
-import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { ExportResult, ProjectSnapshot, StagingRequest, StagingSnapshot } from '../shared/contracts'
+import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron'
+import type { ExportResult, ProjectPreparationProgress, ProjectSnapshot, RecentProjectSummary, StagingRequest, StagingSnapshot } from '../shared/contracts'
 
 function reportRuleIds(projectOrRuleIds?: ProjectSnapshot | string[], acceptedRuleIds?: string[]): string[] {
   return Array.isArray(projectOrRuleIds) ? projectOrRuleIds : acceptedRuleIds ?? []
@@ -11,6 +11,14 @@ if (process.isMainFrame) {
     chooseProjectFile: (): Promise<ProjectSnapshot | null> => ipcRenderer.invoke('project:choose-file'),
     openProjectPath: (path: string): Promise<ProjectSnapshot> => ipcRenderer.invoke('project:open-path', path),
     openDemoProject: (): Promise<ProjectSnapshot> => ipcRenderer.invoke('project:demo'),
+    listRecentProjects: (): Promise<RecentProjectSummary[]> => ipcRenderer.invoke('project:recent:list'),
+    openRecentProject: (id: string): Promise<ProjectSnapshot> => ipcRenderer.invoke('project:recent:open', id),
+    forgetRecentProject: (id: string): Promise<RecentProjectSummary[]> => ipcRenderer.invoke('project:recent:forget', id),
+    onProjectPreparation: (listener: (progress: ProjectPreparationProgress) => void): (() => void) => {
+      const handler = (_event: IpcRendererEvent, progress: ProjectPreparationProgress): void => listener(progress)
+      ipcRenderer.on('project:preparation', handler)
+      return () => ipcRenderer.removeListener('project:preparation', handler)
+    },
     previewStaging: (request: StagingRequest): Promise<StagingSnapshot> => ipcRenderer.invoke('staging:preview', request),
     clearPreviewStaging: (expectedOrigin: string): Promise<void> => ipcRenderer.invoke('staging:clear-preview', expectedOrigin),
     buildStaging: (request: StagingRequest): Promise<StagingSnapshot> => ipcRenderer.invoke('staging:build', request),

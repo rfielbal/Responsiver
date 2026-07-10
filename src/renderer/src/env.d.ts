@@ -2,8 +2,10 @@
 
 import type {
   ExportResult,
+  ProjectPreparationProgress,
   ProjectIssue as SharedProjectIssue,
   ProjectSnapshot as SharedProjectSnapshot,
+  RecentProjectSummary,
   StagingRequest,
   StagingSnapshot
 } from '../../shared/contracts'
@@ -17,6 +19,10 @@ declare global {
     chooseProjectFile: () => Promise<ProjectSnapshot | null>
     openProjectPath: (path: string) => Promise<ProjectSnapshot>
     openDemoProject: () => Promise<ProjectSnapshot>
+    listRecentProjects: () => Promise<RecentProjectSummary[]>
+    openRecentProject: (id: string) => Promise<ProjectSnapshot>
+    forgetRecentProject: (id: string) => Promise<RecentProjectSummary[]>
+    onProjectPreparation: (listener: (progress: ProjectPreparationProgress) => void) => () => void
     previewStaging: (request: StagingRequest) => Promise<StagingSnapshot>
     clearPreviewStaging: (expectedOrigin: string) => Promise<void>
     buildStaging: (request: StagingRequest) => Promise<StagingSnapshot>

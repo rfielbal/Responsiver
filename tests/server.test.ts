@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { request as httpRequest } from 'node:http'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -36,6 +36,10 @@ test('le runner sert uniquement localhost, injecte le bridge et gère les média
   assert.match(pageBody, /data-responsiver-bridge/)
   assert.match(pageBody, /focus-selector/)
   assert.match(pageBody, /set-theme-preview/)
+  assert.match(pageBody, /render-status/)
+  assert.match(pageBody, /runtimeErrors\.length >= 12/)
+  assert.match(pageBody, /element\.shadowRoot/)
+  assert.match(pageBody, /'::before', '::after'/)
   const bridgeSource = pageBody.match(/<script data-responsiver-bridge>([\s\S]*?)<\/script>/)?.[1]
   assert.ok(bridgeSource)
   assert.doesNotThrow(() => new Function(bridgeSource))
@@ -86,4 +90,93 @@ test('une proposition possède son origine et ses overlays éphémères', async 
   const response = await fetch(`${server.origin}/`)
   assert.equal(response.headers.get('x-responsiver-mode'), 'proposal')
   assert.match(await response.text(), /Proposition/)
+})
+
+test('un artefact monté sert son entrée, ses assets absolus et ses overlays', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'responsiver-mounted-'))
+  await mkdir(join(root, 'dist', 'assets'), { recursive: true })
+  await mkdir(join(root, 'dist', '.responsiver'), { recursive: true })
+  await mkdir(join(root, '.responsiver'), { recursive: true })
+  await writeFile(join(root, 'index.html'), '<!doctype html><html><body>Shell source</body></html>')
+  await writeFile(join(root, 'package.json'), '{"private":true}')
+  await writeFile(join(root, 'dist', 'index.html'), '<!doctype html><html><body>Artefact<script src="/assets/app.js"></script></body></html>')
+  await writeFile(join(root, 'dist', 'assets', 'app.js'), 'document.body.dataset.build = "ready"')
+  await writeFile(join(root, 'dist', '.responsiver', 'secret.css'), 'body { color: red; }')
+  await symlink(join(root, 'package.json'), join(root, 'dist', 'leak.json'))
+  await writeFile(join(root, '.responsiver', 'index.html'), '<!doctype html><html><body>Fichier projet masqué</body></html>')
+  await assert.rejects(() => startProjectServer(root, { previewBasePath: '../dist' }), /Base de prévisualisation non autorisée/)
+  const overrides = new Map<string, Buffer>([
+    ['dist/index.html', Buffer.from('<!doctype html><html><body>Artefact corrigé<script src="/assets/app.js"></script></body></html>')],
+    ['.responsiver/responsiver.generated.css', Buffer.from('body { color: green; }')],
+    ['dist/.responsiver/artifact.generated.css', Buffer.from('body { color: purple; }')]
+  ])
+  const server = await startProjectServer(root, { mode: 'staged', overrides, previewBasePath: 'dist' })
+  context.after(async () => {
+    await server.close()
+    await rm(root, { recursive: true, force: true })
+  })
+
+  const mountedRoot = await fetch(`${server.origin}/`)
+  assert.equal(mountedRoot.headers.get('x-responsiver-base'), 'dist')
+  assert.match(await mountedRoot.text(), /Artefact corrigé/)
+  assert.match(await (await fetch(`${server.origin}/dist/index.html`)).text(), /Artefact corrigé/)
+  assert.match(await (await fetch(`${server.origin}/assets/app.js`)).text(), /dataset\.build/)
+  assert.match(await (await fetch(`${server.origin}/route/virtuelle`)).text(), /Artefact corrigé/)
+  assert.match(await (await fetch(`${server.origin}/.responsiver/responsiver.generated.css`)).text(), /green/)
+  assert.match(await (await fetch(`${server.origin}/.responsiver/artifact.generated.css`)).text(), /purple/)
+  assert.equal((await fetch(`${server.origin}/package.json`)).status, 404)
+  assert.equal((await fetch(`${server.origin}/dist/leak.json`)).status, 404)
+  assert.equal((await fetch(`${server.origin}/.responsiver`)).status, 404)
+  assert.equal((await fetch(`${server.origin}/.responsiver/index.html`)).status, 404)
+  assert.equal((await fetch(`${server.origin}/.responsiver/secret.css`)).status, 404)
+  assert.equal((await fetch(`${server.origin}/dist/.responsiver/secret.css`)).status, 404)
+})
+
+test('le mount .output/public ne rend pas les fichiers serveur voisins accessibles', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'responsiver-output-'))
+  await mkdir(join(root, '.output', 'public'), { recursive: true })
+  await mkdir(join(root, '.output', 'server'), { recursive: true })
+  await writeFile(join(root, '.output', 'public', 'index.html'), '<!doctype html><html><body>Public</body></html>')
+  await writeFile(join(root, '.output', 'server', 'secret.js'), 'secret')
+  const server = await startProjectServer(root, { previewBasePath: '.output/public' })
+  context.after(async () => {
+    await server.close()
+    await rm(root, { recursive: true, force: true })
+  })
+
+  assert.match(await (await fetch(`${server.origin}/`)).text(), /Public/)
+  assert.equal((await fetch(`${server.origin}/.output/server/secret.js`)).status, 404)
+})
+
+test('un artefact imbriqué est monté à sa vraie racine web', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'responsiver-nested-mount-'))
+  await mkdir(join(root, 'dist', 'app', 'browser', 'assets'), { recursive: true })
+  await writeFile(join(root, 'dist', 'app', 'browser', 'index.html'), '<!doctype html><html><body>App<script src="/assets/main.js"></script></body></html>')
+  await writeFile(join(root, 'dist', 'app', 'browser', 'assets', 'main.js'), 'document.body.dataset.ready = "true"')
+  await writeFile(join(root, 'dist', 'secret.txt'), 'hors du mount')
+  const server = await startProjectServer(root, { previewBasePath: 'dist/app/browser' })
+  context.after(async () => {
+    await server.close()
+    await rm(root, { recursive: true, force: true })
+  })
+
+  const page = await fetch(`${server.origin}/`)
+  assert.equal(page.headers.get('x-responsiver-base'), 'dist/app/browser')
+  assert.match(await page.text(), /App/)
+  assert.match(await (await fetch(`${server.origin}/assets/main.js`)).text(), /dataset\.ready/)
+  assert.equal((await fetch(`${server.origin}/dist/secret.txt`)).status, 404)
+  await assert.rejects(() => startProjectServer(root, { previewBasePath: 'dist/../secret' }), /Base de prévisualisation non autorisée/)
+})
+
+test('un mount symbolique extérieur au projet est refusé au démarrage', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'responsiver-symlink-root-'))
+  const outside = await mkdtemp(join(tmpdir(), 'responsiver-symlink-outside-'))
+  await writeFile(join(outside, 'index.html'), '<!doctype html><html><body>Secret extérieur</body></html>')
+  await symlink(outside, join(root, 'dist'))
+  context.after(async () => {
+    await rm(root, { recursive: true, force: true })
+    await rm(outside, { recursive: true, force: true })
+  })
+
+  await assert.rejects(() => startProjectServer(root, { previewBasePath: 'dist' }), /hors du projet/)
 })

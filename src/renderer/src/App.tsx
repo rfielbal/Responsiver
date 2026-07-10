@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState, type FormEvent, type ReactElement } from 'react'
 
+import type { ProjectPreparationProgress, RecentProjectSummary } from '../../shared/contracts'
+
 type Destination = 'projects' | 'lab' | 'review' | 'export'
 type InspectorTab = 'findings' | 'fixes' | 'theme' | 'conversation'
 type DeviceFamily = 'smartphone' | 'tablet' | 'computer'
@@ -89,6 +91,13 @@ interface RuntimeAudit {
   overflows: RuntimeOverflow[]
 }
 
+interface RuntimeRenderState {
+  status: 'ready' | 'empty'
+  settled: boolean
+  failureCount: number
+  firstFailure: string | null
+}
+
 interface ResponsiverApiExtension {
   chooseProjectFile?: () => Promise<ProjectSnapshot | null>
   previewStaging?: (request: { issueIds: string[]; themeTarget: ThemeTarget | null; instructions: string[] }) => Promise<StagingSnapshot>
@@ -100,6 +109,10 @@ interface ResponsiverApiExtension {
   exportProjectCopy?: () => Promise<string | { path: string; files?: string[] } | null>
   copyText?: (text: string) => Promise<void>
   getPathForFile?: (file: File) => string
+  listRecentProjects?: () => Promise<RecentProjectSummary[]>
+  openRecentProject?: (id: string) => Promise<ProjectSnapshot>
+  forgetRecentProject?: (id: string) => Promise<RecentProjectSummary[]>
+  onProjectPreparation?: (listener: (progress: ProjectPreparationProgress) => void) => () => void
 }
 
 interface ConversationMessage {
@@ -232,7 +245,7 @@ function deviceForIssue(issue: ProjectIssue, current: Device): Pick<Device, 'fam
   return null
 }
 
-function PreviewFrame({ project, origin, device, path, compact = false, label, focusSelector, themeOverride, resizable = false, onResize, onPathChange, onThemeChange, onExternal, onAudit, onEscape }: {
+function PreviewFrame({ project, origin, device, path, compact = false, label, focusSelector, themeOverride, resizable = false, allowUpscale = false, onResize, onPathChange, onThemeChange, onExternal, onAudit, onRenderStatus, onEscape }: {
   project: ProjectSnapshot & ProjectExtra
   origin: string | null
   device: Device
@@ -242,11 +255,13 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
   focusSelector?: string | null
   themeOverride?: ThemeTarget | null
   resizable?: boolean
+  allowUpscale?: boolean
   onResize?: (width: number, height: number) => void
   onPathChange?: (path: string) => void
   onThemeChange?: (theme: RuntimeTheme) => void
   onExternal?: (url: string) => void
   onAudit?: (audit: RuntimeAudit) => void
+  onRenderStatus?: (status: RuntimeRenderState | null) => void
   onEscape?: () => void
 }): ReactElement {
   const stageRef = useRef<HTMLDivElement>(null)
@@ -256,8 +271,13 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
   const [scale, setScale] = useState(compact ? 0.22 : 0.7)
   const [isResizing, setIsResizing] = useState(false)
   const [autoFit, setAutoFit] = useState(true)
+  const [showBlockedSource, setShowBlockedSource] = useState(false)
+  const [runtimeRender, setRuntimeRender] = useState<RuntimeRenderState | null>(null)
   const safeRoutes = project.routes.length ? project.routes : [{ path: project.entryPath ?? '/', label: 'Page principale' }]
-  const routeValue = safeRoutes.find((route) => route.path === path)?.path ?? safeRoutes.find((route) => documentPath(route.path) === documentPath(path))?.path ?? safeRoutes[0].path
+  const matchedRoute = safeRoutes.find((route) => route.path === path) ?? safeRoutes.find((route) => documentPath(route.path) === documentPath(path))
+  const routeValue = matchedRoute?.path ?? path
+  const displayedRoutes = matchedRoute || !path ? safeRoutes : [...safeRoutes, { path, label: `Page courante — ${path}` }]
+  const readinessBlocked = origin === project.previewOrigin && (project.previewReadiness?.status === 'blocked' || project.previewReadiness?.status === 'needs-build')
 
   useEffect(() => {
     if (isResizing || !autoFit) return
@@ -267,13 +287,13 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
       const padding = compact ? 28 : 46
       const availableWidth = Math.max(160, stage.clientWidth - padding)
       const availableHeight = Math.max(180, stage.clientHeight - padding)
-      setScale(Math.min(1, availableWidth / (device.width + 14), availableHeight / (device.height + 14)))
+      setScale(Math.min(allowUpscale ? 1.5 : 1, availableWidth / (device.width + 14), availableHeight / (device.height + 14)))
     }
     const observer = new ResizeObserver(update)
     observer.observe(stage)
     update()
     return () => observer.disconnect()
-  }, [autoFit, compact, device.height, device.width, isResizing])
+  }, [allowUpscale, autoFit, compact, device.height, device.width, isResizing])
 
   useEffect(() => {
     if (device.id === previousDeviceId.current) return
@@ -281,13 +301,23 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
     if (!isResizing && device.id !== 'custom') setAutoFit(true)
   }, [device.id, isResizing])
 
+  useEffect(() => {
+    if (allowUpscale) setAutoFit(true)
+  }, [allowUpscale])
+
+  useEffect(() => {
+    setShowBlockedSource(false)
+    setRuntimeRender(null)
+    onRenderStatus?.(null)
+  }, [onRenderStatus, origin, path, project.id])
+
   useEffect(() => () => resizeCleanupRef.current?.(), [])
 
   useEffect(() => {
     const listener = (event: MessageEvent): void => {
       if (event.source !== frameRef.current?.contentWindow) return
       if (origin && event.origin !== origin) return
-      const data = event.data as { channel?: string; type?: string; path?: string; background?: string; url?: string } & Partial<RuntimeAudit>
+      const data = event.data as { channel?: string; type?: string; path?: string; background?: string; url?: string; status?: 'ready' | 'empty'; state?: 'visible' | 'empty'; settled?: boolean; stable?: boolean; failureCount?: number; errorCount?: number; errors?: Array<{ detail?: unknown }> } & Partial<RuntimeAudit>
       if (data.channel !== 'responsiver-preview') return
       if (data.type === 'state') {
         if (data.path) onPathChange?.(data.path)
@@ -295,15 +325,27 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
         if (value !== null) onThemeChange?.(value < 0.42 ? 'dark' : 'light')
       }
       if (data.type === 'audit' && typeof data.overflowCount === 'number') onAudit?.(data as RuntimeAudit)
+      if (data.type === 'render-status') {
+        const status = data.status ?? (data.state === 'visible' ? 'ready' : data.state === 'empty' ? 'empty' : undefined)
+        if (status) {
+          const firstFailure = typeof data.errors?.[0]?.detail === 'string' ? data.errors[0].detail.trim().replace(/\s+/g, ' ').slice(0, 180) || null : null
+          const rawFailureCount = Number(data.failureCount ?? data.errorCount)
+          const failureCount = Number.isFinite(rawFailureCount) ? Math.min(999, Math.max(0, Math.trunc(rawFailureCount))) : 0
+          const renderState = { status, settled: Boolean(data.settled ?? data.stable), failureCount, firstFailure }
+          setRuntimeRender(renderState)
+          onRenderStatus?.(renderState)
+        }
+      }
       if (data.type === 'external-link' && data.url) onExternal?.(data.url)
       if (data.type === 'escape') onEscape?.()
     }
     window.addEventListener('message', listener)
     return () => window.removeEventListener('message', listener)
-  }, [onAudit, onEscape, onExternal, onPathChange, onThemeChange, origin])
+  }, [onAudit, onEscape, onExternal, onPathChange, onRenderStatus, onThemeChange, origin])
 
   const post = (type: string, payload: Record<string, string> = {}): void => frameRef.current?.contentWindow?.postMessage({ channel: 'responsiver-preview', type, ...payload }, origin ?? '*')
   const source = origin ? `${origin}${path}` : undefined
+  const runtimeBlocked = runtimeRender?.status === 'empty' && runtimeRender.settled
   const outerWidth = Math.round((device.width + 14) * scale)
   const outerHeight = Math.round((device.height + 14) * scale)
 
@@ -322,6 +364,9 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
     event.preventDefault()
     event.stopPropagation()
     resizeCleanupRef.current?.()
+    const captureTarget = event.currentTarget
+    const pointerId = event.pointerId
+    captureTarget.setPointerCapture(pointerId)
     const startX = event.clientX
     const startY = event.clientY
     const startWidth = device.width
@@ -342,6 +387,7 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', stop)
       window.removeEventListener('pointercancel', stop)
+      if (captureTarget.isConnected && captureTarget.hasPointerCapture(pointerId)) captureTarget.releasePointerCapture(pointerId)
       resizeCleanupRef.current = null
       setIsResizing(false)
     }
@@ -356,10 +402,12 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
     event.preventDefault()
     setAutoFit(false)
     const step = event.shiftKey ? 20 : 4
-    const horizontal = event.key === 'ArrowRight' ? step : event.key === 'ArrowLeft' ? -step : 0
-    const vertical = event.key === 'ArrowDown' ? step : event.key === 'ArrowUp' ? -step : 0
-    const nextWidth = edge === 'n' || edge === 's' ? device.width : Math.min(2560, Math.max(240, device.width + horizontal))
-    const nextHeight = edge === 'e' || edge === 'w' ? device.height : Math.min(2000, Math.max(320, device.height + vertical))
+    const horizontalKey = event.key === 'ArrowRight' ? step : event.key === 'ArrowLeft' ? -step : 0
+    const verticalKey = event.key === 'ArrowDown' ? step : event.key === 'ArrowUp' ? -step : 0
+    const horizontal = edge.includes('w') ? -horizontalKey : edge.includes('e') ? horizontalKey : 0
+    const vertical = edge.includes('n') ? -verticalKey : edge.includes('s') ? verticalKey : 0
+    const nextWidth = Math.min(2560, Math.max(240, device.width + horizontal))
+    const nextHeight = Math.min(2000, Math.max(320, device.height + vertical))
     onResize(nextWidth, nextHeight)
   }
 
@@ -374,21 +422,25 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
     nw: 'Redimensionner depuis le coin supérieur gauche'
   }
 
+  function diagnosticCard(overlay = false): ReactElement {
+    return <div className={overlay ? 'preview-diagnostic preview-diagnostic--overlay' : 'preview-diagnostic'} role="status"><span className="preview-diagnostic__index">R—00</span><div className="preview-diagnostic__icon"><Icon name="finding" size={20} /></div><span className="overline">Diagnostic du rendu</span><strong>{readinessBlocked ? project.previewReadiness.summary : 'La page s’est chargée, mais aucun contenu visible n’a été produit.'}</strong><p>{readinessBlocked ? project.previewReadiness.diagnostics[0]?.detail ?? 'La page sélectionnée ne produit aucun contenu exploitable.' : runtimeRender?.failureCount ? `${runtimeRender.failureCount} erreur${runtimeRender.failureCount > 1 ? 's' : ''} de script ou de ressource ont été observées pendant le chargement.${runtimeRender.firstFailure ? ` ${runtimeRender.firstFailure}` : ''}` : 'Le point de montage est resté vide après le chargement. Vérifiez le bundle local et les dépendances nécessaires.'}</p>{origin && <button className="button button--secondary" type="button" onClick={() => setShowBlockedSource(true)}>Afficher la source brute</button>}<small>{origin ? 'Le runner continue en arrière-plan et requalifiera automatiquement un montage tardif.' : 'Le runner reste arrêté tant qu’aucune entrée exploitable n’est disponible.'}</small></div>
+  }
+
   return <section className={`${compact ? 'preview preview--compact' : 'preview'}${isResizing ? ' is-resizing' : ''}`} aria-label={label ?? `Aperçu ${device.name}`}>
     {!compact && <div className="browser-bar">
       <div className="browser-controls">
-        <button className="icon-button" onClick={() => post('back')} aria-label="Page précédente"><Icon name="back" size={15} /></button>
-        <button className="icon-button" onClick={() => post('forward')} aria-label="Page suivante"><Icon name="forward" size={15} /></button>
-        <button className="icon-button" onClick={() => post('reload')} aria-label="Recharger"><Icon name="refresh" size={15} /></button>
+        <button className="icon-button" onClick={() => post('back')} aria-label="Page précédente" disabled={!origin}><Icon name="back" size={15} /></button>
+        <button className="icon-button" onClick={() => post('forward')} aria-label="Page suivante" disabled={!origin}><Icon name="forward" size={15} /></button>
+        <button className="icon-button" onClick={() => { setRuntimeRender(null); setShowBlockedSource(false); post('reload') }} aria-label="Recharger" disabled={!origin}><Icon name="refresh" size={15} /></button>
       </div>
       <select aria-label="Page du site" value={routeValue} onChange={(event) => { onPathChange?.(event.target.value); post('navigate', { path: event.target.value }) }}>
-        {safeRoutes.map((route) => <option value={route.path} key={route.path}>{route.label}</option>)}
+        {displayedRoutes.map((route) => <option value={route.path} key={route.path}>{route.label}</option>)}
       </select>
       <code title={path}>{path}</code>
-      <span className="runner-status"><i /> Local</span>
+      {origin ? <span className="runner-status"><i /> Local</span> : <span className="runner-status runner-status--stopped">Arrêté</span>}
     </div>}
     <div ref={stageRef} className="preview-stage">
-      <div className="device-space" style={{ width: outerWidth, height: outerHeight }}>
+      {readinessBlocked && !showBlockedSource ? diagnosticCard() : <><div className="device-space" style={{ width: outerWidth, height: outerHeight }}>
         <div className="device-shell" style={{ width: device.width, height: device.height, transform: `scale(${scale})` }}>
           <iframe key={origin ?? 'inline-preview'} ref={frameRef} title={`${project.name} — ${device.name}`} width={device.width} height={device.height} sandbox={origin ? 'allow-scripts allow-forms allow-same-origin' : ''} src={source} srcDoc={source ? undefined : project.previewHtml ?? undefined} onLoad={() => window.setTimeout(() => {
             post(focusSelector ? 'focus-selector' : 'clear-focus', focusSelector ? { selector: focusSelector } : {})
@@ -396,7 +448,7 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
           }, 90)} />
           {resizable && (Object.keys(resizeLabels) as ResizeEdge[]).map((edge) => <button type="button" key={edge} className={`resize-handle resize-handle--${edge}`} aria-label={resizeLabels[edge]} title={`${resizeLabels[edge]} · flèches, Maj pour 20 px`} onPointerDown={(event) => beginResize(edge, event)} onKeyDown={(event) => resizeWithKeyboard(edge, event)} />)}
         </div>
-      </div>
+      </div>{runtimeBlocked && !showBlockedSource && diagnosticCard(true)}</>}
     </div>
     <footer className="preview-meta"><strong>{label ?? device.name}</strong><code>{device.width} × {device.height} CSS px</code>{resizable && <><span><i /> Glissez un bord</span>{!autoFit && <button type="button" onClick={() => setAutoFit(true)}>Ajuster à la zone</button>}</>}</footer>
   </section>
@@ -427,7 +479,13 @@ export default function App(): ReactElement {
   const [messages, setMessages] = useState<ConversationMessage[]>([{ id: 'welcome', author: 'system', text: 'Décrivez un ajustement précis. Responsiver applique uniquement les règles locales qu’il sait interpréter et vous montre le résultat avant export.' }])
   const [draft, setDraft] = useState('')
   const [runtimeAudit, setRuntimeAudit] = useState<RuntimeAudit | null>(null)
+  const [runtimeRenderStatus, setRuntimeRenderStatus] = useState<RuntimeRenderState | null>(null)
   const [projectPath, setProjectPath] = useState('')
+  const [recentProjects, setRecentProjects] = useState<RecentProjectSummary[]>([])
+  const [recentLoading, setRecentLoading] = useState(true)
+  const [forgettingRecentId, setForgettingRecentId] = useState<string | null>(null)
+  const [preparation, setPreparation] = useState<ProjectPreparationProgress | null>(null)
+  const [showPreparation, setShowPreparation] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [previewBusy, setPreviewBusy] = useState(false)
@@ -435,6 +493,22 @@ export default function App(): ReactElement {
   const previewSequence = useRef(0)
   const draftRevision = useRef(0)
   const activeProjectId = useRef<string | null>(null)
+  const fullscreenButtonRef = useRef<HTMLButtonElement>(null)
+
+  async function refreshRecentProjects(): Promise<void> {
+    if (!api().listRecentProjects) {
+      setRecentProjects([])
+      setRecentLoading(false)
+      return
+    }
+    try {
+      setRecentProjects(await api().listRecentProjects!())
+    } catch {
+      setRecentProjects([])
+    } finally {
+      setRecentLoading(false)
+    }
+  }
 
   const currentDevice = useMemo<Device>(() => {
     if (deviceId === 'custom') return { id: 'custom', family, name: 'Format personnalisé', width: clampDimension(width, 240, 2560, 393), height: clampDimension(height, 320, 2000, 852) }
@@ -444,9 +518,11 @@ export default function App(): ReactElement {
   const routeIssues = useMemo(() => {
     if (!project) return []
     const currentPath = documentPath(activePath)
+    const knownRoute = project.routes.find((route) => route.path === activePath) ?? project.routes.find((route) => documentPath(route.path) === currentPath)
+    const issuePath = documentPath(knownRoute?.path ?? project.entryPath ?? project.routes[0]?.path ?? activePath)
     return project.issues.filter((issue) => {
       const routePath = (issue as ProjectIssue & IssueExtra).routePath
-      return !routePath || documentPath(routePath) === currentPath
+      return !routePath || documentPath(routePath) === issuePath
     })
   }, [activePath, project])
   const inspectorIssues = showAllIssues ? project?.issues ?? [] : routeIssues
@@ -462,7 +538,7 @@ export default function App(): ReactElement {
     ? ((project?.issues.find((issue) => issue.id === proposalContext.issueId) as (ProjectIssue & IssueExtra) | undefined)?.fix?.selector ?? null)
     : null
   const nativeThemeTarget = previewMode === 'source' && proposalContext?.kind === 'theme' && previewThemeTarget && project && (
-    project.theme.detected === 'dual' || project.theme.detected === previewThemeTarget || detectedTheme === previewThemeTarget || (previewThemeTarget === 'dark' ? project.theme.hasDark : project.theme.hasLight)
+    project.theme.detected === 'dual' || project.theme.detected === previewThemeTarget || (previewThemeTarget === 'dark' ? project.theme.hasDark : project.theme.hasLight)
   ) ? previewThemeTarget : null
 
   useEffect(() => {
@@ -470,12 +546,43 @@ export default function App(): ReactElement {
   }, [inspectorIssues, selectedIssueId])
 
   useEffect(() => {
+    void refreshRecentProjects()
+    const unsubscribe = api().onProjectPreparation?.((progress) => setPreparation(progress))
+    return () => unsubscribe?.()
+  }, [])
+
+  const preparationActive = preparation !== null
+
+  useEffect(() => {
+    if (!busy || !preparationActive) {
+      setShowPreparation(false)
+      return
+    }
+    const timer = window.setTimeout(() => setShowPreparation(true), 320)
+    return () => window.clearTimeout(timer)
+  }, [busy, preparationActive])
+
+  useEffect(() => {
     if (!stageFullscreen) return
+    const suppressed = [...document.querySelectorAll<HTMLElement>('.nav-rail, .titlebar, .command-bar, .inspector, .activity-bar')]
+    for (const element of suppressed) {
+      element.inert = true
+      element.setAttribute('aria-hidden', 'true')
+    }
+    const focusFrame = window.requestAnimationFrame(() => fullscreenButtonRef.current?.focus())
     const close = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') setStageFullscreen(false)
     }
     window.addEventListener('keydown', close)
-    return () => window.removeEventListener('keydown', close)
+    return () => {
+      window.cancelAnimationFrame(focusFrame)
+      window.removeEventListener('keydown', close)
+      for (const element of suppressed) {
+        element.inert = false
+        element.removeAttribute('aria-hidden')
+      }
+      window.requestAnimationFrame(() => fullscreenButtonRef.current?.focus())
+    }
   }, [stageFullscreen])
 
   useEffect(() => {
@@ -509,11 +616,13 @@ export default function App(): ReactElement {
     setMessages([{ id: 'welcome', author: 'system', text: 'Décrivez un ajustement précis. Responsiver applique uniquement les règles locales qu’il sait interpréter et vous montre le résultat avant export.' }])
     setDraft('')
     setRuntimeAudit(null)
+    setRuntimeRenderStatus(null)
     setInspectorTab('findings')
     setLabMode('device')
     setStageFullscreen(false)
     setPreviewBusy(false)
-    setDestination('lab')
+    const readiness = next.previewReadiness?.status ?? 'ready'
+    setDestination(readiness === 'blocked' || readiness === 'needs-build' ? 'projects' : 'lab')
   }
 
   async function openWith(action: () => Promise<ProjectSnapshot | null>, success: string): Promise<void> {
@@ -523,15 +632,44 @@ export default function App(): ReactElement {
       if (snapshot) {
         applyProject(snapshot)
         const next = snapshot as ProjectSnapshot & ProjectExtra
-        flash(next.capabilities?.buildRequired ? 'Projet source détecté : pour un rendu fidèle, ouvrez son fichier HTML compilé dans dist ou out.' : success)
+        await refreshRecentProjects()
+        if (next.previewReadiness?.status === 'blocked') flash(next.previewReadiness.summary)
+        else if (next.previewReadiness?.status === 'needs-build') flash('Ce projet doit être compilé localement avant de pouvoir être prévisualisé fidèlement.')
+        else flash(next.capabilities?.buildRequired ? 'Projet source détecté : pour un rendu fidèle, ouvrez son fichier HTML compilé dans dist ou out.' : success)
       }
-    } catch { flash('Impossible d’ouvrir ce projet. Vérifiez le chemin et ses droits d’accès.') } finally { setBusy(false) }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : ''
+      flash(/récent|historique|plus accessible/i.test(detail)
+        ? 'Cet ancien projet n’est plus accessible. Reconnectez son disque, téléchargez-le depuis iCloud ou retirez-le de l’historique.'
+        : 'Impossible d’ouvrir ce projet. Vérifiez le chemin et ses droits d’accès.')
+    } finally {
+      setBusy(false)
+      setPreparation(null)
+    }
   }
 
   async function openPath(path = projectPath): Promise<void> {
     const value = path.trim()
     if (!value) { flash('Indiquez un fichier ou un dossier local.'); return }
     await openWith(() => window.responsiver.openProjectPath(value), 'Projet analysé et servi localement.')
+  }
+
+  async function openRecentProject(id: string): Promise<void> {
+    if (!api().openRecentProject) return
+    await openWith(() => api().openRecentProject!(id), 'Projet réanalysé et prêt dans le laboratoire.')
+  }
+
+  async function forgetRecentProject(id: string): Promise<void> {
+    if (!api().forgetRecentProject) return
+    setForgettingRecentId(id)
+    try {
+      setRecentProjects(await api().forgetRecentProject!(id))
+      flash('Le projet a été retiré de l’historique local. Ses fichiers n’ont pas été modifiés.')
+    } catch {
+      flash('Impossible de mettre à jour l’historique local.')
+    } finally {
+      setForgettingRecentId(null)
+    }
   }
 
   function invalidateStaging(): void {
@@ -595,7 +733,7 @@ export default function App(): ReactElement {
       setHeight(String(issueDevice.height))
       setDeviceId('custom')
     }
-    if (!extra.fix || extra.fix.kind === 'manual') {
+    if (!project?.capabilities?.staging || !extra.fix || extra.fix.kind === 'manual') {
       const expectedOrigin = proposal?.previewOrigin ?? null
       previewSequence.current += 1
       setPreviewBusy(false)
@@ -603,7 +741,9 @@ export default function App(): ReactElement {
       setProposal(null)
       setPreviewMode('source')
       if (expectedOrigin) void api().clearPreviewStaging?.(expectedOrigin).catch(() => undefined)
-      flash('Ce constat demande une vérification manuelle : la source concernée est affichée sans faux correctif.')
+      flash(project?.capabilities?.staging === false
+        ? 'Ce projet ne possède pas encore de layout exploitable : le constat reste consultable, sans générer de faux correctif.'
+        : 'Ce constat demande une vérification manuelle : la source concernée est affichée sans faux correctif.')
       return
     }
     const result = await requestProposal({ issueIds: [issue.id], themeTarget: null, instructions: [] }, { kind: 'issue', issueId: issue.id }, 'before-after')
@@ -612,7 +752,8 @@ export default function App(): ReactElement {
 
   async function previewTheme(target: ThemeTarget): Promise<void> {
     if (!project) return
-    const alreadyPresent = project.theme.detected === 'dual' || project.theme.detected === target || detectedTheme === target || (target === 'dark' ? project.theme.hasDark : project.theme.hasLight)
+    if (!project.capabilities?.staging) { flash('Rendez d’abord le layout exploitable avant de prévisualiser une variante de thème.'); return }
+    const alreadyPresent = project.theme.detected === 'dual' || project.theme.detected === target || (target === 'dark' ? project.theme.hasDark : project.theme.hasLight)
     if (alreadyPresent) {
       const expectedOrigin = proposal?.previewOrigin ?? null
       previewSequence.current += 1
@@ -663,6 +804,7 @@ export default function App(): ReactElement {
 
   async function buildStaging(nextInstructions = instructions): Promise<void> {
     if (!project) return
+    if (!project.capabilities?.staging) { flash('Ce projet ne possède pas encore de rendu exploitable à corriger.'); return }
     if (!api().buildStaging) { flash('Le moteur de staging sera disponible dans l’application desktop.'); return }
     const requestedRevision = draftRevision.current
     const requestedProjectId = project.id
@@ -692,6 +834,7 @@ export default function App(): ReactElement {
 
   async function submitInstruction(event: FormEvent): Promise<void> {
     event.preventDefault()
+    if (!project?.capabilities?.staging) { flash('Rendez d’abord le layout exploitable avant de proposer un ajustement.'); return }
     const value = draft.trim()
     if (!value) return
     setMessages((current) => [...current, { id: `u-${Date.now()}`, author: 'user', text: value }])
@@ -778,19 +921,19 @@ export default function App(): ReactElement {
     <aside className="nav-rail" aria-label="Navigation principale">
       <button className="brand" onClick={() => go('projects')} aria-label="Responsiver — Projets"><Mark /><span><strong>Responsiver</strong><small>Responsive workbench</small></span></button>
       <nav>{destinations.map((item) => <button key={item.id} className={destination === item.id ? 'nav-link is-active' : 'nav-link'} onClick={() => go(item.id)} aria-current={destination === item.id ? 'page' : undefined}><Icon name={item.icon} /><span>{item.label}</span>{item.id === 'review' && counts.changes > 0 && <b>{counts.changes}</b>}</button>)}</nav>
-      <div className="rail-foot"><span><Icon name="shield" size={15} /> Traitement local</span><small>v0.4 · open source</small></div>
+      <div className="rail-foot"><span><Icon name="shield" size={15} /> Traitement local</span><small>v0.5 · open source</small></div>
     </aside>
 
     <main className="app-main">
       <header className="titlebar">
         <div className="project-identity"><span>{project ? 'Projet actif' : 'Espace local'}</span><strong>{project?.name ?? 'Aucun projet ouvert'}</strong>{project && <code title={project.root}>{project.root}</code>}</div>
         <div className="title-actions">
-          {project && <span className="origin-indicator"><i /> Runner local</span>}
+          {project?.previewOrigin && <span className="origin-indicator"><i /> Runner local</span>}
           <button className="button button--quiet" onClick={() => openWith(() => window.responsiver.chooseProject(), 'Projet analysé et servi localement.')} disabled={busy}><Icon name="folder" /> Ouvrir</button>
         </div>
       </header>
 
-      {destination === 'projects' && <ProjectsView project={project} projectPath={projectPath} busy={busy} onPath={setProjectPath} onOpenFolder={() => openWith(() => window.responsiver.chooseProject(), 'Projet analysé et servi localement.')} onOpenFile={() => openWith(() => api().chooseProjectFile ? api().chooseProjectFile!() : window.responsiver.chooseProject(), 'Fichier analysé et servi localement.')} onOpenPath={() => openPath()} onDemo={() => openWith(() => window.responsiver.openDemoProject(), 'Démonstration locale prête.')} onContinue={() => go('lab')} onDrop={(file) => { const path = api().getPathForFile?.(file); if (path) void openPath(path); else flash('Déposez le projet dans l’application desktop.') }} />}
+      {destination === 'projects' && <ProjectsView project={project} projectPath={projectPath} recentProjects={recentProjects} recentLoading={recentLoading} forgettingRecentId={forgettingRecentId} busy={busy} onPath={setProjectPath} onOpenFolder={() => openWith(() => window.responsiver.chooseProject(), 'Projet analysé et servi localement.')} onOpenFile={() => openWith(() => api().chooseProjectFile ? api().chooseProjectFile!() : window.responsiver.chooseProject(), 'Fichier analysé et servi localement.')} onOpenPath={() => openPath()} onOpenRecent={(id) => void openRecentProject(id)} onForgetRecent={(id) => void forgetRecentProject(id)} onDemo={() => openWith(() => window.responsiver.openDemoProject(), 'Démonstration locale prête.')} onContinue={() => go('lab')} onDrop={(file) => { const path = api().getPathForFile?.(file); if (path) void openPath(path); else flash('Déposez le projet dans l’application desktop.') }} />}
 
       {destination === 'lab' && project && <div className="workbench">
         <div className="command-bar">
@@ -807,21 +950,21 @@ export default function App(): ReactElement {
         </div>
 
         <div className="lab-grid">
-          <div className={stageFullscreen ? 'stage-column is-fullscreen' : 'stage-column'}>
+          <div className={stageFullscreen ? 'stage-column is-fullscreen' : 'stage-column'} role={stageFullscreen ? 'dialog' : undefined} aria-modal={stageFullscreen || undefined} aria-label={stageFullscreen ? 'Prévisualisation en plein écran' : undefined}>
             <div className="stage-toolbar">
               <span><i className={proposal && previewMode !== 'source' && previewMode !== 'staging' ? 'status-dot status-dot--proposal' : 'status-dot status-dot--ok'} />{previewMode === 'before-after' ? 'Comparaison du correctif' : previewMode === 'proposal' ? 'Proposition temporaire' : previewMode === 'staging' ? 'Staging exportable' : 'Source du projet'}</span>
               <small>{previewMode === 'before-after' ? 'Deux rendus synchronisés' : labMode === 'device' ? 'Bords redimensionnables' : 'Trois familles d’appareils'}</small>
-              <button className="stage-fullscreen" onClick={() => setStageFullscreen((current) => !current)} aria-label={stageFullscreen ? 'Quitter le plein écran de la prévisualisation' : 'Afficher la prévisualisation en plein écran'} aria-pressed={stageFullscreen}><Icon name={stageFullscreen ? 'fullscreenExit' : 'fullscreen'} size={15} /><span>{stageFullscreen ? 'Réduire' : 'Plein écran'}</span></button>
+              <button ref={fullscreenButtonRef} className="stage-fullscreen" onClick={() => setStageFullscreen((current) => !current)} aria-label={stageFullscreen ? 'Quitter le plein écran de la prévisualisation' : 'Afficher la prévisualisation en plein écran'} aria-pressed={stageFullscreen}><Icon name={stageFullscreen ? 'fullscreenExit' : 'fullscreen'} size={15} /><span>{stageFullscreen ? 'Réduire' : 'Plein écran'}</span></button>
             </div>
             <div className="stage-canvas">
               {previewBusy && <div className="preview-loading" role="status"><span className="loading-mark" /><strong>Préparation de la proposition…</strong></div>}
               {labMode === 'device' && previewMode === 'before-after' && proposal ? <div className="before-after-grid" aria-label="Comparaison avant et après le correctif">
                 <div className="comparison-pane"><header><span>Avant</span><strong>Source</strong></header><PreviewFrame compact project={project} origin={project.previewOrigin} device={currentDevice} path={activePath} label="Avant — Source" focusSelector={focusedSelector} onPathChange={changePreviewPath} onThemeChange={setRuntimeTheme} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} /></div>
                 <div className="comparison-pane comparison-pane--after"><header><span>Après</span><strong>Proposition non validée</strong></header><PreviewFrame compact project={project} origin={proposal.previewOrigin} device={currentDevice} path={activePath} label="Après — Proposition" focusSelector={focusedSelector} onPathChange={changePreviewPath} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} /></div>
-              </div> : labMode === 'device' ? <PreviewFrame project={project} origin={activeOrigin} device={currentDevice} path={activePath} focusSelector={focusedSelector} themeOverride={nativeThemeTarget} resizable onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onPathChange={changePreviewPath} onThemeChange={activeOrigin === project.previewOrigin ? setRuntimeTheme : undefined} onAudit={setRuntimeAudit} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} /> : <div className="comparison-grid">{compareDevices.map((device) => <PreviewFrame key={device.id} project={project} origin={activeOrigin} device={device} path={activePath} compact focusSelector={focusedSelector} themeOverride={nativeThemeTarget} label={device.family === 'smartphone' ? 'Smartphone' : device.family === 'tablet' ? 'Tablette' : 'Ordinateur'} onPathChange={changePreviewPath} onThemeChange={activeOrigin === project.previewOrigin ? setRuntimeTheme : undefined} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} />)}</div>}
+              </div> : labMode === 'device' ? <PreviewFrame project={project} origin={activeOrigin} device={currentDevice} path={activePath} focusSelector={focusedSelector} themeOverride={nativeThemeTarget} resizable allowUpscale={stageFullscreen} onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onPathChange={changePreviewPath} onThemeChange={activeOrigin === project.previewOrigin ? setRuntimeTheme : undefined} onAudit={setRuntimeAudit} onRenderStatus={setRuntimeRenderStatus} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} /> : <div className="comparison-grid">{compareDevices.map((device) => <PreviewFrame key={device.id} project={project} origin={activeOrigin} device={device} path={activePath} compact focusSelector={focusedSelector} themeOverride={nativeThemeTarget} label={device.family === 'smartphone' ? 'Smartphone' : device.family === 'tablet' ? 'Tablette' : 'Ordinateur'} onPathChange={changePreviewPath} onThemeChange={activeOrigin === project.previewOrigin ? setRuntimeTheme : undefined} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} />)}</div>}
             </div>
           </div>
-          {scopedProject && <Inspector project={scopedProject} activeIssueCount={routeIssues.length} totalIssueCount={project.issues.length} showAllIssues={showAllIssues} onShowAllIssues={setShowAllIssues} tab={inspectorTab} onTab={setInspectorTab} selectedIssue={selectedIssue} selectedIds={selectedIssueIds} onPreviewIssue={(issue) => void previewIssue(issue)} onToggleIssue={toggleAcceptedIssue} detectedTheme={detectedTheme} themeTarget={themeTarget} previewThemeTarget={previewThemeTarget} onPreviewTheme={(target) => void previewTheme(target)} onRemoveTheme={removeTheme} proposal={proposal} proposalContext={proposalContext} previewBusy={previewBusy} staging={staging} runtimeAudit={runtimeAudit} instructions={instructions} onRemoveInstruction={removeInstruction} messages={messages} draft={draft} onDraft={setDraft} onSubmit={submitInstruction} busy={busy} onAcceptProposal={acceptProposal} onRejectProposal={rejectProposal} onBuild={() => void buildStaging()} onClear={() => void clearStaging()} />}
+          {scopedProject && <Inspector project={scopedProject} activeIssueCount={routeIssues.length} totalIssueCount={project.issues.length} showAllIssues={showAllIssues} onShowAllIssues={setShowAllIssues} tab={inspectorTab} onTab={setInspectorTab} selectedIssue={selectedIssue} selectedIds={selectedIssueIds} onPreviewIssue={(issue) => void previewIssue(issue)} onToggleIssue={toggleAcceptedIssue} detectedTheme={detectedTheme} themeTarget={themeTarget} previewThemeTarget={previewThemeTarget} onPreviewTheme={(target) => void previewTheme(target)} onRemoveTheme={removeTheme} proposal={proposal} proposalContext={proposalContext} previewBusy={previewBusy} staging={staging} runtimeAudit={runtimeAudit} runtimeRenderStatus={runtimeRenderStatus} instructions={instructions} onRemoveInstruction={removeInstruction} messages={messages} draft={draft} onDraft={setDraft} onSubmit={submitInstruction} busy={busy} onAcceptProposal={acceptProposal} onRejectProposal={rejectProposal} onBuild={() => void buildStaging()} onClear={() => void clearStaging()} />}
         </div>
         <footer className="activity-bar"><span><i className="status-dot status-dot--ok" /> {project.routes.length} page{project.routes.length > 1 ? 's' : ''}</span>{project.capabilities?.buildRequired ? <span className="activity-alert" title="Responsiver n’exécute jamais les scripts arbitraires d’un projet sans consentement. Ouvrez plutôt le fichier HTML généré dans dist ou out.">Sources à compiler · choisir dist/out</span> : <span className={counts.blockers ? 'activity-alert' : ''}>{counts.blockers} bloquant{counts.blockers > 1 ? 's' : ''}</span>}<span>{runtimeAudit ? `${runtimeAudit.overflowCount} débordement${runtimeAudit.overflowCount > 1 ? 's' : ''} à ${runtimeAudit.viewportWidth}px` : 'Audit visuel en attente'}</span><span className="activity-end" title="Seules les ressources locales et Google Fonts HTTPS sont autorisées dans la preview."><Icon name="shield" size={13} /> Réseau contrôlé</span></footer>
       </div>}
@@ -829,31 +972,74 @@ export default function App(): ReactElement {
       {destination === 'review' && project && <ReviewView project={project} staging={staging} sourceOrigin={project.previewOrigin} path={activePath} device={currentDevice} acceptedCount={counts.selected} onBuild={() => void buildStaging()} onClear={() => void clearStaging()} onCopy={() => void copyPatch()} busy={busy} />}
       {destination === 'export' && project && <ExportView project={project} staging={staging} selectedCount={counts.selected} busy={busy} onCopy={() => void copyPatch()} onExport={exportAction} onReview={() => go('review')} />}
     </main>
+    {showPreparation && preparation && <PreparationOverlay progress={preparation} />}
     {notice && <div className="toast" role="status"><Icon name="info" size={16} /> <span>{notice}</span><button aria-label="Fermer" onClick={() => setNotice(null)}><Icon name="close" size={14} /></button></div>}
   </div>
 }
 
-function ProjectsView({ project, projectPath, busy, onPath, onOpenFolder, onOpenFile, onOpenPath, onDemo, onContinue, onDrop }: {
+function PreparationOverlay({ progress }: { progress: ProjectPreparationProgress }): ReactElement {
+  const percentage = Math.max(8, Math.min(100, Math.round((progress.step / Math.max(progress.total, 1)) * 100)))
+  return <div className="preparation-overlay" role="dialog" aria-modal="true" aria-labelledby="preparation-title" aria-describedby="preparation-detail">
+    <section className="preparation-card">
+      <header><div className="preparation-mark"><Mark /><span className="preparation-orbit" /></div><div><span className="overline">Préparation locale</span><h2 id="preparation-title">Le laboratoire prend forme</h2></div><span className="preparation-step">{progress.step}/{progress.total}</span></header>
+      <div className="preparation-progress" aria-hidden="true"><i style={{ width: `${percentage}%` }} /></div>
+      <div className="preparation-copy" aria-live="polite"><span className="loading-mark" /><div><strong>{progress.label}</strong><p id="preparation-detail">{progress.detail ?? 'Responsiver inspecte le projet sans envoyer ni modifier aucun fichier.'}</p></div></div>
+      <footer><span><Icon name="shield" size={14} /> Analyse hors ligne</span><span>Sources intactes</span><span>Aucun script de build lancé</span></footer>
+    </section>
+  </div>
+}
+
+function recentDate(value: string): string {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return 'Date inconnue'
+  return new Intl.DateTimeFormat('fr-FR', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }).format(date)
+}
+
+function availabilityLabel(project: RecentProjectSummary): string {
+  if (project.availability === 'missing') return 'Chemin introuvable'
+  if (project.availability === 'unreadable') return 'Accès indisponible'
+  if (project.availability === 'unsupported') return 'Entrée non prise en charge'
+  return 'Disponible'
+}
+
+function ProjectsView({ project, projectPath, recentProjects, recentLoading, forgettingRecentId, busy, onPath, onOpenFolder, onOpenFile, onOpenPath, onOpenRecent, onForgetRecent, onDemo, onContinue, onDrop }: {
   project: (ProjectSnapshot & ProjectExtra) | null
   projectPath: string
+  recentProjects: RecentProjectSummary[]
+  recentLoading: boolean
+  forgettingRecentId: string | null
   busy: boolean
   onPath: (value: string) => void
   onOpenFolder: () => void
   onOpenFile: () => void
   onOpenPath: () => void
+  onOpenRecent: (id: string) => void
+  onForgetRecent: (id: string) => void
   onDemo: () => void
   onContinue: () => void
   onDrop: (file: File) => void
 }): ReactElement {
   const [dragging, setDragging] = useState(false)
+  const formerProjects = recentProjects.filter((item) => !item.isActive).slice(0, 5)
+  const readiness = project?.previewReadiness
+  const blocked = readiness?.status === 'blocked' || readiness?.status === 'needs-build'
+  const themeCount = project?.theme.detected === 'dual' ? 2 : project?.theme.detected === 'unknown' ? 0 : 1
   return <div className="projects-page">
-    <header className="page-head"><div><span className="overline">Bibliothèque locale</span><h1>Projets</h1><p>Ouvrez un dossier complet ou un fichier HTML. Responsiver analyse les sources et lance un aperçu navigable sur votre machine.</p></div><button className="button button--primary" onClick={onOpenFolder} disabled={busy}><Icon name="plus" /> Nouveau projet</button></header>
-    <section className={dragging ? 'drop-zone is-dragging' : 'drop-zone'} onDragEnter={(event) => { event.preventDefault(); setDragging(true) }} onDragOver={(event) => event.preventDefault()} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); setDragging(false); const file = event.dataTransfer.files[0]; if (file) onDrop(file) }}>
-      <div className="drop-mark"><Mark /></div><div><h2>Déposez votre projet ici</h2><p>Dossier, fichier HTML ou projet web local. Aucun envoi distant.</p></div><div className="drop-actions"><button className="button button--primary" onClick={onOpenFolder} disabled={busy}><Icon name="folder" /> Choisir un dossier</button><button className="button button--secondary" onClick={onOpenFile} disabled={busy}><Icon name="file" /> Choisir un fichier</button></div>
+    <header className="page-head"><div><span className="overline">Bibliothèque locale</span><h1>Vos projets, prêts à être éprouvés.</h1><p>À chaque ouverture, Responsiver relit les sources, prépare les constats et vérifie qu’un rendu exploitable existe avant d’ouvrir le laboratoire.</p></div><button className="button button--primary" onClick={onOpenFolder} disabled={busy}><Icon name="plus" /> Nouveau projet</button></header>
+    <section className={dragging ? 'drop-zone is-dragging' : 'drop-zone'} onDragEnter={(event) => { event.preventDefault(); if (!busy) setDragging(true) }} onDragOver={(event) => event.preventDefault()} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); setDragging(false); const file = event.dataTransfer.files[0]; if (file && !busy) onDrop(file) }}>
+      <div className="drop-mark"><Mark /></div><div><h2>Déposez le projet, Responsiver prépare le reste</h2><p>Site statique, dossier complet ou artefact compilé existant. Rien ne quitte cette machine.</p></div><div className="drop-actions"><button className="button button--primary" onClick={onOpenFolder} disabled={busy}><Icon name="folder" /> Choisir un dossier</button><button className="button button--secondary" onClick={onOpenFile} disabled={busy}><Icon name="file" /> Choisir un fichier</button></div>
     </section>
     <form className="path-bar" onSubmit={(event) => { event.preventDefault(); onOpenPath() }}><label htmlFor="project-path">Chemin local</label><input id="project-path" value={projectPath} onChange={(event) => onPath(event.target.value)} placeholder="/Users/vous/Sites/mon-projet" spellCheck={false} /><button className="button button--secondary" disabled={busy}>Ouvrir</button></form>
     <section className="project-list"><div className="section-heading"><div><span className="overline">Session</span><h2>{project ? 'Projet actif' : 'Commencer sans configuration'}</h2></div><button className="text-button" onClick={onDemo}>Ouvrir la démo locale <Icon name="arrow" size={15} /></button></div>
-      {project ? <article className="project-row"><div className="project-symbol">{project.name.slice(0, 2).toUpperCase()}</div><div className="project-copy"><strong>{project.name}</strong><span>{project.kind} · {project.files} fichiers · {project.routes.length} pages</span>{project.capabilities?.buildRequired && <span className="project-warning">Sources à compiler : ouvrez l’entrée générée dans dist ou out pour tester le rendu final.</span>}<code>{project.root}</code></div><div className="project-metrics"><span><b>{project.issues.length}</b> constats</span><span><b>{project.theme.detected === 'dual' ? '2' : '1'}</b> thème{project.theme.detected === 'dual' ? 's' : ''}</span></div><button className="button button--primary" onClick={onContinue}>Laboratoire <Icon name="arrow" /></button></article> : <div className="empty-project"><Icon name="shield" /><p>La démo utilise le même runner local que vos projets : navigation, scripts et analyse sont réellement exercés.</p></div>}
+      {project ? <><article className={blocked ? 'project-row project-row--blocked' : 'project-row'}><div className="project-symbol">{project.name.slice(0, 2).toUpperCase()}</div><div className="project-copy"><strong>{project.name}</strong><span>{project.kind} · {project.files} fichiers · {project.routes.length} page{project.routes.length !== 1 ? 's' : ''}</span>{project.capabilities?.buildRequired && <span className="project-warning">Sources à compiler : Responsiver ne lance aucun script de projet sans votre accord.</span>}<code title={project.root}>{project.root}</code></div><div className="project-metrics"><span><b>{project.issues.length}</b> constat{project.issues.length !== 1 ? 's' : ''}</span><span><b>{themeCount}</b> {themeCount === 0 ? 'à qualifier' : `thème${themeCount > 1 ? 's' : ''}`}</span></div><button className={blocked ? 'button button--secondary' : 'button button--primary'} onClick={onContinue}>{blocked ? 'Voir le diagnostic' : 'Laboratoire'} <Icon name="arrow" /></button></article>
+        {blocked && readiness && <div className="readiness-card" role="alert"><div className="readiness-icon"><Icon name="finding" /></div><div><span className="overline">Rendu non exploitable</span><strong>{readiness.summary}</strong><p>Responsiver n’invente pas une interface absente et ne masque plus ce problème derrière une prévisualisation blanche.</p><ul>{readiness.diagnostics.slice(0, 4).map((diagnostic) => <li key={diagnostic.code}><b>{diagnostic.title}</b><span>{diagnostic.detail}</span></li>)}</ul></div></div>}
+      </> : <div className="empty-project"><Icon name="shield" /><p>La démo utilise le même runner local que vos projets : navigation, scripts et analyse sont réellement exercés.</p></div>}
+    </section>
+    <section className="recent-section"><div className="section-heading"><div><span className="overline">Mémoire locale</span><h2>Anciens projets</h2></div><span className="privacy-note"><Icon name="shield" size={13} /> Chemins et métadonnées · aucun code</span></div>
+      {recentLoading ? <div className="recent-skeleton" role="status"><span /><span /><span /></div> : formerProjects.length ? <div className="recent-list">{formerProjects.map((item) => {
+        const available = item.availability === 'available'
+        return <article className={available ? 'recent-row' : 'recent-row is-unavailable'} key={item.id}><div className="recent-monogram">{item.name.slice(0, 2).toUpperCase()}</div><div className="recent-copy"><div><strong>{item.name}</strong><span className={available ? 'availability availability--ready' : 'availability'}><i /> {availabilityLabel(item)}</span></div><span>{item.kind} · {item.routes} page{item.routes !== 1 ? 's' : ''} · {item.issues} constat{item.issues !== 1 ? 's' : ''}</span><code title={item.selectionPath}>{item.selectionPath}</code></div><time dateTime={item.lastOpenedAt}>Ouvert le {recentDate(item.lastOpenedAt)}</time><button className="button button--secondary" onClick={() => onOpenRecent(item.id)} disabled={busy || !available}>Réanalyser <Icon name="arrow" size={15} /></button><button className="recent-forget" onClick={() => onForgetRecent(item.id)} disabled={busy || forgettingRecentId !== null} aria-label={`Retirer ${item.name} de l’historique`} title="Retirer de l’historique"><Icon name="close" size={14} /></button></article>
+      })}</div> : <div className="empty-recent"><span>Historique</span><p>Les projets déjà ouverts apparaîtront ici. Responsiver ne mémorise que leur chemin local et relance toujours une analyse complète.</p></div>}
     </section>
   </div>
 }
@@ -877,7 +1063,7 @@ function DeviceControls({ family, devices: choices, selectedId, width, height, o
   </div>
 }
 
-function Inspector({ project, activeIssueCount, totalIssueCount, showAllIssues, onShowAllIssues, tab, onTab, selectedIssue, selectedIds, onPreviewIssue, onToggleIssue, detectedTheme, themeTarget, previewThemeTarget, onPreviewTheme, onRemoveTheme, proposal, proposalContext, previewBusy, staging, runtimeAudit, instructions, onRemoveInstruction, messages, draft, onDraft, onSubmit, busy, onAcceptProposal, onRejectProposal, onBuild, onClear }: {
+function Inspector({ project, activeIssueCount, totalIssueCount, showAllIssues, onShowAllIssues, tab, onTab, selectedIssue, selectedIds, onPreviewIssue, onToggleIssue, detectedTheme, themeTarget, previewThemeTarget, onPreviewTheme, onRemoveTheme, proposal, proposalContext, previewBusy, staging, runtimeAudit, runtimeRenderStatus, instructions, onRemoveInstruction, messages, draft, onDraft, onSubmit, busy, onAcceptProposal, onRejectProposal, onBuild, onClear }: {
   project: ProjectSnapshot & ProjectExtra
   activeIssueCount: number
   totalIssueCount: number
@@ -899,6 +1085,7 @@ function Inspector({ project, activeIssueCount, totalIssueCount, showAllIssues, 
   previewBusy: boolean
   staging: StagingSnapshot | null
   runtimeAudit: RuntimeAudit | null
+  runtimeRenderStatus: RuntimeRenderState | null
   instructions: string[]
   onRemoveInstruction: (instruction: string) => void
   messages: ConversationMessage[]
@@ -915,13 +1102,17 @@ function Inspector({ project, activeIssueCount, totalIssueCount, showAllIssues, 
   const acceptedCount = selectedIds.length + instructions.length + (themeTarget ? 1 : 0)
   const selectedProposal = proposalContext?.kind === 'issue' && proposalContext.issueId === selectedIssue?.id ? proposal : null
   const selectedAccepted = selectedIssue ? selectedIds.includes(selectedIssue.id) : false
-  const selectedActionable = Boolean(issueExtra?.fix && issueExtra.fix.kind !== 'manual')
+  const canStage = project.capabilities?.staging !== false
+  const selectedActionable = canStage && Boolean(issueExtra?.fix && issueExtra.fix.kind !== 'manual')
   const instructionProposal = proposalContext?.kind === 'instruction' ? proposal : null
   return <aside className="inspector" aria-label="Inspecteur">
     <div className="inspector-tabs" role="tablist" aria-label="Outils d’analyse">{inspectorTabs.map((item) => <button role="tab" aria-selected={tab === item.id} className={tab === item.id ? 'is-active' : ''} key={item.id} onClick={() => onTab(item.id)} title={item.label}><Icon name={item.icon} size={16} /><span>{item.label}</span>{item.id === 'findings' && <b>{project.issues.length}</b>}</button>)}</div>
     <div className="inspector-content">
       {tab === 'findings' && <><div className="inspector-heading"><div><span className="overline">Analyse déterministe</span><h2>Constats</h2></div>{runtimeAudit && <span className="live-chip"><i /> Direct</span>}</div>
         <div className="issue-scope" role="group" aria-label="Portée des constats"><button className={!showAllIssues ? 'is-active' : ''} onClick={() => onShowAllIssues(false)}>Page active <b>{activeIssueCount}</b></button><button className={showAllIssues ? 'is-active' : ''} onClick={() => onShowAllIssues(true)}>Toutes les pages <b>{totalIssueCount}</b></button></div>
+        {project.previewReadiness?.status === 'degraded' && <div className="runtime-alert"><Icon name="info" size={16} /><div><strong>Prévisualisation disponible avec limites</strong><span>{project.previewReadiness.summary} Les points concernés figurent dans les constats ci-dessous.</span></div></div>}
+        {project.previewBasePath && <div className="runtime-alert runtime-alert--artifact"><Icon name="info" size={16} /><div><strong>Audit sur une sortie compilée</strong><span>Les corrections ciblent {project.previewBasePath}. Un prochain build peut les écraser : reportez ensuite les changements utiles dans les sources.</span></div></div>}
+        {runtimeRenderStatus && runtimeRenderStatus.failureCount > 0 && <div className="runtime-alert runtime-alert--errors" aria-live="polite"><Icon name="finding" size={16} /><div><strong>{runtimeRenderStatus.failureCount} erreur{runtimeRenderStatus.failureCount > 1 ? 's' : ''} observée{runtimeRenderStatus.failureCount > 1 ? 's' : ''} pendant le rendu</strong><span>{runtimeRenderStatus.firstFailure ?? 'Le site reste navigable ; vérifiez les scripts et ressources signalés dans la console du projet.'}</span></div></div>}
         {runtimeAudit && runtimeAudit.overflowCount > 0 && <div className="runtime-alert"><Icon name="ruler" size={16} /><div><strong>{runtimeAudit.overflowCount} débordement{runtimeAudit.overflowCount > 1 ? 's' : ''} visible{runtimeAudit.overflowCount > 1 ? 's' : ''}</strong><span>Mesuré à {runtimeAudit.viewportWidth}px sur la page active.</span></div></div>}
         <div className="issue-list">{project.issues.length ? project.issues.map((issue) => {
           const accepted = selectedIds.includes(issue.id)
@@ -931,16 +1122,16 @@ function Inspector({ project, activeIssueCount, totalIssueCount, showAllIssues, 
           {!selectedActionable ? <div className="manual-review"><Icon name="info" size={15} /><span>Ce point ne possède pas de transformation automatique sûre. Responsiver vous amène à la page concernée sans simuler un résultat.</span></div> : previewBusy && proposalContext?.issueId === selectedIssue.id ? <div className="proposal-pending" role="status"><span className="loading-mark" /> Préparation de l’avant / après…</div> : selectedProposal ? <ProposalDecision title="Correctif isolé" accepted={selectedAccepted} changeCount={selectedProposal.changes.length} disabled={busy} onAccept={onAcceptProposal} onReject={onRejectProposal} /> : <button className="button button--primary button--full" onClick={() => onPreviewIssue(selectedIssue)} disabled={busy}><Icon name="compare" /> Voir l’avant / après</button>}
         </article>}
       </>}
-      {tab === 'fixes' && <><div className="inspector-heading"><div><span className="overline">Choix explicitement validés</span><h2>Correctifs</h2></div><strong className="count-badge">{acceptedCount}</strong></div><div className="fix-list">{acceptedCount ? <>
+      {tab === 'fixes' && <><div className="inspector-heading"><div><span className="overline">Choix explicitement validés</span><h2>Correctifs</h2></div><strong className="count-badge">{acceptedCount}</strong></div>{!canStage && <div className="manual-review"><Icon name="info" size={15} /><span>Rendez d’abord l’entrée exploitable, puis réanalysez le projet. Aucun correctif ne sera généré sur un layout absent.</span></div>}<div className="fix-list">{acceptedCount ? <>
         {project.issues.filter((issue) => selectedIds.includes(issue.id)).map((issue) => <article key={issue.id}><span className={(issue as ProjectIssue & IssueExtra).fix?.confidence === 'safe' ? 'confidence confidence--safe' : 'confidence'}>{(issue as ProjectIssue & IssueExtra).fix?.confidence === 'safe' ? 'Automatique' : 'À réviser'}</span><strong>{issue.title}</strong><code>{issue.source?.file ?? issue.rule}</code><button onClick={() => onToggleIssue(issue.id)} disabled={busy} aria-label={`Retirer ${issue.title}`}><Icon name="close" size={14} /></button></article>)}
         {themeTarget && <article><span className="confidence confidence--safe">Thème</span><strong>Variante {themeTarget === 'dark' ? 'sombre' : 'claire'}</strong><code>Palette complémentaire validée</code><button onClick={onRemoveTheme} disabled={busy} aria-label={`Retirer la variante ${themeTarget === 'dark' ? 'sombre' : 'claire'}`}><Icon name="close" size={14} /></button></article>}
         {instructions.map((instruction) => <article key={instruction}><span className="confidence">Instruction</span><strong>{instruction}</strong><code>Règle locale déterministe</code><button onClick={() => onRemoveInstruction(instruction)} disabled={busy} aria-label={`Retirer l’instruction ${instruction}`}><Icon name="close" size={14} /></button></article>)}
       </> : <div className="empty-panel"><Icon name="changes" /><strong>Aucun choix validé</strong><span>Prévisualisez un constat, un thème ou une instruction, puis validez sa proposition.</span></div>}</div>
         {staging && <div className="staging-summary"><span><i /> Staging prêt</span><strong>{staging.changes.length} changements · {staging.changedFiles.length} fichiers</strong><button className="text-button" onClick={onClear} disabled={busy}>Écarter</button></div>}
-        <button className="button button--primary button--full inspector-action" onClick={onBuild} disabled={busy || previewBusy || !acceptedCount}>{busy ? 'Construction…' : staging ? 'Reconstruire le staging' : 'Construire le staging'} <Icon name="arrow" /></button>
+        <button className="button button--primary button--full inspector-action" onClick={onBuild} disabled={busy || previewBusy || !acceptedCount || !canStage}>{busy ? 'Construction…' : staging ? 'Reconstruire le staging' : 'Construire le staging'} <Icon name="arrow" /></button>
       </>}
-      {tab === 'theme' && <ThemePanel project={project} detectedTheme={detectedTheme} acceptedTarget={themeTarget} previewTarget={previewThemeTarget} proposal={proposalContext?.kind === 'theme' ? proposal : null} busy={previewBusy} disabled={busy} onPreview={onPreviewTheme} onAccept={onAcceptProposal} onReject={onRejectProposal} onRemoveAccepted={onRemoveTheme} />}
-      {tab === 'conversation' && <><div className="inspector-heading"><div><span className="overline">Ajustements locaux</span><h2>Conversation</h2></div><span className="rule-chip">Sans IA</span></div><div className="conversation">{messages.map((message) => <div className={`message message--${message.author}`} key={message.id}><span>{message.author === 'user' ? 'Vous' : 'Responsiver'}</span><p>{message.text}</p></div>)}</div>{previewBusy && proposalContext?.kind === 'instruction' && <div className="proposal-pending" role="status"><span className="loading-mark" /> Interprétation locale…</div>}{instructionProposal && proposalContext?.instruction && <ProposalDecision title="Ajustement prévisualisé" accepted={instructions.includes(proposalContext.instruction)} changeCount={instructionProposal.changes.filter((change) => change.kind === 'instruction').length} disabled={busy} onAccept={onAcceptProposal} onReject={onRejectProposal} />}<form className="prompt-form" onSubmit={onSubmit}><label htmlFor="instruction">Nouvel ajustement</label><textarea id="instruction" value={draft} onChange={(event) => onDraft(event.target.value)} placeholder="Ex. Réduis les arrondis et utilise #b94d32 comme couleur d’accent." rows={4} /><div><small>Couleur · espacement · rayon · texte · navigation</small><button className="button button--primary" disabled={busy || previewBusy || !draft.trim()}>Prévisualiser</button></div></form></>}
+      {tab === 'theme' && <>{!canStage && <div className="manual-review"><Icon name="info" size={15} /><span>La variante de thème sera disponible après qu’un rendu exploitable aura été détecté.</span></div>}<ThemePanel project={project} detectedTheme={detectedTheme} acceptedTarget={themeTarget} previewTarget={previewThemeTarget} proposal={proposalContext?.kind === 'theme' ? proposal : null} busy={previewBusy} disabled={busy || !canStage} onPreview={onPreviewTheme} onAccept={onAcceptProposal} onReject={onRejectProposal} onRemoveAccepted={onRemoveTheme} /></>}
+      {tab === 'conversation' && <><div className="inspector-heading"><div><span className="overline">Ajustements locaux</span><h2>Conversation</h2></div><span className="rule-chip">Sans IA</span></div>{!canStage && <div className="manual-review"><Icon name="info" size={15} /><span>Les ajustements seront disponibles après qu’un layout exploitable aura été détecté.</span></div>}<div className="conversation">{messages.map((message) => <div className={`message message--${message.author}`} key={message.id}><span>{message.author === 'user' ? 'Vous' : 'Responsiver'}</span><p>{message.text}</p></div>)}</div>{previewBusy && proposalContext?.kind === 'instruction' && <div className="proposal-pending" role="status"><span className="loading-mark" /> Interprétation locale…</div>}{instructionProposal && proposalContext?.instruction && <ProposalDecision title="Ajustement prévisualisé" accepted={instructions.includes(proposalContext.instruction)} changeCount={instructionProposal.changes.filter((change) => change.kind === 'instruction').length} disabled={busy || !canStage} onAccept={onAcceptProposal} onReject={onRejectProposal} />}<form className="prompt-form" onSubmit={onSubmit}><label htmlFor="instruction">Nouvel ajustement</label><textarea id="instruction" value={draft} onChange={(event) => onDraft(event.target.value)} placeholder="Ex. Réduis les arrondis et utilise #b94d32 comme couleur d’accent." rows={4} disabled={!canStage} /><div><small>Couleur · espacement · rayon · texte · navigation</small><button className="button button--primary" disabled={busy || previewBusy || !draft.trim() || !canStage}>Prévisualiser</button></div></form></>}
     </div>
   </aside>
 }
@@ -950,12 +1141,21 @@ function ProposalDecision({ title, accepted, changeCount, disabled = false, onAc
 }
 
 function ThemePanel({ project, detectedTheme, acceptedTarget, previewTarget, proposal, busy, disabled, onPreview, onAccept, onReject, onRemoveAccepted }: { project: ProjectSnapshot & ProjectExtra; detectedTheme: RuntimeTheme; acceptedTarget: ThemeTarget | null; previewTarget: ThemeTarget | null; proposal: StagingSnapshot | null; busy: boolean; disabled: boolean; onPreview: (target: ThemeTarget) => void; onAccept: () => void; onReject: () => void; onRemoveAccepted: () => void }): ReactElement {
-  const hasDark = project.theme.hasDark || project.theme.detected === 'dual' || detectedTheme === 'dark'
-  const hasLight = project.theme.hasLight || project.theme.detected === 'dual' || detectedTheme === 'light'
+  const hasDark = project.theme.hasDark || project.theme.detected === 'dual'
+  const hasLight = project.theme.hasLight || project.theme.detected === 'dual'
   const recommendation = hasDark && !hasLight ? 'light' : hasLight && !hasDark ? 'dark' : detectedTheme === 'dark' ? 'light' : 'dark'
   const dual = hasDark && hasLight
-  return <><div className="inspector-heading"><div><span className="overline">Palette complémentaire</span><h2>Thème</h2></div><span className={`theme-chip theme-chip--${dual ? 'dual' : detectedTheme}`}>{dual ? 'Clair + sombre' : detectedTheme === 'dark' ? 'Sombre' : detectedTheme === 'light' ? 'Clair' : 'À confirmer'}</span></div>
-    <div className="theme-diagnosis"><div className={`theme-swatch theme-swatch--${detectedTheme}`}><span>Aa</span></div><div><strong>{dual ? 'Deux thèmes déjà présents' : `Thème ${detectedTheme === 'dark' ? 'sombre' : detectedTheme === 'light' ? 'clair' : 'non classé'} détecté`}</strong><p>{dual ? 'Responsiver n’ajoute aucune variante identique.' : `Cliquez sur la variante ${recommendation === 'light' ? 'claire' : 'sombre'} pour la voir immédiatement, avant toute validation.`}</p></div></div>
+  const analyzedTheme: RuntimeTheme = project.theme.detected === 'dark' ? 'dark' : project.theme.detected === 'light' ? 'light' : 'unknown'
+  const displayedTheme = analyzedTheme === 'unknown' ? detectedTheme : analyzedTheme
+  const diagnosis = dual
+    ? 'Deux thèmes déjà présents'
+    : analyzedTheme !== 'unknown'
+      ? `Thème ${analyzedTheme === 'dark' ? 'sombre' : 'clair'} détecté`
+      : detectedTheme !== 'unknown'
+        ? `Rendu ${detectedTheme === 'dark' ? 'sombre' : 'clair'} sur la page active`
+        : 'Thème non classé'
+  return <><div className="inspector-heading"><div><span className="overline">Palette complémentaire</span><h2>Thème</h2></div><span className={`theme-chip theme-chip--${dual ? 'dual' : displayedTheme}`}>{dual ? 'Clair + sombre' : displayedTheme === 'dark' ? 'Sombre' : displayedTheme === 'light' ? 'Clair' : 'À confirmer'}</span></div>
+    <div className="theme-diagnosis"><div className={`theme-swatch theme-swatch--${displayedTheme}`}><span>Aa</span></div><div><strong>{diagnosis}</strong><p>{dual ? 'Responsiver n’ajoute aucune variante identique.' : `Cliquez sur la variante ${recommendation === 'light' ? 'claire' : 'sombre'} pour la voir immédiatement, avant toute validation.`}</p></div></div>
     <fieldset className="theme-options"><legend>Prévisualiser une variante</legend><label className={`${previewTarget === 'light' ? 'is-selected' : ''}${hasLight ? ' is-existing' : ''}`}><input type="radio" name="theme-preview" checked={previewTarget === 'light'} onChange={() => onPreview('light')} disabled={busy || disabled} /><span className="palette-preview palette-preview--light"><i /><i /><i /></span><span><strong>Clair {hasLight && <em>Déjà présent</em>}</strong><small>{hasLight ? 'Afficher la variante native, sans la dupliquer' : 'Fond minéral, texte graphite'}</small></span></label><label className={`${previewTarget === 'dark' ? 'is-selected' : ''}${hasDark ? ' is-existing' : ''}`}><input type="radio" name="theme-preview" checked={previewTarget === 'dark'} onChange={() => onPreview('dark')} disabled={busy || disabled} /><span className="palette-preview palette-preview--dark"><i /><i /><i /></span><span><strong>Sombre {hasDark && <em>Déjà présent</em>}</strong><small>{hasDark ? 'Afficher la variante native, sans la dupliquer' : 'Graphite profond, surfaces étagées'}</small></span></label></fieldset>
     {busy && <div className="proposal-pending" role="status"><span className="loading-mark" /> Génération locale de la palette…</div>}
     {proposal && previewTarget && <ProposalDecision title={`Variante ${previewTarget === 'dark' ? 'sombre' : 'claire'}`} accepted={acceptedTarget === previewTarget} changeCount={proposal.changes.length} disabled={disabled} onAccept={onAccept} onReject={onReject} />}
@@ -979,6 +1179,7 @@ function ReviewView({ project, staging, sourceOrigin, path, device, acceptedCoun
 }): ReactElement {
   return <div className="standard-page"><header className="page-head"><div><span className="overline">Validation avant export</span><h1>Révision</h1><p>Comparez la source et le staging. Le dossier original reste intact jusqu’à votre export explicite.</p></div>{staging && <div className="review-actions"><button className="button button--quiet" onClick={onClear}>Écarter</button><button className="button button--primary" onClick={onCopy}><Icon name="copy" /> Copier le patch</button></div>}</header>
     {!staging ? <section className="review-empty"><Icon name="changes" size={28} /><h2>Aucun staging à réviser</h2><p>Validez des propositions dans le laboratoire, puis construisez leur version exportable.</p><button className="button button--primary" onClick={onBuild} disabled={busy || !acceptedCount}>Construire avec {acceptedCount} choix validé{acceptedCount > 1 ? 's' : ''}</button></section> : <>
+      {project.previewBasePath && <div className="artifact-warning"><Icon name="info" size={16} /><div><strong>Correctifs appliqués à la sortie compilée {project.previewBasePath}</strong><span>Cette livraison est exploitable telle quelle, mais un prochain build peut la remplacer. Reportez le correctif validé dans les sources pour le rendre durable.</span></div></div>}
       <section className="review-summary"><div><span>Modifications</span><strong>{staging.changes.length}</strong></div><div><span>Fichiers touchés</span><strong>{staging.changedFiles.length}</strong></div><div><span>Thème généré</span><strong>{staging.themeTarget ? staging.themeTarget === 'dark' ? 'Sombre' : 'Clair' : 'Non'}</strong></div><div><span>Sources modifiées</span><strong>0</strong></div></section>
       <section className="visual-comparison"><div><span>Source</span><PreviewFrame compact project={project} origin={sourceOrigin} device={device} path={path} /></div><div><span>Staging</span><PreviewFrame compact project={project} origin={staging.previewOrigin} device={device} path={path} /></div></section>
       <section className="diff-panel"><header><div><span className="overline">Patch unifié</span><strong>{staging.changedFiles.join(' · ') || 'responsiver-theme.css'}</strong></div><button className="icon-button" onClick={onCopy} aria-label="Copier le patch"><Icon name="copy" size={15} /></button></header><pre>{staging.patch || staging.generatedCss || 'Aucun contenu textuel.'}</pre></section>
@@ -996,6 +1197,7 @@ function ExportView({ project, staging, selectedCount, busy, onCopy, onExport, o
   onReview: () => void
 }): ReactElement {
   return <div className="standard-page"><header className="page-head"><div><span className="overline">Sortie maîtrisée</span><h1>Exporter</h1><p>Choisissez le niveau de livraison. Responsiver n’écrit jamais silencieusement dans le projet d’origine.</p></div><span className={staging ? 'export-readiness is-ready' : 'export-readiness'}><i />{staging ? 'Staging prêt' : 'Staging requis'}</span></header>
+    {project.previewBasePath && <div className="artifact-warning"><Icon name="info" size={16} /><div><strong>Livraison issue de {project.previewBasePath}</strong><span>Elle corrige l’artefact compilé actuel. Conservez le patch et reportez-le dans les sources avant de relancer votre build.</span></div></div>}
     <section className="export-ledger"><header><div><span className="overline">Contenu de livraison</span><h2>{project.name}</h2></div><button className="text-button" onClick={onReview}>Réviser le staging <Icon name="arrow" size={15} /></button></header><div><span><b>{staging?.changes.length ?? 0}</b> modifications</span><span><b>{staging?.changedFiles.length ?? 0}</b> fichiers</span><span><b>{selectedCount}</b> règles retenues</span><span><b>{staging?.themeTarget ? '1' : '0'}</b> variante de thème</span></div></section>
     <section className="export-grid"><article><div className="export-icon"><Icon name="copy" /></div><span className="overline">Presse-papiers</span><h2>Copier le patch</h2><p>Pour relire ou appliquer le diff avec votre outil habituel.</p><button className="button button--secondary button--full" onClick={onCopy} disabled={!staging || busy}>Copier</button></article><article><div className="export-icon"><Icon name="file" /></div><span className="overline">Livraison minimale</span><h2>Fichiers modifiés</h2><p>Un dossier ne contenant que les fichiers réellement transformés.</p><button className="button button--secondary button--full" onClick={() => onExport('changed')} disabled={!staging || busy}>Choisir la destination</button></article><article><div className="export-icon"><Icon name="projects" /></div><span className="overline">Version complète</span><h2>Copie du projet</h2><p>Le projet entier avec le staging appliqué, sans altérer l’original.</p><button className="button button--primary button--full" onClick={() => onExport('copy')} disabled={!staging || busy}>Exporter une copie</button></article></section>
     <footer className="export-foot"><div><Icon name="shield" /><span><strong>Traçabilité locale</strong><small>Le patch, la liste des règles et le rapport restent lisibles.</small></span></div><div><button className="text-button" onClick={() => onExport('report')} disabled={busy}>Exporter le rapport d’analyse</button><button className="text-button" onClick={() => onExport('patch')} disabled={!staging || busy}>Enregistrer le fichier .patch</button></div></footer>

@@ -2,15 +2,19 @@
 
 Responsiver est un laboratoire desktop open source pour auditer, corriger et valider la responsivité d’un projet web sans envoyer son code vers un service distant.
 
-La version 0.4 ouvre un dossier ou un fichier HTML, sert le site sur des origines locales isolées, permet de naviguer réellement entre ses pages et mesure les débordements. Chaque correction peut être examinée dans une proposition éphémère, comparée à la source à l’endroit précis du constat, puis acceptée ou écartée. Seules les décisions validées alimentent le staging exportable ; le dossier source n’est jamais réécrit.
+La version 0.5 prépare entièrement le projet dès son ouverture : inventaire, sélection de l’entrée, analyse responsive, qualification du rendu et démarrage du runner. Un site prêt rejoint automatiquement le laboratoire ; un projet incomplet, un build absent ou un bundle défaillant reçoit un diagnostic exploitable au lieu d’une prévisualisation blanche. Les anciens projets restent accessibles par leur chemin local et sont toujours réanalysés avant réouverture.
 
 ## Fonctionnalités
 
 - Ouverture par dossier, fichier HTML, chemin local ou glisser-déposer.
 - Détection prioritaire de la vraie entrée du site ; les dossiers `demo`, `examples` et assimilés ne prennent pas sa place.
+- Détection automatique d’un artefact existant dans `dist`, `build`, `out` ou `.output/public`, y compris imbriqué ; sa racine web est déduite de l’entrée, de `<base href>` et de ses assets, sans lancer de commande du projet.
+- Préparation visible en six étapes lorsque l’analyse prend réellement du temps ; les ouvertures rapides ne déclenchent aucun écran de chargement inutile.
+- Qualification `ready`, `degraded`, `blocked` ou `needs-build`, complétée par un smoke-test du contenu réellement peint — pseudo-éléments et Shadow DOM ouverts compris —, des erreurs tardives et d’un éventuel périmètre d’analyse tronqué.
+- Section **Anciens projets** fondée sur les chemins locaux : aucune copie du code, réanalyse obligatoire et retrait individuel de l’historique.
 - Navigation fonctionnelle entre les pages, ancres et fenêtres internes du projet.
 - Aperçu smartphone, tablette et ordinateur avec modèles connus, dimensions libres, rotation et redimensionnement direct par les bords ou les angles.
-- Plein écran pour inspecter le site sans perdre la route, la taille ou la version affichée.
+- Plein écran modal pour inspecter et agrandir le site sans perdre la route, la taille, le focus ou la version affichée.
 - Mode **Comparer** sur trois familles d’appareils, distinct de la comparaison **Avant / Après** d’un correctif.
 - Analyse HTML/CSS par route : viewport, largeurs fixes, `min-width`, `nowrap`, ressources distantes et vérification visuelle.
 - Audit runtime des éléments qui débordent réellement du viewport.
@@ -26,15 +30,17 @@ La version 0.4 ouvre un dossier ou un fichier HTML, sert le site sur des origine
 
 Responsiver n’intègre ni compte, télémétrie, analytics, API produit distante, moteur d’IA ou mise à jour automatique.
 
-Le code importé reste sur la machine. Les aperçus peuvent charger uniquement leurs ressources locales et, si le projet en contient déjà, les feuilles et fichiers de police Google Fonts en HTTPS. Les autres CDN, `fetch`, WebSockets, formulaires externes, nouvelles fenêtres et permissions navigateur sont bloqués. Une ressource externe interdite est signalée dans les constats afin de pouvoir la vendoriser localement après vérification de sa licence.
+Le code importé reste sur la machine. Responsiver conserve seulement un historique borné de chemins et de métadonnées d’analyse dans le dossier de données local de l’application ; ni source, ni HTML de preview, ni patch, ni correction n’y sont copiés. Les aperçus peuvent charger uniquement leurs ressources locales et, si le projet en contient déjà, les feuilles et fichiers de police Google Fonts en HTTPS. Les autres CDN, `fetch`, WebSockets, formulaires externes, nouvelles fenêtres et permissions navigateur sont bloqués.
 
 Consultez [PRIVACY.md](PRIVACY.md) et [SECURITY.md](SECURITY.md) pour le détail.
 
 ## Projets pris en charge
 
-Le runner ouvre les sites statiques et les sorties déjà compilées : HTML, CSS, JavaScript, médias, WebAssembly et routes SPA avec fallback local.
+Le runner ouvre les sites statiques et les sorties déjà compilées : HTML, CSS, JavaScript, médias, WebAssembly et routes SPA avec fallback local. Lorsqu’une racine contient un shell de framework et un artefact exploitable, Responsiver monte automatiquement l’artefact et résout aussi ses assets absolus.
 
-Responsiver n’exécute jamais automatiquement `npm install`, un script de build, un serveur backend, du SSR ou une commande provenant du projet. Pour Vite, Next, Nuxt, Astro et les autres chaînes nécessitant une compilation, ouvrez le fichier HTML ou le dossier produit dans `dist`, `out`, `build` ou équivalent. L’interface affiche cette limite lorsqu’une chaîne de build est détectée.
+Les corrections d’une sortie compilée restent exportables et prévisualisables, mais l’interface rappelle qu’un prochain build peut les écraser : le patch validé doit alors être reporté dans les sources pour devenir durable.
+
+Responsiver n’exécute jamais automatiquement `npm install`, un script de build, un serveur backend, du SSR ou une commande provenant du projet. Si aucune sortie statique n’existe, l’interface indique qu’une compilation locale est requise. Un document sans contenu, une feuille CSS vide ou des assets orphelins sont signalés explicitement : Responsiver ne peut pas reconstruire un site absent de ses sources.
 
 ## Lancer le projet
 
@@ -55,7 +61,7 @@ npm run build
 npm audit
 ```
 
-Le test E2E lance Electron et couvre la démo, la navigation, la proposition avant validation, le ciblage d’un constat, le thème complémentaire, le redimensionnement, le plein écran, le staging final, la comparaison et l’export. `npm run test:e2e:packaged` exécute le même parcours sur l’application macOS déjà empaquetée.
+Le test E2E lance Electron et couvre aussi le projet incomplet, le bundle local en erreur, l’historique, la démo, la navigation, la proposition avant validation, le ciblage d’un constat, le thème complémentaire, le redimensionnement, le plein écran, le staging final, la comparaison et l’export. `npm run test:e2e:packaged` exécute le même parcours sur l’application macOS déjà empaquetée.
 
 Un projet réel peut être vérifié sans coder un scénario dédié :
 
@@ -70,6 +76,10 @@ npm run package
 ```
 
 `electron-builder` produit les formats macOS, Windows ou Linux correspondant à la machine de build. Le workflow [paquets.yml](.github/workflows/paquets.yml) construit les trois systèmes et attache les fichiers à une GitHub Release lorsqu’un tag `v*` est poussé.
+
+Chaque application embarque `LICENSE`, `NOTICE` et `THIRD_PARTY_NOTICES.md` dans ses ressources. Le hook de packaging échoue si l’un de ces avis manque ; le workflow exécute aussi le typage et les tests du moteur avant de produire un paquet.
+
+Chaque release joint également `SHA256SUMS`, qui couvre tous les paquets et le fichier `sbom.spdx.json`. Le workflow vérifie le manifeste avant publication et refuse un tag dont la version ne correspond pas exactement à celle de `package.json`.
 
 Les paquets publics sont volontairement **non signés** tant qu’aucun certificat n’est configuré. Cela évite tout coût ou contrat de signature, mais macOS Gatekeeper et Windows SmartScreen peuvent afficher un avertissement. Une diffusion sans avertissement nécessite ultérieurement des certificats de signature propres à chaque plateforme ; elle devra être décidée séparément.
 

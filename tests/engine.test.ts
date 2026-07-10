@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { analyzeProject } from '../src/main/project-analyzer.ts'
+import type { ProjectPreparationProgress } from '../src/shared/contracts.ts'
 import {
   buildProjectStaging,
   interpretLocalInstruction,
@@ -66,6 +67,253 @@ test('l’analyse choisit la racine, scope les routes et conserve des identifian
   assert.ok(external)
 })
 
+test('un squelette sans rendu est bloqué avec un diagnostic explicite', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'responsiver-empty-'))
+  await mkdir(join(root, 'images'))
+  await writeFile(join(root, 'index.html'), `<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title></title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+</html>`)
+  await writeFile(join(root, 'styles.css'), '')
+  await writeFile(join(root, 'images', 'portrait.jpg'), Buffer.from('image locale non référencée'))
+  context.after(() => rm(root, { recursive: true, force: true }))
+
+  const progress: ProjectPreparationProgress[] = []
+  const project = await analyzeProject(root, { onProgress: (event) => progress.push(event) })
+  const diagnosticCodes = project.previewReadiness.diagnostics.map((diagnostic) => diagnostic.code)
+
+  assert.equal(project.previewReadiness.status, 'blocked')
+  assert.equal(project.previewReadiness.strategy, 'static')
+  assert.equal(project.previewBasePath, null)
+  assert.equal(project.capabilities.interactive, false)
+  assert.deepEqual(diagnosticCodes, [
+    'html.incomplete-document',
+    'html.no-visible-content',
+    'css.empty',
+    'assets.unreferenced'
+  ])
+  assert.equal(project.issues.some((issue) => issue.rule === 'manual.visual-sweep'), false)
+  assert.deepEqual(project.issues.map((issue) => issue.rule), diagnosticCodes)
+  assert.ok(project.issues.every((issue) => !issue.fix || issue.fix.kind === 'manual'))
+  assert.deepEqual(progress.map((event) => event.phase), ['inventory', 'routes', 'responsive', 'preview', 'blocked'])
+  assert.deepEqual(progress.map((event) => [event.step, event.total]), [[2, 6], [3, 6], [4, 6], [5, 6], [5, 6]])
+})
+
+test('un artefact compilé local remplace prudemment le shell source', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'responsiver-artifact-'))
+  await mkdir(join(root, 'src'))
+  await mkdir(join(root, 'dist', 'assets'), { recursive: true })
+  await writeFile(join(root, 'package.json'), JSON.stringify({
+    scripts: { build: 'vite build' },
+    dependencies: { react: '^19.0.0', vite: '^6.0.0' }
+  }))
+  await writeFile(join(root, 'index.html'), '<!doctype html><html><head><title>Source</title><link rel="stylesheet" href="/source.css"></head><body><div id="root"></div><script type="module" src="/src/main.js"></script></body></html>')
+  await writeFile(join(root, 'source.css'), '.source-only { width: 1200px; }')
+  await writeFile(join(root, 'src', 'main.js'), 'document.querySelector("#root").textContent = "Source"')
+  await writeFile(join(root, 'dist', 'index.html'), '<!doctype html><html><head><meta name="viewport" content="width=device-width"><title>Build</title><link rel="stylesheet" href="/assets/app.css"></head><body><div id="root"></div><script type="module" src="/assets/app.js"></script></body></html>')
+  await writeFile(join(root, 'dist', 'about.html'), '<!doctype html><html><head><meta name="viewport" content="width=device-width"><title>À propos</title></head><body>À propos</body></html>')
+  await writeFile(join(root, 'dist', 'assets', 'app.js'), 'document.querySelector("#root").textContent = "Build"')
+  await writeFile(join(root, 'dist', 'assets', 'app.css'), '.compiled { width: 900px; }')
+  context.after(() => rm(root, { recursive: true, force: true }))
+
+  const project = await analyzeProject(root)
+  assert.equal(project.previewReadiness.status, 'ready')
+  assert.equal(project.previewReadiness.strategy, 'artifact')
+  assert.equal(project.previewBasePath, 'dist')
+  assert.equal(project.entryPath, '/index.html')
+  assert.deepEqual(
+    project.routes.map(({ path, label, sourcePath }) => ({ path, label, sourcePath })),
+    [
+      { path: '/index.html', label: 'index.html', sourcePath: 'dist/index.html' },
+      { path: '/about.html', label: 'about.html', sourcePath: 'dist/about.html' }
+    ]
+  )
+  assert.equal(project.capabilities.previewStrategy, 'artifact')
+  assert.equal(project.capabilities.buildRequired, false)
+  assert.ok(project.issues.some((issue) => issue.rule === 'css.fixed-width' && issue.source?.file === 'dist/assets/app.css'))
+  assert.equal(project.issues.some((issue) => issue.source?.file === 'source.css'), false)
+
+  const fixedWidth = project.issues.find((issue) => issue.rule === 'css.fixed-width')
+  assert.ok(fixedWidth)
+  const staging = await buildProjectStaging(root, project, { issueIds: [fixedWidth.id], themeTarget: 'dark', instructions: [] })
+  assert.ok(staging.snapshot.changedFiles.includes('dist/index.html'))
+  assert.equal(staging.snapshot.changedFiles.includes('index.html'), false)
+  assert.equal(staging.snapshot.generatedFile, 'dist/.responsiver/responsiver.generated.css')
+  assert.match(staging.overrides.get('dist/index.html')?.toString('utf8') ?? '', /href="\.responsiver\/responsiver\.generated\.css"/)
+  assert.match(staging.overrides.get('dist/.responsiver/responsiver.generated.css')?.toString('utf8') ?? '', /Variante sombre déterministe/)
+
+  const explicitSource = await analyzeProject(root, { preferredEntryPath: '/index.html' })
+  assert.equal(explicitSource.entryPath, '/index.html')
+  assert.equal(explicitSource.previewBasePath, null)
+  assert.equal(explicitSource.previewReadiness.status, 'needs-build')
+  assert.equal(explicitSource.previewReadiness.strategy, 'source')
+  assert.equal(explicitSource.capabilities.staging, false)
+})
+
+test('un artefact imbriqué monte le dossier réel de son entrée et signale un build ancien', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'responsiver-nested-artifact-'))
+  await mkdir(join(root, 'src'))
+  await mkdir(join(root, 'dist', 'client', 'browser', 'assets'), { recursive: true })
+  await writeFile(join(root, 'package.json'), JSON.stringify({ scripts: { build: 'ng build' }, dependencies: { '@angular/core': '^20.0.0' } }))
+  await writeFile(join(root, 'index.html'), '<!doctype html><html><body><div id="app"></div><script type="module" src="/src/main.ts"></script></body></html>')
+  await writeFile(join(root, 'src', 'main.ts'), 'document.querySelector("#app")!.textContent = "Source"')
+  await writeFile(join(root, 'dist', 'client', 'browser', 'index.html'), '<!doctype html><html><head><base href="/"><meta name="viewport" content="width=device-width"></head><body><script src="assets/main.js"></script></body></html>')
+  await writeFile(join(root, 'dist', 'client', 'browser', 'assets', 'main.js'), 'document.body.textContent = "Build"')
+  const future = new Date(Date.now() + 10_000)
+  await utimes(join(root, 'src', 'main.ts'), future, future)
+  context.after(() => rm(root, { recursive: true, force: true }))
+
+  const project = await analyzeProject(root)
+  assert.equal(project.previewBasePath, 'dist/client/browser')
+  assert.equal(project.entryPath, '/index.html')
+  assert.equal(project.routes[0]?.sourcePath, 'dist/client/browser/index.html')
+  assert.equal(project.previewReadiness.status, 'degraded')
+  assert.ok(project.previewReadiness.diagnostics.some((diagnostic) => diagnostic.code === 'artifact.possibly-stale'))
+})
+
+test('une entrée rangée dans pages conserve la racine qui porte ses assets absolus', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'responsiver-artifact-pages-'))
+  await mkdir(join(root, 'src'))
+  await mkdir(join(root, 'dist', 'pages'), { recursive: true })
+  await mkdir(join(root, 'dist', 'assets'), { recursive: true })
+  await writeFile(join(root, 'package.json'), JSON.stringify({ scripts: { build: 'vite build' }, devDependencies: { vite: '^6.0.0' } }))
+  await writeFile(join(root, 'index.html'), '<!doctype html><html><body><div id="app"></div><script type="module" src="/src/main.ts"></script></body></html>')
+  await writeFile(join(root, 'src', 'main.ts'), 'document.querySelector("#app")!.textContent = "Source"')
+  await writeFile(join(root, 'dist', 'pages', 'index.html'), '<!doctype html><html><head><meta name="viewport" content="width=device-width"><link rel="stylesheet" href="/assets/app.css"></head><body>Build</body></html>')
+  await writeFile(join(root, 'dist', 'assets', 'app.css'), 'body { margin: 0; }')
+  context.after(() => rm(root, { recursive: true, force: true }))
+
+  const project = await analyzeProject(root)
+  assert.equal(project.previewBasePath, 'dist')
+  assert.equal(project.entryPath, '/pages/index.html')
+  assert.equal(project.routes[0]?.sourcePath, 'dist/pages/index.html')
+  assert.equal(project.previewReadiness.diagnostics.some((diagnostic) => diagnostic.code === 'artifact.mount-uncertain'), false)
+})
+
+test('un artefact imbriqué conserve le parent nécessaire à ses ressources relatives', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'responsiver-artifact-relative-parent-'))
+  await mkdir(join(root, 'src'))
+  await mkdir(join(root, 'dist', 'client', 'pages'), { recursive: true })
+  await mkdir(join(root, 'dist', 'client', 'assets'), { recursive: true })
+  await writeFile(join(root, 'package.json'), JSON.stringify({ scripts: { build: 'vite build' }, devDependencies: { vite: '^6.0.0' } }))
+  await writeFile(join(root, 'index.html'), '<!doctype html><html><body><div id="app"></div><script type="module" src="/src/main.ts"></script></body></html>')
+  await writeFile(join(root, 'src', 'main.ts'), 'document.querySelector("#app")!.textContent = "Source"')
+  await writeFile(join(root, 'dist', 'client', 'pages', 'index.html'), '<!doctype html><html><head><meta name="viewport" content="width=device-width"><link rel="stylesheet" href="../assets/app.css"></head><body>Build</body></html>')
+  await writeFile(join(root, 'dist', 'client', 'assets', 'app.css'), 'body { margin: 0; }')
+  context.after(() => rm(root, { recursive: true, force: true }))
+
+  const project = await analyzeProject(root)
+  assert.equal(project.previewBasePath, 'dist/client')
+  assert.equal(project.entryPath, '/pages/index.html')
+  assert.equal(project.routes[0]?.sourcePath, 'dist/client/pages/index.html')
+  assert.equal(project.previewReadiness.diagnostics.some((diagnostic) => diagnostic.code === 'artifact.mount-uncertain'), false)
+})
+
+test('un artefact sans asset conserve les routes HTML sœurs de son entrée imbriquée', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'responsiver-artifact-sibling-routes-'))
+  await mkdir(join(root, 'src'))
+  await mkdir(join(root, 'dist', 'pages'), { recursive: true })
+  await writeFile(join(root, 'package.json'), JSON.stringify({ scripts: { build: 'vite build' }, devDependencies: { vite: '^6.0.0' } }))
+  await writeFile(join(root, 'index.html'), '<!doctype html><html><body><div id="app"></div><script type="module" src="/src/main.ts"></script></body></html>')
+  await writeFile(join(root, 'src', 'main.ts'), 'document.querySelector("#app")!.textContent = "Source"')
+  await writeFile(join(root, 'dist', 'pages', 'index.html'), '<!doctype html><html><head><meta name="viewport" content="width=device-width"></head><body>Accueil compilé</body></html>')
+  await writeFile(join(root, 'dist', 'about.html'), '<!doctype html><html><head><meta name="viewport" content="width=device-width"></head><body>À propos</body></html>')
+  context.after(() => rm(root, { recursive: true, force: true }))
+
+  const project = await analyzeProject(root)
+  assert.equal(project.previewBasePath, 'dist')
+  assert.equal(project.entryPath, '/pages/index.html')
+  assert.deepEqual(project.routes.map((route) => route.path), ['/pages/index.html', '/about.html'])
+})
+
+test('les dossiers cachés ne deviennent jamais une entrée ou une route', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'responsiver-hidden-entry-'))
+  await mkdir(join(root, '.docs'))
+  await mkdir(join(root, '.responsiver'))
+  await writeFile(join(root, '.docs', 'index.html'), '<!doctype html><html><body>Documentation cachée</body></html>')
+  await writeFile(join(root, '.responsiver', 'index.html'), '<!doctype html><html><body>Overlay physique</body></html>')
+  context.after(() => rm(root, { recursive: true, force: true }))
+
+  const project = await analyzeProject(root)
+  assert.equal(project.entryPath, null)
+  assert.deepEqual(project.routes, [])
+  assert.equal(project.previewReadiness.status, 'blocked')
+  assert.ok(project.previewReadiness.diagnostics.some((diagnostic) => diagnostic.code === 'html.entry-missing'))
+})
+
+test('un grand dossier média ne masque pas l’entrée HTML racine', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'responsiver-media-budget-'))
+  await mkdir(join(root, 'assets'))
+  await writeFile(join(root, 'index.html'), '<!doctype html><html><head><meta name="viewport" content="width=device-width"></head><body>Page visible</body></html>')
+  for (let start = 0; start < 1_510; start += 100) {
+    await Promise.all(Array.from({ length: Math.min(100, 1_510 - start) }, (_, offset) => (
+      writeFile(join(root, 'assets', `image-${String(start + offset).padStart(4, '0')}.png`), '')
+    )))
+  }
+  context.after(() => rm(root, { recursive: true, force: true }))
+
+  const project = await analyzeProject(root)
+  assert.equal(project.entryPath, '/index.html')
+  assert.notEqual(project.previewReadiness.status, 'blocked')
+  assert.equal(project.capabilities.interactive, true)
+  assert.equal(project.analysis.truncated, true)
+  assert.ok(project.previewReadiness.diagnostics.some((diagnostic) => diagnostic.code === 'analysis.truncated'))
+  assert.ok(project.issues.some((issue) => issue.rule === 'analysis.truncated' && issue.title === 'Analyse partielle'))
+})
+
+test('un bundle JavaScript local déjà exécutable à la racine ne demande pas de rebuild', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'responsiver-root-bundle-'))
+  await mkdir(join(root, 'src'))
+  await mkdir(join(root, 'static'))
+  await writeFile(join(root, 'package.json'), JSON.stringify({ scripts: { build: 'vite build' }, dependencies: { vite: '^6.0.0' } }))
+  await writeFile(join(root, 'index.html'), '<!doctype html><html><head><meta name="viewport" content="width=device-width"></head><body><div id="app"></div><script type="module" src="/static/app.js"></script></body></html>')
+  await writeFile(join(root, 'static', 'app.js'), 'document.querySelector("#app").textContent = "Prêt"')
+  await writeFile(join(root, 'src', 'source.ts'), 'export const source = true')
+  context.after(() => rm(root, { recursive: true, force: true }))
+
+  const project = await analyzeProject(root)
+  assert.equal(project.previewReadiness.status, 'ready')
+  assert.equal(project.previewReadiness.strategy, 'static')
+  assert.equal(project.previewBasePath, null)
+  assert.equal(project.capabilities.buildRequired, false)
+  assert.equal(project.capabilities.interactive, true)
+})
+
+test('un dossier sans HTML est non pris en charge sans inventer une compilation', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'responsiver-no-entry-'))
+  await writeFile(join(root, 'styles.css'), 'body { color: #222; }')
+  context.after(() => rm(root, { recursive: true, force: true }))
+
+  const project = await analyzeProject(root)
+  assert.equal(project.previewReadiness.status, 'blocked')
+  assert.equal(project.previewReadiness.strategy, 'unsupported')
+  assert.equal(project.capabilities.buildRequired, false)
+  assert.equal(project.capabilities.staging, false)
+  assert.ok(project.previewReadiness.diagnostics.some((diagnostic) => diagnostic.code === 'html.entry-missing'))
+})
+
+test('un template public de framework n’est pas confondu avec un artefact compilé', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'responsiver-public-template-'))
+  await mkdir(join(root, 'public'))
+  await writeFile(join(root, 'package.json'), JSON.stringify({ scripts: { build: 'vite build' }, devDependencies: { vite: '^6.0.0' } }))
+  await writeFile(join(root, 'public', 'index.html'), '<!doctype html><html><head><title>Template</title></head><body>Template public</body></html>')
+  await writeFile(join(root, 'main.ts'), 'document.body.textContent = "Application"')
+  context.after(() => rm(root, { recursive: true, force: true }))
+
+  const project = await analyzeProject(root)
+  assert.equal(project.previewReadiness.status, 'needs-build')
+  assert.equal(project.previewReadiness.strategy, 'source')
+  assert.equal(project.previewBasePath, null)
+  assert.equal(project.capabilities.buildRequired, true)
+})
+
 test('le staging produit un patch et une variante claire sans toucher aux sources', async (context) => {
   const fixture = await createFixture()
   context.after(() => rm(fixture.root, { recursive: true, force: true }))
@@ -111,6 +359,58 @@ test('un thème existant n’est jamais proposé comme doublon', async (context)
   assert.equal(staging.snapshot.generatedCss, '')
   assert.equal(staging.snapshot.changes.length, 0)
   assert.equal(staging.overrides.size, 0)
+})
+
+test('un token de palette inutilisé ne crée pas un faux second thème', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'responsiver-theme-tokens-'))
+  await writeFile(join(root, 'index.html'), '<!doctype html><html><head><meta name="viewport" content="width=device-width"><link rel="stylesheet" href="styles.css"></head><body>Thème actif</body></html>')
+  await writeFile(join(root, 'styles.css'), `:root {
+    --background-dark: #11120f;
+    --background-light: #f8f6f0;
+    --background: var(--background-dark);
+  }
+  body { background: var(--background); color: #f5f3ed; }`)
+  context.after(() => rm(root, { recursive: true, force: true }))
+
+  const project = await analyzeProject(root)
+  assert.equal(project.theme.detected, 'dark')
+  assert.equal(project.theme.hasDark, true)
+  assert.equal(project.theme.hasLight, false)
+  assert.equal(suggestedComplementaryTheme(project.theme), 'light')
+})
+
+test('un layout bicolore sans sélecteur ne devient pas un thème dual', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'responsiver-bicolor-layout-'))
+  await writeFile(join(root, 'index.html'), '<!doctype html><html><head><meta name="viewport" content="width=device-width"><link rel="stylesheet" href="styles.css"></head><body><main>Carte claire</main></body></html>')
+  await writeFile(join(root, 'styles.css'), 'body { background: #11120f; color: #f5f3ed; } main { background: #ffffff; color: #20211e; }')
+  context.after(() => rm(root, { recursive: true, force: true }))
+
+  const project = await analyzeProject(root)
+  assert.equal(project.theme.detected, 'dark')
+  assert.equal(project.theme.hasDark, true)
+  assert.equal(project.theme.hasLight, false)
+})
+
+test('les médias, srcset et URL CSS distants sont diagnostiqués sans exposer leurs paramètres', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'responsiver-external-media-'))
+  await writeFile(join(root, 'index.html'), `<!doctype html><html><head><meta name="viewport" content="width=device-width"><link rel="stylesheet" href="styles.css"></head><body>
+    <img src="https://cdn.example.test/photo.jpg?token=secret" srcset="https://images.example.test/photo@2x.jpg?sig=private 2x">
+    <video poster="//media.example.test/poster.jpg?key=hidden"></video>
+    <iframe src="https://frames.example.test/embed?id=42"></iframe>
+  </body></html>`)
+  await writeFile(join(root, 'styles.css'), '.hero { background-image: url("https://assets.example.test/hero.webp?signature=hidden"); }')
+  context.after(() => rm(root, { recursive: true, force: true }))
+
+  const project = await analyzeProject(root)
+  const htmlIssue = project.issues.find((issue) => issue.rule === 'network.external-resource')
+  const cssIssue = project.issues.find((issue) => issue.rule === 'network.external-css-resource')
+  assert.ok(htmlIssue?.fix?.before?.includes('cdn.example.test/photo.jpg'))
+  assert.ok(htmlIssue?.fix?.before?.includes('images.example.test/photo@2x.jpg'))
+  assert.ok(htmlIssue?.fix?.before?.includes('media.example.test/poster.jpg'))
+  assert.ok(htmlIssue?.fix?.before?.includes('frames.example.test/embed'))
+  assert.equal(htmlIssue?.fix?.before?.includes('secret'), false)
+  assert.ok(cssIssue?.fix?.before?.includes('assets.example.test/hero.webp'))
+  assert.equal(cssIssue?.fix?.before?.includes('signature'), false)
 })
 
 test('la conversation locale reste déterministe et refuse les demandes inconnues', () => {

@@ -8,10 +8,15 @@
 - Les nouvelles fenêtres sont refusées. Les liens et `window.open()` internes sont ramenés dans la preview ; les sorties externes sont bloquées.
 - Le serveur de preview est lié à `127.0.0.1`, contrôle les chemins réels pour éviter les sorties par lien symbolique et refuse les fichiers cachés et types de ressources non web.
 - Le serveur vérifie l’en-tête `Host`, n’accepte que `GET` et `HEAD`, prend en charge les plages d’octets et utilise `no-store`.
+- Une sortie compilée détectée est montée depuis une liste de bases autorisées ; les chemins absolus du site restent dans ce mount et les répertoires serveur voisins demeurent inaccessibles.
 - Une CSP de réponse limite les scripts, connexions, formulaires, workers et frames à la même origine. L’exception est limitée à Google Fonts HTTPS pour styles et polices.
 - Les permissions Chromium sont systématiquement refusées : caméra, micro, géolocalisation, notifications, périphériques, etc.
 - Le dossier original n’est jamais écrit automatiquement.
-- Les exports vérifient les hashes SHA-256 des sources, refusent les liens symboliques sur les chemins corrigés et imposent une destination hors du projet pour les copies.
+- L’historique ne stocke que des chemins et compteurs dans un JSON privé, borné, validé et écrit atomiquement ; il ne met jamais le code ou les corrections en cache.
+- Un projet qualifié `blocked` ou `needs-build` ne peut démarrer ni proposition ni staging, y compris par appel IPC direct.
+- Les exports vérifient les hashes SHA-256 des sources, refusent les liens symboliques sur les chemins corrigés et imposent une destination hors du projet pour les copies. Chaque dossier d’export est réservé atomiquement, privé en `0700` sur POSIX et revalidé pendant sa matérialisation.
+- Les avis `LICENSE`, `NOTICE` et `THIRD_PARTY_NOTICES.md` sont obligatoirement inclus dans les ressources de chaque paquet ; la construction échoue s’ils sont absents.
+- Les releases GitHub incluent un SBOM SPDX et un manifeste `SHA256SUMS` vérifié couvrant le SBOM et chaque paquet ; un tag dont la version diverge de `package.json` bloque la publication.
 - Le paquet macOS supprime les descriptions de permissions caméra, micro, audio et Bluetooth inutilisées ; ATS refuse les chargements arbitraires tout en autorisant localhost.
 
 ## Limites assumées

@@ -7,6 +7,7 @@ export interface ProjectServerOptions {
   mode?: 'source' | 'proposal' | 'staged'
   overrides?: ReadonlyMap<string, Buffer | string>
   injectedCss?: string
+  previewBasePath?: string
 }
 
 export interface ProjectServer {
@@ -94,7 +95,37 @@ const bridge = `<style data-responsiver-bridge-style>
   const revealAttribute = 'data-responsiver-reveal-target';
   const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
   let originalThemeState = null;
+  let mutationObserver = null;
+  const nativeAttachShadow = Element.prototype.attachShadow;
+  Element.prototype.attachShadow = function(init) {
+    const root = nativeAttachShadow.call(this, init);
+    queueMicrotask(() => {
+      mutationObserver?.observe(root, { attributes: true, attributeFilter: ['class', 'style', 'content', 'data-theme', 'data-color-scheme'], childList: true, subtree: true });
+      schedule();
+    });
+    return root;
+  };
   const message = (type, payload = {}) => parent.postMessage({ channel, type, ...payload }, '*');
+  const runtimeErrors = [];
+  const recordRuntimeError = (type, value, url = '', line = 0) => {
+    if (runtimeErrors.length >= 12) return;
+    const detail = String(value || 'Erreur inconnue').replace(/\s+/g, ' ').trim().slice(0, 240);
+    runtimeErrors.push({ type, detail, url: String(url || '').slice(0, 500), line: Number(line) || 0 });
+    queueMicrotask(() => schedule());
+  };
+  addEventListener('error', (event) => {
+    const target = event.target;
+    if (target instanceof Element && target !== window) {
+      const url = target.getAttribute('src') || target.getAttribute('href') || target.currentSrc || '';
+      recordRuntimeError('resource', target.tagName.toLowerCase() + ' indisponible', url);
+      return;
+    }
+    recordRuntimeError('javascript', event.message, event.filename, event.lineno);
+  }, true);
+  addEventListener('unhandledrejection', (event) => {
+    const reason = event.reason instanceof Error ? event.reason.message : event.reason;
+    recordRuntimeError('promise', reason);
+  });
   const transparent = (value) => !value || value === 'transparent' || value === 'rgba(0, 0, 0, 0)';
   const luminance = (value) => {
     const match = value.match(/[\\d.]+/g);
@@ -142,6 +173,35 @@ const bridge = `<style data-responsiver-bridge-style>
     }
     return parts.join(' > ') || element.tagName.toLowerCase();
   };
+  const composedElements = (root, limit) => {
+    if (!root) return [];
+    const result = [];
+    const scopes = [root];
+    const visitedRoots = new Set();
+    while (scopes.length && result.length < limit) {
+      const scope = scopes.shift();
+      if (!scope || visitedRoots.has(scope)) continue;
+      visitedRoots.add(scope);
+      if (scope instanceof Element) result.push(scope);
+      for (const element of scope.querySelectorAll?.('*') || []) {
+        if (result.length >= limit) break;
+        result.push(element);
+        if (element.shadowRoot && !visitedRoots.has(element.shadowRoot)) scopes.push(element.shadowRoot);
+      }
+    }
+    return result;
+  };
+  const pseudoPainted = (element) => {
+    for (const pseudo of ['::before', '::after']) {
+      const style = getComputedStyle(element, pseudo);
+      if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) continue;
+      const content = style.content;
+      const hasContent = Boolean(content && content !== 'none' && content !== 'normal' && content !== '""' && content !== "''");
+      const hasSurface = !transparent(style.backgroundColor) || style.backgroundImage !== 'none' || parseFloat(style.borderTopWidth) > 0;
+      if (hasContent || hasSurface) return true;
+    }
+    return false;
+  };
   const audit = () => {
     const viewportWidth = document.documentElement.clientWidth || innerWidth;
     const viewportHeight = document.documentElement.clientHeight || innerHeight;
@@ -150,7 +210,7 @@ const bridge = `<style data-responsiver-bridge-style>
     let overflowCount = 0;
     let inspected = 0;
     if (documentWidth > viewportWidth + 1) {
-      for (const element of document.body?.querySelectorAll('*') || []) {
+      for (const element of composedElements(document.body, 5000)) {
         inspected += 1;
         if (inspected > 5000) break;
         const style = getComputedStyle(element);
@@ -164,10 +224,67 @@ const bridge = `<style data-responsiver-bridge-style>
     const audit = { path: location.pathname + location.search + location.hash, viewportWidth, viewportHeight, documentWidth, overflowCount, overflows };
     message('audit', { ...audit, audit });
   };
+  const renderStatus = (stable) => {
+    const body = document.body;
+    let visible = false;
+    let paintedElements = 0;
+    let inspected = 0;
+    for (const node of body?.childNodes || []) {
+      if (node.nodeType !== 3 || !(node.textContent || '').replace(/\s+/g, ' ').trim()) continue;
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      const rectangle = range.getBoundingClientRect();
+      range.detach();
+      if (rectangle.width > 1 && rectangle.height > 1) {
+        visible = true;
+        paintedElements += 1;
+        break;
+      }
+    }
+    for (const element of composedElements(body, 2000)) {
+      inspected += 1;
+      if (inspected > 2000) break;
+      const style = getComputedStyle(element);
+      if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) continue;
+      const rectangle = element.getBoundingClientRect();
+      if (rectangle.width <= 1 || rectangle.height <= 1) continue;
+      if (pseudoPainted(element)) {
+        paintedElements += 1;
+        visible = true;
+        if (paintedElements >= 12) break;
+      }
+      // Le fond du body seul n’est pas une interface, et son textContent peut
+      // contenir le code d’un script. Ses pseudo-éléments, eux, sont bien peints.
+      if (element === body) continue;
+      const tag = element.tagName.toLowerCase();
+      const text = (element.textContent || '').replace(/\s+/g, ' ').trim();
+      const visualMedia = /^(?:audio|button|canvas|embed|hr|iframe|img|input|object|picture|select|svg|textarea|video)$/.test(tag);
+      const paintedSurface = !transparent(style.backgroundColor) || style.backgroundImage !== 'none' || parseFloat(style.borderTopWidth) > 0;
+      if (text || visualMedia || paintedSurface) {
+        paintedElements += 1;
+        visible = true;
+        if (paintedElements >= 12) break;
+      }
+    }
+    const status = {
+      path: location.pathname + location.search + location.hash,
+      state: visible ? 'visible' : 'empty',
+      visible,
+      stable,
+      paintedElements,
+      inspectedElements: inspected,
+      errorCount: runtimeErrors.length,
+      errors: runtimeErrors.slice()
+    };
+    message('render-status', { ...status, renderStatus: status });
+  };
   let timer;
+  let stableRenderTimer;
   const schedule = () => {
     clearTimeout(timer);
-    timer = setTimeout(() => { state(); audit(); }, 120);
+    clearTimeout(stableRenderTimer);
+    timer = setTimeout(() => { state(); audit(); renderStatus(false); }, 120);
+    stableRenderTimer = setTimeout(() => renderStatus(true), 1200);
   };
   const go = (value) => {
     try {
@@ -341,8 +458,15 @@ const bridge = `<style data-responsiver-bridge-style>
   }, true);
   window.open = (url) => { if (typeof url === 'string' || url instanceof URL) go(String(url)); return null; };
   const start = () => {
-    new MutationObserver(schedule).observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'style', 'content', 'data-theme', 'data-color-scheme'], childList: true, subtree: true });
+    const mutationOptions = { attributes: true, attributeFilter: ['class', 'style', 'content', 'data-theme', 'data-color-scheme'], childList: true, subtree: true };
+    mutationObserver = new MutationObserver(schedule);
+    mutationObserver.observe(document.documentElement, mutationOptions);
+    for (const element of composedElements(document.documentElement, 5000)) {
+      if (element.shadowRoot) mutationObserver.observe(element.shadowRoot, mutationOptions);
+    }
     schedule();
+    setTimeout(() => renderStatus(false), 600);
+    setTimeout(() => renderStatus(true), 1800);
   };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true }); else start();
   setTimeout(schedule, 0);
@@ -351,7 +475,18 @@ const bridge = `<style data-responsiver-bridge-style>
 
 function normalizeOverrideKey(value: string): string | null {
   const key = posix.normalize(value.replaceAll('\\', '/').replace(/^\/+/, ''))
-  return key === '..' || key.startsWith('../') || key.startsWith('.') && !key.startsWith('.responsiver/') ? null : key
+  const allowedHiddenPath = key.startsWith('.responsiver/') || key.startsWith('.output/public/')
+  return key === '..' || key.startsWith('../') || key.startsWith('.') && !allowedHiddenPath ? null : key
+}
+
+function normalizePreviewBasePath(value?: string): string {
+  if (!value) return ''
+  const normalized = posix.normalize(value.replaceAll('\\', '/').replace(/^\/+|\/+$/g, ''))
+  const allowedRoots = ['dist', 'build', 'out', '.output/public']
+  if (!allowedRoots.some((base) => normalized === base || normalized.startsWith(`${base}/`))) {
+    throw new Error('Base de prévisualisation non autorisée.')
+  }
+  return normalized
 }
 
 function normalizeOverrides(overrides?: ReadonlyMap<string, Buffer | string>): Map<string, Buffer> {
@@ -376,7 +511,7 @@ function injectRuntime(html: string, injectedCss: string): string {
   return `<!doctype html><html><head>${runtime}</head><body>${source}</body></html>`
 }
 
-function safeRelativePath(root: string, pathname: string): { absolutePath: string; relativePath: string } | null {
+function safeRelativePath(root: string, pathname: string, previewBasePath = ''): { absolutePath: string; relativePath: string } | null {
   let decoded: string
   try {
     decoded = decodeURIComponent(pathname)
@@ -388,7 +523,13 @@ function safeRelativePath(root: string, pathname: string): { absolutePath: strin
   const candidate = resolve(root, requested || '.')
   const normalizedRoot = normalize(root.endsWith(sep) ? root : `${root}${sep}`)
   const pathFromRoot = relative(root, candidate)
-  const isHiddenPath = pathFromRoot.split(sep).some((segment) => segment.startsWith('.') && segment !== '.well-known' && segment !== '.responsiver')
+  const webPathFromRoot = pathFromRoot.replaceAll(sep, '/')
+  const allowedHiddenSegment = previewBasePath.startsWith('.') ? previewBasePath.split('/')[0] : null
+  const insideHiddenPreviewBase = Boolean(allowedHiddenSegment) && (
+    webPathFromRoot === previewBasePath || webPathFromRoot.startsWith(`${previewBasePath}/`)
+  )
+  const isHiddenPath = pathFromRoot.split(sep).some((segment) =>
+    segment.startsWith('.') && segment !== '.well-known' && segment !== '.responsiver' && !(insideHiddenPreviewBase && segment === allowedHiddenSegment))
   if (isHiddenPath || !(candidate === root || candidate.startsWith(normalizedRoot))) return null
   return { absolutePath: candidate, relativePath: pathFromRoot.replaceAll(sep, '/') }
 }
@@ -407,43 +548,123 @@ function overriddenResource(overrides: ReadonlyMap<string, Buffer>, relativePath
   return body ? { absolutePath: null, body, relativePath: key } : null
 }
 
-async function directResource(root: string, overrides: ReadonlyMap<string, Buffer>, relativePath: string): Promise<ResolvedResource | null> {
+async function directResource(
+  root: string,
+  overrides: ReadonlyMap<string, Buffer>,
+  relativePath: string,
+  previewBasePath = '',
+  previewMountRoot: string | null = null
+): Promise<ResolvedResource | null> {
   const override = overriddenResource(overrides, relativePath)
   if (override) return override
-  const safe = safeRelativePath(root, `/${relativePath}`)
+  const safe = safeRelativePath(root, `/${relativePath}`, previewBasePath)
   if (!safe) return null
   const stat = await fs.stat(safe.absolutePath).catch(() => null)
   if (!stat?.isFile()) return null
-  const absolutePath = await realFileWithinRoot(root, safe.absolutePath)
+  const insidePreviewBase = Boolean(previewBasePath) && (
+    relativePath === previewBasePath || relativePath.startsWith(`${previewBasePath}/`)
+  )
+  const containmentRoot = insidePreviewBase
+    ? previewMountRoot
+    : root
+  if (!containmentRoot) return null
+  const absolutePath = await realFileWithinRoot(containmentRoot, safe.absolutePath)
   return absolutePath ? { absolutePath, body: null, relativePath: safe.relativePath } : null
 }
 
-async function resolveResource(root: string, overrides: ReadonlyMap<string, Buffer>, pathname: string): Promise<ResolvedResource | null> {
-  let requestedKey: string | null = null
-  try {
-    requestedKey = normalizeOverrideKey(decodeURIComponent(pathname))
-  } catch {
-    return null
-  }
-  if (requestedKey?.startsWith('.responsiver/') && !overrides.has(requestedKey)) return null
-  const safe = safeRelativePath(root, pathname)
+async function resolveRelativeResource(
+  root: string,
+  overrides: ReadonlyMap<string, Buffer>,
+  relativePath: string,
+  pathname: string,
+  fallbackFloor: string,
+  previewBasePath: string,
+  previewMountRoot: string | null
+): Promise<ResolvedResource | null> {
+  let requested = relativePath
+  const safe = safeRelativePath(root, `/${requested}`, previewBasePath)
   if (!safe) return null
-  let requested = safe.relativePath
   const stat = await fs.stat(safe.absolutePath).catch(() => null)
   if (!requested || stat?.isDirectory() || pathname.endsWith('/')) requested = posix.join(requested, 'index.html')
-  const direct = await directResource(root, overrides, requested)
+  const direct = await directResource(root, overrides, requested, previewBasePath, previewMountRoot)
   if (direct) return direct
 
   if (!extname(pathname)) {
     let current = posix.dirname(requested)
     while (true) {
-      const fallback = await directResource(root, overrides, posix.join(current === '.' ? '' : current, 'index.html'))
+      const fallback = await directResource(root, overrides, posix.join(current === '.' ? '' : current, 'index.html'), previewBasePath, previewMountRoot)
       if (fallback) return fallback
-      if (current === '.') break
-      current = posix.dirname(current)
+      if (current === fallbackFloor || current === '.') break
+      const parent = posix.dirname(current)
+      if (parent === current || fallbackFloor !== '.' && !parent.startsWith(`${fallbackFloor}/`) && parent !== fallbackFloor) break
+      current = parent
     }
   }
   return null
+}
+
+async function resolveResource(
+  root: string,
+  overrides: ReadonlyMap<string, Buffer>,
+  pathname: string,
+  previewBasePath = '',
+  previewMountRoot: string | null = null
+): Promise<ResolvedResource | null> {
+  let decodedPathname: string
+  let requestedKey: string | null = null
+  try {
+    decodedPathname = decodeURIComponent(pathname)
+    requestedKey = normalizeOverrideKey(decodedPathname)
+  } catch {
+    return null
+  }
+  const normalizedRequest = posix.normalize(decodedPathname.replaceAll('\\', '/').replace(/^\/+/, ''))
+  const requestSegments = normalizedRequest.split('/').filter(Boolean)
+  const responsiverSegment = requestSegments.indexOf('.responsiver')
+  const rootOverlay = responsiverSegment === 0
+  const mountedOverlayKey = rootOverlay && previewBasePath
+    ? posix.join(previewBasePath, normalizedRequest)
+    : null
+  const effectiveOverlayKey = requestedKey && overrides.has(requestedKey)
+    ? requestedKey
+    : mountedOverlayKey && overrides.has(mountedOverlayKey)
+      ? mountedOverlayKey
+      : null
+  // Tout dossier .responsiver physique reste invisible, y compris dans un
+  // artefact. Seuls les fichiers virtuels exacts du staging sont accessibles.
+  if (responsiverSegment >= 0 && (
+    responsiverSegment === requestSegments.length - 1 || !effectiveOverlayKey
+  )) return null
+  const safe = safeRelativePath(root, pathname, previewBasePath)
+  if (!safe) return null
+  const requested = safe.relativePath
+  const alreadyMounted = previewBasePath && (requested === previewBasePath || requested.startsWith(`${previewBasePath}/`))
+  if (previewBasePath) {
+    if (rootOverlay) {
+      return resolveRelativeResource(root, overrides, effectiveOverlayKey ?? requested, pathname, '.', previewBasePath, previewMountRoot)
+    }
+    if (alreadyMounted) {
+      return resolveRelativeResource(root, overrides, requested, pathname, previewBasePath, previewBasePath, previewMountRoot)
+    }
+    return resolveRelativeResource(
+      root,
+      overrides,
+      posix.join(previewBasePath, requested),
+      pathname,
+      previewBasePath,
+      previewBasePath,
+      previewMountRoot
+    )
+  }
+  return resolveRelativeResource(
+    root,
+    overrides,
+    requested,
+    pathname,
+    '.',
+    previewBasePath,
+    previewMountRoot
+  )
 }
 
 function commonHeaders(type: string, length?: number): Record<string, string | number> {
@@ -533,6 +754,17 @@ export async function startProjectServer(root: string, options: ProjectServerOpt
   const mode = options.mode ?? 'source'
   const overrides = normalizeOverrides(options.overrides)
   const injectedCss = options.injectedCss ?? ''
+  const previewBasePath = normalizePreviewBasePath(options.previewBasePath)
+  const previewMountRoot = previewBasePath
+    ? await fs.realpath(resolve(realRoot, previewBasePath)).catch(() => null)
+    : null
+  if (previewBasePath) {
+    const normalizedRoot = normalize(realRoot.endsWith(sep) ? realRoot : `${realRoot}${sep}`)
+    const mountStat = previewMountRoot ? await fs.stat(previewMountRoot).catch(() => null) : null
+    if (!previewMountRoot || !mountStat?.isDirectory() || !previewMountRoot.startsWith(normalizedRoot)) {
+      throw new Error('Base de prévisualisation hors du projet ou indisponible.')
+    }
+  }
   let server: Server
   let expectedHost = ''
 
@@ -548,8 +780,9 @@ export async function startProjectServer(root: string, options: ProjectServerOpt
         return
       }
       response.setHeader('X-Responsiver-Mode', mode)
+      if (previewBasePath) response.setHeader('X-Responsiver-Base', previewBasePath)
       const url = new URL(request.url ?? '/', `http://${expectedHost}`)
-      const resource = await resolveResource(realRoot, overrides, url.pathname)
+      const resource = await resolveResource(realRoot, overrides, url.pathname, previewBasePath, previewMountRoot)
       if (!resource) {
         writeText(response, 404, 'Ressource locale introuvable.', request.method)
         return

@@ -636,11 +636,14 @@ function unifiedFileDiff(path: string, before: string | null, after: string): st
   return lines.join('\n')
 }
 
-async function availableGeneratedPath(root: string): Promise<string> {
+async function availableGeneratedPath(root: string, previewBasePath: string | null): Promise<string> {
+  const generatedDirectory = previewBasePath
+    ? `${normalizeRelativePath(previewBasePath)}/.responsiver`
+    : '.responsiver'
   for (let index = 0; index < 100; index += 1) {
     const candidate = index === 0
-      ? GENERATED_STYLESHEET
-      : `.responsiver/responsiver.generated.${index}.css`
+      ? `${generatedDirectory}/responsiver.generated.css`
+      : `${generatedDirectory}/responsiver.generated.${index}.css`
     const state = await guardedProjectPath(root, candidate)
     if (!state.exists) return candidate
   }
@@ -815,7 +818,7 @@ export async function buildProjectStaging(
   let generatedFile: string | null = null
   let generatedCss = ''
   if (generatedSections.length > 0) {
-    generatedFile = await availableGeneratedPath(normalizedRoot)
+    generatedFile = await availableGeneratedPath(normalizedRoot, project.previewBasePath)
     generatedCss = `/*\n * Généré localement par Responsiver.\n * Chaque règle reste lisible, exportable et réversible.\n */\n\n${generatedSections.join('\n\n')}`
     await originalBuffer(generatedFile)
     setText(generatedFile, `${generatedCss.trim()}\n`)
@@ -827,8 +830,9 @@ export async function buildProjectStaging(
     const htmlFiles = new Set<string>()
     const routeFile = (routePath: string): string | null => {
       const route = project.routes.find((candidate) => candidate.path === routePath)
-      const candidate = route?.label && ['.html', '.htm'].includes(extname(route.label).toLowerCase())
-        ? route.label
+      const routeSource = route?.sourcePath ?? route?.label
+      const candidate = routeSource && ['.html', '.htm'].includes(extname(routeSource).toLowerCase())
+        ? routeSource
         : routePath.replace(/^\//, '')
       return ['.html', '.htm'].includes(extname(candidate).toLowerCase())
         ? normalizeRelativePath(candidate)
@@ -838,8 +842,10 @@ export async function buildProjectStaging(
       const candidate = routeFile(routePath)
       if (candidate) htmlFiles.add(candidate)
     }
-    const entryFile = project.entryPath && ['.html', '.htm'].includes(extname(project.entryPath).toLowerCase())
-      ? normalizeRelativePath(project.entryPath)
+    const entryRoute = project.routes.find((route) => route.path === project.entryPath)
+    const entrySource = entryRoute?.sourcePath ?? project.entryPath
+    const entryFile = entrySource && ['.html', '.htm'].includes(extname(entrySource).toLowerCase())
+      ? normalizeRelativePath(entrySource)
       : null
     const auxiliarySegments = new Set(['demo', 'demos', 'example', 'examples', 'fixture', 'fixtures', 'storybook', 'test', 'tests'])
     const primaryHtmlFiles = new Set<string>()
