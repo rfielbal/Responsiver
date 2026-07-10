@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Journal — Atelier Nord</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="./index.html" aria-label="Atelier Nord, accueil">
+        <svg aria-hidden="true" viewBox="0 0 34 34"><path d="M4 29V5h11v24M19 29V12h11v17M9 10h1M9 16h1M9 22h1M24 17h1M24 23h1" /></svg>
+        <span>Atelier Nord</span>
+      </a>
+      <nav class="site-nav" aria-label="Navigation principale">
+        <a href="./index.html">Collection</a>
+        <a aria-current="page" href="./journal.html">Journal</a>
+        <a href="./index.html#matiere">Matières</a>
+        <button class="bag-button" type="button" data-bag>Panier <span data-bag-count>0</span></button>
+      </nav>
+    </header>
+    <main class="journal">
+      <header class="journal-heading">
+        <p class="eyebrow">Notes d’atelier · 04</p>
+        <h1>Construire avec<br />ce qui existe déjà.</h1>
+        <p>Une conversation avec Salomé Béraud, ébéniste, sur les chutes de bois, les assemblages réparables et le temps nécessaire.</p>
+      </header>
+      <article class="article-grid">
+        <div class="portrait" aria-hidden="true"><i></i></div>
+        <div class="article-copy">
+          <p class="dropcap">Une matière n’arrive jamais neutre à l’atelier. Elle porte déjà un lieu, un climat, parfois les traces d’une première utilisation.</p>
+          <p>Notre travail commence par l’observer : son fil, ses tensions, les dimensions disponibles. Le dessin s’adapte ensuite à cette réalité concrète.</p>
+          <blockquote>« La contrainte devient intéressante dès qu’on cesse de la dissimuler. »</blockquote>
+          <p>Les assemblages restent lisibles et démontables. Une pièce abîmée peut être remplacée sans condamner l’objet entier.</p>
+          <a class="text-link" href="./index.html">← Retour à la collection</a>
+        </div>
+      </article>
+    </main>
+    <aside class="bag" aria-label="Panier" aria-hidden="true" data-bag-panel><div><p class="eyebrow">Votre sélection</p><button type="button" data-bag-close aria-label="Fermer le panier">×</button></div><p data-bag-empty>Le panier est encore vide.</p><ul data-bag-list></ul></aside>
+    <div class="scrim" data-scrim hidden></div>
+    <footer><span>Atelier Nord © 2026</span><a href="./index.html">Collection</a></footer>
+    <script src="./script.js"></script>
+  </body>
+</html>
