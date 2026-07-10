@@ -1,121 +1,181 @@
-# Architecture de Responsiver 0.5
+# Architecture de Responsiver 0.6
 
 ```text
 Renderer React de confiance
-  ├── projets / laboratoire / révision / export
-  ├── appareils, dimensions, redimensionnement et plein écran
-  ├── décision explicite : aperçu / accepter / écarter
-  └── iframes cross-origin sandboxées
-              │ messages navigation, thème, audit et ciblage
+  ├── projets / URL / laboratoire / révision / export
+  ├── preview locale en iframe cross-origin
+  ├── emplacement visuel du WebContentsView distant
+  ├── éditeur Monaco + diff + décision d’application
+  └── assistant local facultatif
+                │
 Preload contextBridge typé
-              │ IPC validé depuis la frame principale uniquement
-Electron main — ProjectSession
-  ├── préparation : inventaire / entrée / readiness / constats
-  ├── analyseur HTML/CSS route-scopé + artefact compilé éventuel
-  ├── serveur source 127.0.0.1:port-aléatoire
-  ├── transformeur déterministe
-  │     └── Map<chemin, contenu> d’overlays
-  ├── serveur de proposition éphémère 127.0.0.1:port-aléatoire
-  ├── serveur de staging validé 127.0.0.1:autre-port
-  ├── historique privé de chemins, sans cache de code
+                │ IPC borné, frame principale uniquement
+Electron main — ActiveProjectSession
+  ├── LocalProjectSession
+  │     ├── analyse HTML/CSS route-scopée
+  │     ├── runners source / proposition / staging / workspace
+  │     └── transformeur déterministe
+  ├── RemoteBrowserSession
+  │     ├── WebContentsView sandboxé et partition éphémère
+  │     ├── politique URL + DNS anti-SSRF
+  │     └── audit visuel multi-viewport
+  ├── WorkspaceEditor
+  │     └── fichiers sûrs + overlays + diff + application atomique
+  ├── Local AI adapter
+  │     └── Ollama ou llama.cpp sur HTTP loopback uniquement
+  ├── Extension inbox
+  │     └── demandes Chrome privées, bornées et expirables
   └── exports explicites + contrôle des hashes
-              │
-        Projet source en lecture seule
 ```
 
-## Session projet
+## Sources et session active
 
-Le processus principal possède l’unique `ProjectSession` active : racine réelle, snapshot d’analyse, serveur source, éventuel serveur de proposition et éventuel staging validé. Ouvrir un autre projet ferme les trois origines précédentes, lorsqu’elles existent, et libère leur état de preview éphémère.
+Le processus principal possède une seule `ActiveProjectSession`. Son contrat distingue trois sources :
 
-Une sélection peut être un dossier ou un fichier `.html/.htm`. Dans le second cas, son dossier devient la racine et le fichier choisi reste l’entrée prioritaire. Sans sélection explicite, l’analyseur privilégie `/index.html` à la racine et pénalise les chemins de démo, test, documentation ou Storybook. Si cette entrée est un shell à compiler, l’analyseur cherche prudemment une sortie existante dans `dist`, `build`, `out` ou `.output/public`. Un `public/index.html` de framework n’est pas pris pour un build final. Pour un artefact imbriqué, la racine web est choisie entre le plus profond ancêtre commun des pages HTML et la base autorisée, en vérifiant `<base href>`, les références absolues et les chemins relatifs remontants. Les routes sœurs restent ainsi navigables sans exposer les dossiers voisins. Il ne lance aucune commande.
+- `local-project` : dossier ou fichier local, analysé et servi par Responsiver ;
+- `remote-url` : URL publique HTTPS ou localhost sans sources, toujours en lecture seule ;
+- `linked-localhost` : localhost associé explicitement à un dossier local éditable.
 
-## Préparation et historique
+Changer de source ferme les serveurs de preview, le `WebContentsView`, l’espace de changements et le staging de la session précédente. Les buffers Monaco, captures et messages de l’assistant ne sont pas persistés.
 
-L’ouverture est une transaction locale séquencée : validation du chemin, inventaire, qualification des routes, analyse responsive, qualification de la preview, puis démarrage du runner. Le renderer reçoit ces étapes par un événement IPC ; l’overlay n’apparaît qu’après un court délai afin de ne pas faire clignoter les projets instantanés. La redirection vers le laboratoire intervient seulement quand l’analyse et le serveur sont prêts.
+Un verrou Electron d’instance unique évite deux consommateurs concurrents pour le compagnon Chrome. La seconde instance réactive la fenêtre existante et déclenche une nouvelle lecture de la file.
 
-Le verdict de preview est indépendant des constats CSS : `ready`, `degraded`, `blocked` ou `needs-build`. Il tient compte de la structure HTML, du contenu visible potentiel, des scripts locaux réellement exécutables, des CSS vides, des médias non référencés, de la fraîcheur de l’artefact et de l’exhaustivité de l’inventaire. Un périmètre tronqué ou une racine d’artefact incertaine dégrade explicitement le verdict au lieu de présenter l’analyse comme exhaustive. Un projet bloqué n’obtient ni runner, ni proposition, ni staging. Ses diagnostics restent consultables comme constats manuels.
+## Pipeline des projets locaux
 
-Le processus main conserve un document JSON versionné sous `app.getPath('userData')`. Il contient uniquement le chemin canonique sélectionné, l’entrée et quelques compteurs. La lecture est bornée et validée ; les écritures sont atomiques, le fichier est privé en `0600` sur POSIX et les chemins absents restent visibles jusqu’à leur retrait explicite. Une réouverture repasse toujours par `realpath`, l’analyse et un nouveau runner.
+Une sélection peut être un dossier ou un fichier `.html/.htm`. L’ouverture suit une transaction locale : validation canonique, inventaire, routes, analyse responsive, readiness, puis démarrage du runner.
 
-## Analyse par route
+L’analyseur privilégie l’entrée racine et pénalise les démos, tests, documentations et Storybook. Si l’entrée est un shell de framework, il recherche prudemment une sortie existante dans `dist`, `build`, `out` ou `.output/public`. Un simple `public/index.html` de framework n’est pas considéré comme un build final.
 
-Chaque document HTML conserve son titre, sa route et ses feuilles CSS réellement liées, y compris leurs `@import` locaux. Les styles d’une démo n’alimentent donc plus les constats de la page principale. L’inspecteur affiche par défaut la page active et permet de basculer vers tout le projet.
+Le verdict `ready`, `degraded`, `blocked` ou `needs-build` combine structure HTML, contenu visible potentiel, scripts réellement exécutables, CSS vide, médias orphelins, fraîcheur de l’artefact et exhaustivité de l’inventaire. Un projet bloqué n’obtient ni runner, ni proposition, ni staging.
 
-Les IDs des constats sont des empreintes stables de la règle, de la route et de la source. Un constat peut aussi porter le sélecteur CSS de l’élément concerné. Lorsqu’il est ouvert dans le laboratoire, Responsiver active d’abord sa route, puis demande au bridge de chercher ce sélecteur, de centrer l’élément et de le mettre temporairement en évidence. Les pseudo-éléments et pseudo-classes dynamiques sont retirés pour obtenir un sélecteur interrogeable ; si aucun élément ne correspond, la route reste ouverte sans prétendre avoir trouvé la cible.
+L’analyse statique conserve les routes et feuilles CSS effectivement liées. Les règles déterministes couvrent notamment viewport absent, `min-width` rigide, largeurs fixes importantes, `white-space: nowrap` et ressources externes incompatibles avec la politique locale. PostCSS structure les déclarations ; Sass, Less et CSS non reliés sont signalés mais pas réécrits aveuglément.
 
-Les règles automatiques actuelles couvrent :
+## Runner et preview locale
 
-- absence de balise viewport ;
-- `min-width` rigide sur petit écran ;
-- largeur fixe supérieure à 640 px ;
-- `white-space: nowrap`, hors contenus masqués pour lecteurs d’écran et pistes animées ;
-- ressources externes bloquées par la politique locale.
+Le serveur Node écoute uniquement `127.0.0.1` sur un port aléatoire. Il accepte `GET` et `HEAD`, contrôle `Host`, chemins réels, liens symboliques, fichiers cachés, types MIME et requêtes `Range`.
 
-PostCSS fournit une représentation structurée des déclarations. Sass, Less et les CSS non reliés sont signalés mais jamais réécrits aveuglément.
-
-## Preview locale
-
-Le serveur Node HTTP écoute uniquement `127.0.0.1` et un port aléatoire. Il accepte `GET` et `HEAD`, contrôle l’en-tête `Host`, les chemins réels, les liens symboliques, les fichiers cachés et une liste de types MIME Web. Les requêtes `Range` permettent de lire correctement les vidéos et fichiers audio.
-
-Le HTML est transformé uniquement en mémoire pour injecter, avant les scripts du projet, un bridge sans accès Node :
+Le HTML reçoit en mémoire un bridge sans accès Node pour :
 
 - navigation interne, historique et rechargement ;
-- redirection des `window.open()` internes dans l’iframe ;
-- observation du thème après mutations du DOM ;
-- mesure du `scrollWidth` et des éléments qui sortent du viewport ;
-- smoke-test du rendu à 600 puis 1 800 ms, puis requalification sur mutation ou erreur tardive, avec exploration bornée des Shadow DOM ouverts et pseudo-éléments peints ;
-- ciblage route + sélecteur et suppression de la mise en évidence précédente.
+- redirection des fenêtres internes dans l’iframe ;
+- thème et mutations DOM ;
+- mesure des débordements ;
+- smoke-test du contenu réellement peint, y compris pseudo-éléments et Shadow DOM ouverts ;
+- centrage et mise en évidence d’un sélecteur.
 
-Le renderer ne peut lire le DOM de l’iframe, car l’origine loopback est distincte. Le projet ne peut pas accéder au preload ou à IPC.
+L’iframe possède une origine loopback différente du renderer. Elle ne peut pas atteindre le preload ou IPC. Les sorties réseau sont bloquées à l’exception des Google Fonts déjà référencées.
 
-Les dimensions de viewport restent des dimensions CSS réelles, même lorsque l’interface réduit visuellement l’iframe pour la faire tenir dans l’atelier. Les modèles d’appareils et les champs numériques peuvent être complétés par une manipulation directe des bords ou des angles ; le renderer convertit ce geste en largeur et hauteur personnalisées. Le plein écran agrandit la scène de travail sans ouvrir une origine différente et sans changer la route, le thème candidat ou la version observée.
+Les dimensions restent exprimées en CSS px même si l’atelier applique une échelle visuelle. Les poignées de redimensionnement produisent un viewport personnalisé ; le plein écran conserve l’origine, la route et la version de preview.
 
-## Proposition éphémère, décision et staging
+## URL publique et localhost
 
-Le cycle sépare volontairement quatre actions :
+Une URL n’est pas placée dans une iframe. Le processus principal crée un `WebContentsView` avec :
 
-1. **Analyser** produit des constats sans modifier le projet.
-2. **Prévisualiser** construit des overlays temporaires et démarre une origine de proposition. La source et la proposition sont alors affichables côte à côte sur la même route, la même taille et, si possible, le même sélecteur.
-3. **Accepter ou écarter** met à jour la sélection de décisions du renderer. Une simple consultation, un changement de thème dans le sélecteur ou l’ouverture d’un constat ne vaut jamais acceptation.
-4. **Construire le staging** matérialise uniquement les constats acceptés, le thème validé et les instructions locales retenues. Ce staging devient la seule base de révision et d’export.
+- `nodeIntegration: false`, `contextIsolation: true`, sandbox et `webSecurity` ;
+- partition aléatoire sans préfixe `persist:` ;
+- permissions sensibles, téléchargements et nouvelles fenêtres refusés ;
+- stockage nettoyé à la fermeture ;
+- navigation principale contrôlée par le processus main.
 
-Une proposition éphémère remplace la proposition précédente et son serveur est fermé lorsqu’elle est effacée, remplacée, transformée en staging ou lorsque la session projet se termine. Elle n’est pas enregistrée dans le projet et ne peut pas être exportée directement.
+Le mode public exige HTTPS. Avant le chargement, tous les résultats DNS sont contrôlés et doivent être publics. Les plages privées, loopback, link-local, documentation, multicast et réservées sont refusées, y compris les IPv4 mappées en IPv6. Chaque redirection est normalisée et revalidée pour réduire les risques de SSRF et de DNS rebinding.
 
-Pour une proposition comme pour le staging, le transformeur reçoit les IDs concernés, le thème cible et les instructions locales reconnues. Il produit :
+Le mode localhost accepte uniquement `localhost`, ses sous-domaines et les adresses de boucle locale. Il n’autorise pas le LAN. Associer un dossier n’accorde aucun accès réseau supplémentaire : cela active seulement le `WorkspaceEditor` sur cette racine.
 
-- des fichiers modifiés en mémoire ;
-- une feuille `.responsiver/responsiver.generated.css` si nécessaire ;
-- un patch unifié ;
-- la liste des changements et leur confiance ;
-- les empreintes SHA-256 des sources concernées.
+Les liens quittant le périmètre de navigation approuvé sont bloqués. Les sous-ressources HTTP(S) sont elles aussi limitées à la portée réseau du mode choisi. Le site reste du JavaScript non fiable exécuté par Chromium ; la session n’est pas une machine virtuelle anti-malware.
 
-Les serveurs de proposition et de staging lisent d’abord leurs overlays, puis retombent sur le dossier source pour les autres assets. Quand un artefact est monté, les routes et assets absolus sont résolus dans sa base canonique sans exposer les dossiers voisins, notamment `.output/server`. La feuille générée est placée dans le `.responsiver` de ce mount afin qu’un export de l’artefact reste autonome. Source, proposition et staging ont des ports distincts et peuvent être comparés sans ambiguïté.
+## Audit visuel multi-viewport
 
-Avant tout export, les hashes sont recalculés. Un changement concurrent du projet invalide le staging. Chaque export de dossier réserve atomiquement une destination privée, vérifie sa racine réelle et refuse qu’un lien symbolique la remplace. Les fichiers peuvent être livrés seuls, dans une copie complète, ou sous forme de patch ; l’original n’est jamais modifié. Si les fichiers ciblés appartiennent à une sortie compilée, le laboratoire, la révision et l’export rappellent que le correctif doit être reporté dans les sources avant le prochain build.
+Le renderer demande actuellement cinq viewports : 360 × 800, 390 × 844, 768 × 1024, 1024 × 768 et 1440 × 900. Le moteur accepte au maximum huit viewports par appel.
 
-## Thèmes et conversation locale
+Pour chaque taille, la session applique les métriques Chromium et le tactile, attend la stabilisation puis exécute un collecteur borné dans la page. La route doit rester identique pendant le balayage. Le résultat provenant de la page est traité comme une entrée non fiable puis assaini par le processus principal.
 
-Le profil de thème combine `color-scheme`, media queries, sélecteurs de thème, surfaces et variables CSS. Une variante déjà présente n’est pas proposée comme une correction identique : un site sombre reçoit une candidate claire, un site clair une candidate sombre, et un site réellement double ne reçoit pas de doublon. Les variables sont classées par rôle — fond, surface, texte, contenu atténué, bordure, accent — puis une palette déterministe vérifie les contrastes connus. Il n’existe aucune inversion globale des couleurs.
+Les règles implémentées sont :
 
-Choisir **Clair** ou **Sombre** dans le laboratoire met immédiatement la preview à jour. Si la variante manque, Responsiver reconstruit une proposition non validée ; l’utilisateur doit ensuite la valider ou l’écarter. Si elle existe déjà, le bridge active ses conventions natives courantes — attributs de thème, classes et règles `prefers-color-scheme` locales — uniquement pour l’aperçu, sans créer de changement artificiel à valider. Le thème généré et validé est séparé du thème actuellement observé et lui seul rejoint le staging final.
+- débordement horizontal du viewport ou d’un conteneur ;
+- contenu coupé par `overflow` ;
+- texte probablement tronqué ;
+- cible tactile inférieure au seuil ;
+- élément fixe occupant une part obstructive du viewport ;
+- image non chargée ou déformée ;
+- contraste textuel calculable sous le seuil ;
+- erreur JavaScript capturée pendant la session.
 
-Chaque transition Source → Proposition → Staging recrée l’iframe lorsque son origine change. Electron n’autorise son chargement initial que si la destination loopback appartient à la liste éphémère des serveurs de preview connus ; une fois le projet chargé, toute navigation initiée depuis `127.0.0.1` reste cantonnée à sa propre origine. Cette règle continue de protéger un document pendant les quelques millisecondes où son ancien serveur est déjà fermé. Le nettoyage d’une proposition transporte en outre son origine attendue, afin qu’une requête tardive ne puisse jamais fermer le serveur qui l’a remplacée.
+Chaque constat contient règle, route, viewport, sélecteur, rectangle, styles bornés, mesures et confiance. Un clic demande au `WebContentsView` de chercher le sélecteur, centrer l’élément et poser un contour temporaire.
 
-La conversation n’est pas un modèle de langage. Un parseur local reconnaît uniquement des intentions explicites : thème clair/sombre, couleur d’accent, densité, arrondis, taille typographique et retour à la ligne de navigation. Une demande inconnue est conservée et refusée honnêtement au lieu de générer du code arbitraire.
+Le moteur mesure des défauts objectifs. Il ne compare pas la page à une maquette, ne note pas son esthétique, ne lance ni Lighthouse ni axe-core et ne parcourt pas automatiquement les autres routes. Une capture bornée de la route auditée peut être fournie à l’assistant local.
 
-## Frontières de sécurité
+## Proposition déterministe et staging
 
-- `nodeIntegration: false`, `contextIsolation: true`, sandbox Chromium active.
-- IPC disponible uniquement depuis la frame principale du renderer.
-- permissions navigateur refusées et nouvelles fenêtres interdites.
-- CSP distinctes pour l’application et la preview.
-- sorties réseau de chaque preview limitées à sa propre origine et à Google Fonts HTTPS.
-- stockage preview supprimé à la fermeture du serveur.
-- historique limité à des métadonnées locales, schéma strict, écriture atomique et permissions privées.
-- exports protégés contre traversée, symlink et destination interne au projet source.
+Le pipeline historique conserve quatre étapes :
 
-Le JavaScript local du projet s’exécute pour préserver les interactions. Responsiver réduit ses capacités réseau et système, mais ne remplace pas une machine virtuelle pour analyser un projet réellement malveillant.
+1. **Analyser** produit des constats sans modification.
+2. **Prévisualiser** construit une proposition éphémère en mémoire.
+3. **Accepter ou écarter** enregistre la décision humaine.
+4. **Construire le staging** reconstruit uniquement les constats et thèmes acceptés.
 
-## Projets nécessitant un build
+Source, proposition et staging utilisent des origines distinctes. Le transformeur génère overlays, CSS complémentaire si nécessaire, patch unifié et empreintes SHA-256. Une proposition n’est pas directement exportable.
 
-La version 0.5 détecte et monte automatiquement une sortie statique déjà présente, mais ne lance aucune commande provenant du projet. Cette décision évite l’exécution silencieuse de scripts arbitraires. En l’absence d’artefact, le projet est marqué `needs-build` et reste hors du runner. Un futur runner de build devra être opt-in, afficher la commande exacte, limiter ses droits et obtenir un consentement explicite.
+Avant tout export, les sources sont re-hachées. Un changement concurrent invalide le staging. Les exports de fichiers, copie ou patch restent hors de la racine source et sont protégés contre traversées et substitutions par lien symbolique.
+
+## Espace code Monaco
+
+Le `WorkspaceEditor` existe uniquement lorsqu’une racine locale a été autorisée : projet local ou localhost lié. Il liste les sources texte pertinentes et exclut notamment :
+
+- fichiers cachés, `.git`, dépendances, vendors et sorties compilées ;
+- `.env`, identifiants, clés, certificats, dumps SQL et bases locales ;
+- binaires, textes non UTF-8, fichiers trop volumineux et liens symboliques.
+
+Les chemins sont relatifs, canoniques et confinés à la racine. Chaque document chargé conserve contenu source, hash, overlay, version et diff.
+
+La saisie Monaco met à jour l’overlay après un court délai. Pour un projet local, un runner `workspace` sert toutes les substitutions en mémoire. Pour un localhost lié, seuls les overlays CSS sont injectés dans la page distante ; les autres changements nécessitent que le serveur de développement les recharge après application.
+
+**Écarter** restaure la copie mémoire. **Appliquer au fichier** est la seule opération de cet espace qui écrit la source. Elle vérifie version et hash, crée un fichier temporaire dans le même dossier, synchronise son contenu puis effectue un renommage atomique. Si le fichier a changé extérieurement, l’écriture est refusée.
+
+Ce workflow est distinct du staging déterministe : le staging exporte sans toucher l’original, tandis que Monaco peut modifier l’original après consentement explicite.
+
+## Assistant IA local
+
+Responsiver ne contient pas de modèle. L’adaptateur se connecte à un service déjà lancé :
+
+- Ollama via `/api/tags` et `/api/chat` ;
+- llama.cpp via `/health`, éventuellement `/v1/models`, puis `/v1/chat/completions`.
+
+L’adresse doit être HTTP et loopback. `localhost` est transformé en `127.0.0.1`, les identifiants, query strings, fragments et redirections sont refusés. Il n’existe aucun fournisseur cloud ou fallback.
+
+Le contexte est construit par Responsiver : nom, type de source, route, viewport, jusqu’à cinquante constats après validation, sélection bornée de fichiers non secrets et capture PNG/JPEG éventuelle. Les prompts, réponses et tailles sont plafonnés.
+
+Le modèle reçoit une instruction lui rappelant que le contenu du projet est non fiable. La réponse attendue est un JSON avec explication et propositions de fichiers complets. Les chemins, extensions, tailles et contenus sont revalidés. Le modèle n’obtient jamais de terminal, outil système ou accès direct au disque.
+
+Cliquer sur une proposition IA la charge dans l’overlay Monaco. L’utilisateur doit encore examiner le diff et cliquer sur **Appliquer au fichier**. Cette barrière réduit le risque mais ne prouve pas que le code généré est correct ou sûr.
+
+Le moteur local est un processus séparé. Responsiver ne déclenche aucun téléchargement de modèle et ne peut pas garantir la politique de logs ou de réseau d’un service local tiers mal configuré.
+
+## Compagnon Chrome
+
+L’extension Manifest V3 demande seulement `activeTab` et `nativeMessaging`. Après un clic, le service worker construit une demande `open-url` contenant URL HTTP(S), titre, viewport, DPR, UUID et date.
+
+Le Native Messaging Host :
+
+- lit le framing JSON length-prefixed sur stdin ;
+- limite chaque message à 64 Kio ;
+- applique un schéma fermé ;
+- écrit atomiquement dans `extension-inbox`, privé en `0700/0600` sur POSIX ;
+- borne la file à 128 éléments et ne met jamais l’URL dans le nom du fichier.
+
+Le consommateur Electron réclame chaque fichier par renommage, le relit sans suivre de symlink, revalide le contrat et refuse les demandes âgées de plus de dix minutes. Une demande acceptée ouvre une session distante et focalise la fenêtre.
+
+Le host ne lance pas l’application. Le parcours actuel exige une installation manuelle et un moteur Node accessible sur macOS/Linux. Aucun exécutable autonome Windows n’est encore produit. Le détail se trouve dans [compagnon-chrome.md](compagnon-chrome.md).
+
+## Persistance, confidentialité et fermeture
+
+L’historique JSON stocke seulement chemins, entrée, compteurs et dates. Les sources, overlays Monaco, conversations, captures et constats distants ne sont pas persistés par Responsiver.
+
+Fermer une session locale arrête ses serveurs et nettoie son stockage navigateur. Fermer une session distante détache le debugger, retire le CSS injecté, efface son stockage et ferme le `WebContentsView`.
+
+Les rapports et exports ne sont créés qu’après choix explicite d’une destination. Le fichier source ne peut être modifié que par l’action explicite de l’espace code.
+
+## Projets backend, bases et Docker
+
+Responsiver ne lance aucune commande issue d’un projet. Il ne démarre pas PHP, Symfony, MySQL, Docker Compose, un build frontend ou des migrations.
+
+Un projet dynamique fonctionne lorsque l’utilisateur démarre lui-même son environnement puis ouvre le localhost. Responsiver agit alors comme un navigateur d’audit. L’association facultative du dossier source active l’éditeur, sans donner accès à la base. L’orchestration Docker automatique reste hors du périmètre de la version 0.6.

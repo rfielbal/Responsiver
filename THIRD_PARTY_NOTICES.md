@@ -10,6 +10,7 @@ Les versions exactes distribuées sont verrouillées dans `package-lock.json`. L
 | electron-vite | Outil de build Electron | MIT |
 | electron-builder | Packaging desktop | MIT |
 | PostCSS | Analyse structurelle CSS | MIT |
+| Monaco Editor | Édition locale du code source | MIT |
 | TypeScript | Vérification statique | Apache-2.0 |
 | @vitejs/plugin-react | Compilation JSX | MIT |
 | tsx | Exécution des tests TypeScript | MIT |

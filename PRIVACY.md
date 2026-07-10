@@ -1,44 +1,91 @@
 # Politique de confidentialité
 
-Responsiver est conçu pour fonctionner localement.
+Responsiver est conçu comme une application locale-first. Il ne crée aucun compte et n’active ni télémétrie, analytics, rapport de crash distant, synchronisation, API produit cloud ou mise à jour automatique.
 
-## Ce que l’application ne fait pas
+Cette politique distingue les traitements purement locaux des connexions déclenchées volontairement par l’utilisateur : audit d’une URL, Google Fonts et moteur IA local.
 
-- Elle ne téléverse pas volontairement le contenu des projets importés.
-- Elle ne crée pas de compte utilisateur.
-- Elle n’active ni télémétrie, ni analytics, ni rapport de crash externe.
-- Elle n’appelle aucune API produit distante.
-- Elle ne lance pas de gestionnaire de paquets, de build ou de serveur de développement pour le projet importé.
+## Projets locaux et historique
 
-## Ce qui reste sur l’ordinateur
+Les fichiers analysés, aperçus, constats, décisions, overlays, captures et patchs restent sur l’ordinateur.
 
-Les chemins choisis, fichiers analysés, aperçus, décisions de staging et rapports sont traités localement. Pour permettre la section **Anciens projets**, Responsiver conserve dans son dossier de données un petit JSON versionné : chemin canonique sélectionné, racine, entrée, nom, compteurs et dates d’analyse. Il ne contient jamais le code source, le HTML servi, le thème, les constats détaillés, un patch ou une correction. Chaque projet est réanalysé lors de sa réouverture et peut être retiré individuellement de l’historique sans toucher à ses fichiers.
+La section **Anciens projets** conserve un JSON versionné dans le dossier de données de l’application. Il contient seulement chemin canonique sélectionné, racine, entrée, nom, compteurs et dates d’analyse. Il ne contient ni code source, HTML servi, capture, thème, constat détaillé ou correctif. Chaque projet est réanalysé lors de sa réouverture.
 
-Sur les systèmes POSIX, le dossier de cet historique est restreint à `0700` et son fichier à `0600`. L’écriture est atomique et la lecture refuse les fichiers symboliques, surdimensionnés, corrompus ou de version inconnue.
+Sur POSIX, le dossier et les fichiers sensibles créés par Responsiver utilisent des permissions privées lorsque le système le permet. Les écritures de l’historique sont atomiques et sa lecture refuse liens symboliques, fichiers surdimensionnés, corrompus ou de version inconnue.
 
-Un rapport JSON n’est écrit qu’à l’emplacement explicitement sélectionné ; il omet le chemin absolu du projet et les origines temporaires de preview. Le dossier source n’est jamais écrit automatiquement par Responsiver.
+## Previews et corrections
 
-Les corrections sont conservées dans des overlays en mémoire. Lors d’un export, Responsiver écrit un nouveau patch ou réserve atomiquement un nouveau dossier privé à l’emplacement choisi. Les copies complètes et fichiers modifiés doivent être exportés hors du projet source.
+Les corrections déterministes et thèmes sont conservés dans des overlays en mémoire. Un export n’est écrit qu’à l’emplacement choisi explicitement et les copies complètes doivent rester hors du projet source.
+
+L’espace Monaco utilise également des overlays en mémoire. La frappe, le diff et la prévisualisation ne modifient pas le disque. Le bouton **Appliquer au fichier** constitue en revanche une autorisation explicite d’écrire dans le fichier source après vérification de son hash et de sa version.
+
+Les conversations avec l’assistant, captures et buffers Monaco ne sont pas persistés par Responsiver après la session.
 
 ## Aperçu local interactif
 
-Un dossier importé qualifié comme exploitable est servi temporairement sur `127.0.0.1` afin que ses pages, scripts, formulaires et assets **locaux** restent utilisables. Un projet incomplet ou nécessitant un build ne démarre aucun runner. Le serveur est fermé au changement de projet et à la fermeture de l’application. Il ne rend accessible que des types de ressources web autorisés à l’intérieur du dossier choisi ou de l’artefact compilé détecté.
+Un projet qualifié comme exploitable est servi temporairement sur `127.0.0.1`. Le serveur est fermé au changement de projet et à la fermeture de l’application. Le stockage navigateur de la preview — cookies, stockage local, IndexedDB, service workers et cache — est alors effacé.
 
-Le stockage navigateur associé à une origine de preview — cookies, stockage local, IndexedDB, service workers et cache — est effacé lorsque le serveur correspondant est fermé.
+Les sorties externes du runner local sont bloquées, à l’exception de Google Fonts lorsqu’un projet les référence déjà :
 
-Les destinations externes initiées par la preview sont bloquées. Les permissions Chromium, notamment caméra, micro, géolocalisation et notifications, sont refusées. Les formulaires et navigations de même origine loopback peuvent fonctionner ; ils ne constituent pas une transmission vers Internet.
+- feuilles de style HTTPS de `fonts.googleapis.com` ;
+- polices HTTPS de `fonts.gstatic.com`.
 
-## Exception Google Fonts
+Google reçoit alors l’adresse IP et les métadonnées HTTP normales. Les autres CDN, `fetch`, WebSockets, formulaires externes, nouvelles fenêtres et permissions sensibles sont refusés dans la preview locale.
 
-Lorsque le projet importé référence Google Fonts, Responsiver autorise uniquement :
+## Audit d’une URL publique ou d’un localhost
 
-- les feuilles de style HTTPS de `fonts.googleapis.com` ;
-- les fichiers de police HTTPS de `fonts.gstatic.com`.
+Ouvrir une URL demande à Responsiver de s’y connecter comme un navigateur. Le site et ses hôtes de ressources autorisés reçoivent donc l’adresse IP et les métadonnées HTTP normales. Le contenu de la page peut également déclencher ses propres requêtes autorisées par la politique de la session.
 
-Google reçoit alors l’adresse IP de la machine et les métadonnées HTTP normales de ces requêtes, notamment l’URL de police demandée. Cette exception est présente pour préserver le rendu de projets existants ; elle ne constitue ni une API de Responsiver ni un téléversement intentionnel du dossier. Les autres CDN, appels `fetch`, WebSockets et liens externes sont bloqués.
+Le mode public exige HTTPS et une destination réseau publique. Le mode localhost accepte seulement la boucle locale. Dans les deux cas, la session Chromium possède un stockage isolé et non persistant ; permissions sensibles et téléchargements sont refusés, puis le stockage est nettoyé à la fermeture.
 
-## Mises à jour
+L’audit analyse localement le DOM, les styles, la géométrie, les erreurs runtime et une capture bornée. Responsiver n’envoie pas ces données à un service d’analyse distant. Une URL publique reste en lecture seule. Associer un dossier à un localhost active l’éditeur local mais ne donne aucun accès à sa base de données.
 
-L’application ne vérifie pas les mises à jour automatiquement. Si cette fonction est ajoutée, elle sera désactivable et indiquera clairement qu’une requête vers GitHub peut transmettre l’adresse IP et des métadonnées HTTP. Aucun contenu de projet ne sera inclus.
+## Assistant IA local
 
-Les workflows GitHub Actions et les téléchargements npm documentés dans le dépôt concernent uniquement la construction par les mainteneurs. Ils ne sont pas exécutés par l’application installée.
+L’assistant est facultatif et désactivé tant qu’aucun moteur n’a été vérifié. Responsiver accepte uniquement une adresse HTTP loopback pour :
+
+- Ollama ;
+- un serveur llama.cpp compatible.
+
+Aucun compte, clé API ou fournisseur cloud n’est intégré. Il n’existe aucun fallback distant et Responsiver ne déclenche aucun téléchargement de modèle.
+
+Lors d’un envoi, Responsiver peut transmettre au processus local choisi :
+
+- le prompt ;
+- le nom et le type de source ;
+- la route et le viewport ;
+- une sélection bornée de constats ;
+- une sélection bornée de fichiers texte pertinents, hors secrets et données ;
+- la capture de la route lorsqu’elle est disponible.
+
+Ces données circulent uniquement vers l’adresse loopback configurée par l’utilisateur. Elles ne sont pas persistées par Responsiver. Le moteur local reste néanmoins un logiciel distinct : il peut avoir ses propres journaux, réglages réseau ou conditions. Utilisez seulement une instance que vous contrôlez et vérifiez sa configuration.
+
+Responsiver ne distribue pas les modèles. Leur téléchargement, stockage, licence et éventuelle télémétrie relèvent du moteur et du modèle choisis.
+
+## Compagnon Chrome
+
+L’extension facultative ne s’active qu’après un clic. Elle transmet localement au Native Messaging Host :
+
+- l’URL HTTP(S) complète, y compris query string et fragment ;
+- le titre de l’onglet ;
+- les dimensions signalées par Chrome et le DPR ;
+- un identifiant aléatoire et une date.
+
+Elle ne lit pas le DOM, le texte, les formulaires, cookies, mots de passe ou l’historique et ne possède aucune permission permanente sur les sites.
+
+Une URL peut contenir un jeton ou une donnée personnelle dans sa query string. Vérifiez-la avant de cliquer. Les identifiants HTTP intégrés sont refusés.
+
+Le host dépose la demande dans une file locale privée dont les noms ne contiennent aucune partie de l’URL. La file est bornée ; les demandes expirent après dix minutes et sont supprimées après traitement ou rejet, sans journal d’URL.
+
+Le connecteur ne lance pas Responsiver. Si l’application est fermée, ouvrez-la manuellement dans les dix minutes. Le transport Chrome → host reste local, mais l’ouverture de la demande par Responsiver contacte ensuite normalement le site demandé.
+
+## Rapports, exports et presse-papiers
+
+Un rapport JSON ou un export est créé uniquement après choix explicite d’une destination. Le rapport omet le chemin absolu du projet et les origines temporaires de preview. Copier du code ou un patch utilise le presse-papiers système à la demande de l’utilisateur.
+
+Responsiver ne téléverse aucun export. Le contenu reste sous la responsabilité de l’utilisateur après sa copie ou son enregistrement.
+
+## Mises à jour et outils de développement
+
+L’application ne vérifie pas les mises à jour automatiquement. Une future fonction devra indiquer qu’une requête vers GitHub transmet l’adresse IP et des métadonnées HTTP normales.
+
+GitHub Actions, npm, le téléchargement d’Electron et les commandes de packaging documentées concernent le développement et la construction. Ils ne sont pas lancés par l’application installée.

@@ -1,46 +1,112 @@
 # Responsiver
 
-Responsiver est un laboratoire desktop open source pour auditer, corriger et valider la responsivité d’un projet web sans envoyer son code vers un service distant.
+Responsiver est un laboratoire desktop open source pour inspecter la responsivité d’un projet local, d’un localhost ou d’un site public, puis préparer et valider des corrections sans service cloud imposé.
 
-La version 0.5 prépare entièrement le projet dès son ouverture : inventaire, sélection de l’entrée, analyse responsive, qualification du rendu et démarrage du runner. Un site prêt rejoint automatiquement le laboratoire ; un projet incomplet, un build absent ou un bundle défaillant reçoit un diagnostic exploitable au lieu d’une prévisualisation blanche. Les anciens projets restent accessibles par leur chemin local et sont toujours réanalysés avant réouverture.
+La version 0.6 ajoute quatre capacités majeures : audit d’URL dans une session Chromium isolée, analyse visuelle multi-viewport, espace code Monaco avec prévisualisation en mémoire et assistant IA local facultatif via Ollama ou llama.cpp. Un compagnon Chrome permet également de transmettre l’onglet actif à l’application.
+
+## Trois sources, trois niveaux d’accès
+
+| Source | Navigation | Audit visuel | Modification |
+| --- | --- | --- | --- |
+| Projet local statique ou compilé | Oui | Analyse locale et runtime | Oui, avec overlays puis confirmation explicite |
+| URL publique HTTPS | Oui | Oui, sur la route courante | Lecture seule |
+| Localhost | Oui | Oui, sur la route courante | Lecture seule, ou édition si un dossier source local est associé |
+
+Responsiver ne prétend pas retrouver le code auteur d’un site public à partir de ses bundles. Une URL publique reste donc inspectable mais non modifiable. Pour Symfony, Laravel, Django, Rails, WordPress, Node ou un projet Docker, lancez d’abord l’application avec son environnement habituel puis ouvrez son localhost. Responsiver ne démarre ni conteneur, ni base de données, ni migration.
 
 ## Fonctionnalités
 
+### Projets locaux
+
 - Ouverture par dossier, fichier HTML, chemin local ou glisser-déposer.
-- Détection prioritaire de la vraie entrée du site ; les dossiers `demo`, `examples` et assimilés ne prennent pas sa place.
-- Détection automatique d’un artefact existant dans `dist`, `build`, `out` ou `.output/public`, y compris imbriqué ; sa racine web est déduite de l’entrée, de `<base href>` et de ses assets, sans lancer de commande du projet.
-- Préparation visible en six étapes lorsque l’analyse prend réellement du temps ; les ouvertures rapides ne déclenchent aucun écran de chargement inutile.
-- Qualification `ready`, `degraded`, `blocked` ou `needs-build`, complétée par un smoke-test du contenu réellement peint — pseudo-éléments et Shadow DOM ouverts compris —, des erreurs tardives et d’un éventuel périmètre d’analyse tronqué.
-- Section **Anciens projets** fondée sur les chemins locaux : aucune copie du code, réanalyse obligatoire et retrait individuel de l’historique.
-- Navigation fonctionnelle entre les pages, ancres et fenêtres internes du projet.
-- Aperçu smartphone, tablette et ordinateur avec modèles connus, dimensions libres, rotation et redimensionnement direct par les bords ou les angles.
-- Plein écran modal pour inspecter et agrandir le site sans perdre la route, la taille, le focus ou la version affichée.
-- Mode **Comparer** sur trois familles d’appareils, distinct de la comparaison **Avant / Après** d’un correctif.
-- Analyse HTML/CSS par route : viewport, largeurs fixes, `min-width`, `nowrap`, ressources distantes et vérification visuelle.
-- Audit runtime des éléments qui débordent réellement du viewport.
-- Ouverture d’un constat sur sa route et, lorsqu’il existe, sur son sélecteur DOM mis en évidence dans la preview.
-- Comparaison contextualisée **Avant / Après** sur deux origines locales avant toute acceptation du correctif.
-- Proposition éphémère non exportable, sélection explicitement acceptée, puis staging final non destructif avec patch unifié lisible.
-- Prévisualisation immédiate d’un thème clair ou sombre : une variante absente devient une proposition à valider ou écarter, tandis qu’une variante native existante est activée sans générer de doublon.
-- Ajustements locaux sans IA pour la couleur, les espacements, les arrondis, l’échelle du texte et la navigation.
-- Export du patch, des seuls fichiers modifiés, d’une copie complète corrigée ou d’un rapport JSON portable.
-- Démo multi-page et interactive utilisant exactement le même runner que les projets importés.
+- Analyse dès l’import : inventaire, routes, CSS, readiness et démarrage du runner avant l’arrivée au laboratoire.
+- Priorité à la véritable entrée du site ; les dossiers `demo`, `examples`, documentation et Storybook sont pénalisés.
+- Détection d’une sortie existante dans `dist`, `build`, `out` ou `.output/public`, y compris imbriquée, sans exécuter de commande du projet.
+- Diagnostic explicite des projets incomplets, des builds absents et des rendus vides au lieu d’une preview blanche.
+- Historique local d’anciens projets fondé sur leurs chemins, sans copie du code et avec réanalyse à la réouverture.
+- Navigation multi-page, ancres, historique et interactions locales via un runner lié à `127.0.0.1`.
+
+### Appareils et validation
+
+- Familles smartphone, tablette et ordinateur séparées des dimensions personnalisées.
+- Modèles connus, rotation, saisie précise et redimensionnement direct par les bords ou les angles.
+- Plein écran sans perdre la route, la taille, le focus ou la version observée.
+- Comparaison de plusieurs appareils distincte de la comparaison Source / Proposition.
+- Ouverture d’un constat sur sa route et son sélecteur lorsque celui-ci est disponible.
+- Avant / Après contextualisé avant validation d’un correctif.
+- Thème clair ou sombre prévisualisé immédiatement ; une variante existante est activée sans générer de doublon, une variante absente reste à valider séparément.
+
+### URL publique et localhost
+
+- URL publique limitée à HTTPS et aux adresses réellement publiques.
+- Localhost limité à la boucle locale ; un dossier source peut être associé explicitement.
+- Navigation arrière, avant, rechargement et saisie d’adresse dans une session éphémère.
+- Émulation Chromium des dimensions, du DPR, du tactile et du mode mobile.
+- Audit automatique de cinq largeurs : 360, 390, 768, 1024 et 1440 CSS px.
+- Détection objective des débordements, contenus masqués, textes tronqués, petites cibles tactiles, éléments fixes obstructifs, images absentes ou déformées, contrastes faibles et erreurs JavaScript.
+- Clic sur un constat distant pour centrer et mettre en évidence l’élément correspondant.
+
+L’audit distant porte sur la route actuellement ouverte. Il ne parcourt pas automatiquement tout le site et ne remplace pas une revue humaine de la qualité esthétique.
+
+### Espace code Monaco
+
+- Explorateur des fichiers texte pertinents et éditeur Monaco intégré.
+- Copie de travail en mémoire, diff par fichier et preview mise à jour après édition.
+- Pour un projet local, les overlays HTML, CSS et JavaScript sont servis par une origine de preview distincte.
+- Pour un localhost lié, les changements CSS sont injectés temporairement dans la page ; les autres fichiers restent visibles dans le diff mais dépendent du serveur de développement pour leur rendu.
+- Boutons distincts **Écarter** et **Appliquer au fichier**.
+- Vérification de version et de hash avant écriture, puis remplacement atomique du fichier.
+- Exclusion des secrets, bases de données, dumps, binaires, dépendances, sorties compilées, fichiers cachés et liens symboliques.
+
+Une frappe dans Monaco ne modifie jamais immédiatement le disque. En revanche, **Appliquer au fichier** est une autorisation explicite d’écrire dans le projet source.
+
+### Assistant IA local facultatif
+
+- Connexion à un moteur Ollama ou llama.cpp déjà lancé sur une adresse HTTP loopback.
+- Aucun compte, aucune clé API, aucun fournisseur cloud et aucun fallback distant.
+- Contexte borné : route, viewport, constats, capture disponible et sélection limitée de fichiers locaux non sensibles.
+- Réponse structurée et propositions de fichiers complets filtrées par chemin et taille.
+- Une proposition IA rejoint d’abord l’overlay de l’espace code ; elle n’est écrite qu’après validation humaine.
+- Aucun terminal, shell ou accès direct au disque accordé au modèle.
+
+Responsiver n’embarque ni moteur ni modèle. L’utilisateur installe et choisit son modèle local, sous sa propre licence. Le résultat dépend du modèle et doit être relu comme du code non fiable.
+
+### Compagnon Chrome
+
+- Extension Manifest V3 avec seulement `activeTab` et `nativeMessaging`.
+- Transmission locale de l’URL, du titre, du viewport et du DPR après un clic explicite.
+- Aucun accès permanent aux sites, cookies, mots de passe, historique ou DOM.
+- Native Messaging Host à schéma strict, messages limités et file privée expirant après dix minutes.
+
+L’installation est encore manuelle. Le connecteur ne démarre pas Responsiver : ouvrez l’application avant le clic, ou dans les dix minutes suivantes. macOS et Linux nécessitent actuellement Node.js 22 accessible depuis Chrome ; le paquet Windows ne produit pas encore le host autonome `.exe`. Consultez [le guide du compagnon Chrome](docs/compagnon-chrome.md).
+
+## Corrections et écritures
+
+Deux workflows coexistent :
+
+1. les corrections déterministes et thèmes passent par Source → Proposition → décisions explicites → Staging → export ;
+2. l’espace Monaco et les propositions de l’assistant passent par Source → Overlay mémoire → Diff → **Appliquer au fichier**.
+
+Le premier workflow ne modifie jamais l’original et exporte un patch, les fichiers changés ou une copie corrigée. Le second peut modifier le fichier source, mais seulement après le clic explicite et après vérification qu’il n’a pas changé sur le disque.
 
 ## Données et réseau
 
-Responsiver n’intègre ni compte, télémétrie, analytics, API produit distante, moteur d’IA ou mise à jour automatique.
+Responsiver ne crée aucun compte et n’active ni télémétrie, analytics, rapport de crash distant, API produit cloud ou mise à jour automatique.
 
-Le code importé reste sur la machine. Responsiver conserve seulement un historique borné de chemins et de métadonnées d’analyse dans le dossier de données local de l’application ; ni source, ni HTML de preview, ni patch, ni correction n’y sont copiés. Les aperçus peuvent charger uniquement leurs ressources locales et, si le projet en contient déjà, les feuilles et fichiers de police Google Fonts en HTTPS. Les autres CDN, `fetch`, WebSockets, formulaires externes, nouvelles fenêtres et permissions navigateur sont bloqués.
+- Projet local : code et overlays restent sur la machine ; seule l’exception Google Fonts déjà présente dans le projet peut joindre `fonts.googleapis.com` et `fonts.gstatic.com`.
+- URL publique : Responsiver contacte nécessairement le site et ses ressources publiques autorisées. Le site reçoit l’adresse IP et les métadonnées HTTP normales.
+- IA locale : Responsiver communique uniquement avec l’adresse loopback choisie. Aucun fallback cloud n’existe, mais le moteur local reste un logiciel séparé dont la configuration et les journaux doivent être contrôlés par l’utilisateur.
+- Chrome : le transport extension → host reste local ; l’ouverture ultérieure de l’URL produit ensuite la connexion réseau normale au site.
 
 Consultez [PRIVACY.md](PRIVACY.md) et [SECURITY.md](SECURITY.md) pour le détail.
 
-## Projets pris en charge
+## Compatibilité des projets
 
-Le runner ouvre les sites statiques et les sorties déjà compilées : HTML, CSS, JavaScript, médias, WebAssembly et routes SPA avec fallback local. Lorsqu’une racine contient un shell de framework et un artefact exploitable, Responsiver monte automatiquement l’artefact et résout aussi ses assets absolus.
+Le runner local ouvre les sites statiques et les sorties déjà compilées : HTML, CSS, JavaScript, médias, WebAssembly et routes SPA avec fallback local.
 
-Les corrections d’une sortie compilée restent exportables et prévisualisables, mais l’interface rappelle qu’un prochain build peut les écraser : le patch validé doit alors être reporté dans les sources pour devenir durable.
+Responsiver n’exécute jamais automatiquement `npm install`, un build, PHP, Symfony, un serveur backend, Docker Compose, MySQL, une migration ou une commande du projet. Un projet dynamique fonctionne dans le mode localhost lorsque son environnement est déjà lancé. Associer son dossier source active alors Monaco et les overlays sans donner à Responsiver l’accès à sa base de données.
 
-Responsiver n’exécute jamais automatiquement `npm install`, un script de build, un serveur backend, du SSR ou une commande provenant du projet. Si aucune sortie statique n’existe, l’interface indique qu’une compilation locale est requise. Un document sans contenu, une feuille CSS vide ou des assets orphelins sont signalés explicitement : Responsiver ne peut pas reconstruire un site absent de ses sources.
+Les modifications d’un artefact compilé peuvent être prévisualisées et exportées, mais un prochain build peut les écraser. Elles doivent être reportées dans les sources auteur.
 
 ## Lancer le projet
 
@@ -56,14 +122,14 @@ Vérifications :
 ```bash
 npm run typecheck
 npm test
+npm run test:native-host
 npm run test:e2e
+npm run test:e2e:remote
 npm run build
 npm audit
 ```
 
-Le test E2E lance Electron et couvre aussi le projet incomplet, le bundle local en erreur, l’historique, la démo, la navigation, la proposition avant validation, le ciblage d’un constat, le thème complémentaire, le redimensionnement, le plein écran, le staging final, la comparaison et l’export. `npm run test:e2e:packaged` exécute le même parcours sur l’application macOS déjà empaquetée.
-
-Un projet réel peut être vérifié sans coder un scénario dédié :
+Un projet réel peut être vérifié séparément :
 
 ```bash
 npm run test:project -- /chemin/du/projet
@@ -75,38 +141,27 @@ npm run test:project -- /chemin/du/projet
 npm run package
 ```
 
-`electron-builder` produit les formats macOS, Windows ou Linux correspondant à la machine de build. Le workflow [paquets.yml](.github/workflows/paquets.yml) construit les trois systèmes et attache les fichiers à une GitHub Release lorsqu’un tag `v*` est poussé.
+`electron-builder` produit les formats de la plateforme de build. Les paquets embarquent les avis de licence, la démo et les sources du compagnon Chrome sous `resources/companion`. Le hook de packaging refuse un paquet incomplet.
 
-Chaque application embarque `LICENSE`, `NOTICE` et `THIRD_PARTY_NOTICES.md` dans ses ressources. Le hook de packaging échoue si l’un de ces avis manque ; le workflow exécute aussi le typage et les tests du moteur avant de produire un paquet.
-
-Chaque release joint également `SHA256SUMS`, qui couvre tous les paquets et le fichier `sbom.spdx.json`. Le workflow vérifie le manifeste avant publication et refuse un tag dont la version ne correspond pas exactement à celle de `package.json`.
-
-Les paquets publics sont volontairement **non signés** tant qu’aucun certificat n’est configuré. Cela évite tout coût ou contrat de signature, mais macOS Gatekeeper et Windows SmartScreen peuvent afficher un avertissement. Une diffusion sans avertissement nécessite ultérieurement des certificats de signature propres à chaque plateforme ; elle devra être décidée séparément.
-
-## Principes de correction
-
-Chaque proposition indique sa règle, sa route, son fichier, sa ligne et son niveau de confiance. Cliquer sur un constat ouvre sa route, cible son sélecteur lorsque celui-ci est disponible et construit une comparaison Source / Proposition limitée aux choix en cours. Cette proposition est temporaire : la consulter ne la retient pas, et la refuser ne produit aucun changement persistant.
-
-Les transformations acceptées et le thème explicitement validé sont ensuite appliqués dans une carte d’overlays en mémoire pour construire le staging final. Les fichiers sources sont re-hachés avant export : si l’un d’eux a changé entre-temps, Responsiver refuse l’export et demande de reconstruire le staging.
-
-Les corrections heuristiques restent à relire. Responsiver ne prétend pas qu’une largeur fixe ou un `nowrap` est toujours une erreur ; l’avant/après contextualisé, la validation explicite, l’aperçu source/staging et le patch existent précisément pour garder la décision humaine.
+Le workflow de release construit les trois systèmes, génère un SBOM SPDX et un manifeste `SHA256SUMS`. Les paquets publics restent non signés tant qu’aucun certificat n’est configuré ; macOS Gatekeeper et Windows SmartScreen peuvent donc afficher un avertissement.
 
 ## Open source et obligations
 
-Le dépôt est sous licence Apache-2.0. Les dépendances directes utilisent des licences MIT ou Apache-2.0 et sont recensées dans [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Les versions exactes sont verrouillées dans `package-lock.json` et un SBOM peut être généré avec :
+Le dépôt est sous licence Apache-2.0. Les dépendances directes sont recensées dans [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) et verrouillées dans `package-lock.json`.
 
 ```bash
 npm run sbom > sbom.spdx.json
 ```
 
-Open source ne signifie pas « aucune règle » : les avis de licence doivent rester distribués, GitHub reste soumis à ses conditions d’utilisation, et Google Fonts à sa politique propre lorsqu’un projet le charge. Responsiver organise ces obligations sans ajouter de service payant.
+Open source ne signifie pas « sans règle ». Les avis doivent rester distribués ; Chrome, GitHub, Google Fonts, Ollama, llama.cpp et chaque modèle local possèdent leurs propres conditions ou licences. Aucun abonnement logiciel n’est exigé par Responsiver lui-même.
 
 ## Documentation
 
 - [Rapport produit et traçabilité](docs/rapport-produit.md)
 - [Architecture technique](docs/architecture.md)
+- [Guide du compagnon Chrome](docs/compagnon-chrome.md)
 - [Confidentialité](PRIVACY.md)
 - [Sécurité](SECURITY.md)
 - [Notices tierces](THIRD_PARTY_NOTICES.md)
 
-Les commits du projet sont rédigés en français, avec des messages explicites comme `feat: créer le moteur de corrections déterministes`.
+Les commits du projet sont rédigés en français, avec des messages explicites comme `feat: ajouter l’audit visuel des URL`.

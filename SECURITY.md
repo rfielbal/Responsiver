@@ -1,38 +1,99 @@
 # Sécurité
 
-## Frontières techniques
+## Renderer et IPC
 
-- `nodeIntegration` est désactivé, l’isolation de contexte et le sandbox Chromium sont activés.
-- Le preload n’expose qu’un bridge IPC minimal à la fenêtre principale ; les appels IPC sont refusés depuis une sous-frame.
-- La preview est une iframe à origine loopback distincte, sans accès Node.js ni accès au bridge IPC.
-- Les nouvelles fenêtres sont refusées. Les liens et `window.open()` internes sont ramenés dans la preview ; les sorties externes sont bloquées.
-- Le serveur de preview est lié à `127.0.0.1`, contrôle les chemins réels pour éviter les sorties par lien symbolique et refuse les fichiers cachés et types de ressources non web.
-- Le serveur vérifie l’en-tête `Host`, n’accepte que `GET` et `HEAD`, prend en charge les plages d’octets et utilise `no-store`.
-- Une sortie compilée détectée est montée depuis une liste de bases autorisées ; les chemins absolus du site restent dans ce mount et les répertoires serveur voisins demeurent inaccessibles.
-- Une CSP de réponse limite les scripts, connexions, formulaires, workers et frames à la même origine. L’exception est limitée à Google Fonts HTTPS pour styles et polices.
-- Les permissions Chromium sont systématiquement refusées : caméra, micro, géolocalisation, notifications, périphériques, etc.
-- Le dossier original n’est jamais écrit automatiquement.
-- L’historique ne stocke que des chemins et compteurs dans un JSON privé, borné, validé et écrit atomiquement ; il ne met jamais le code ou les corrections en cache.
-- Un projet qualifié `blocked` ou `needs-build` ne peut démarrer ni proposition ni staging, y compris par appel IPC direct.
-- Les exports vérifient les hashes SHA-256 des sources, refusent les liens symboliques sur les chemins corrigés et imposent une destination hors du projet pour les copies. Chaque dossier d’export est réservé atomiquement, privé en `0700` sur POSIX et revalidé pendant sa matérialisation.
-- Les avis `LICENSE`, `NOTICE` et `THIRD_PARTY_NOTICES.md` sont obligatoirement inclus dans les ressources de chaque paquet ; la construction échoue s’ils sont absents.
-- Les releases GitHub incluent un SBOM SPDX et un manifeste `SHA256SUMS` vérifié couvrant le SBOM et chaque paquet ; un tag dont la version diverge de `package.json` bloque la publication.
-- Le paquet macOS supprime les descriptions de permissions caméra, micro, audio et Bluetooth inutilisées ; ATS refuse les chargements arbitraires tout en autorisant localhost.
+- `nodeIntegration` est désactivé, l’isolation de contexte et le sandbox Chromium sont actifs.
+- Le preload expose un bridge IPC typé et minimal à la frame principale uniquement.
+- Les paramètres IPC sont bornés et revalidés dans le processus principal.
+- Les nouvelles fenêtres du renderer sont refusées et sa CSP limite les sources chargées.
 
-## Limites assumées
+## Projet local et runner
 
-Le JavaScript importé s’exécute pour rendre correctement les projets interactifs. Il est cadré par Chromium, l’iframe, la CSP et la politique réseau, mais Responsiver n’est pas un bac à sable anti-malware complet : du code non fiable peut consommer CPU, mémoire ou stockage navigateur. N’ouvrez que des projets dont vous pouvez raisonnablement faire confiance au contenu.
+- La preview locale utilise une iframe d’origine loopback différente, sans Node ni accès au preload.
+- Le serveur écoute uniquement `127.0.0.1`, contrôle `Host`, méthode, MIME, chemins réels, fichiers cachés et liens symboliques.
+- Les sorties compilées sont montées depuis une base canonique sans exposer les dossiers serveur voisins.
+- La CSP de preview limite scripts, connexions, formulaires, workers et frames à l’origine locale, avec la seule exception Google Fonts HTTPS.
+- Caméra, micro, géolocalisation, notifications et autres permissions Chromium sont refusés.
+- Les nouvelles fenêtres internes sont ramenées dans la preview ; les destinations externes sont bloquées.
+- Le stockage de l’origine est effacé lors de la fermeture du serveur.
 
-La politique réseau réduit fortement l’exfiltration, sans remplacer l’analyse de code ou une machine isolée pour du contenu suspect. Google Fonts reste une exception explicitement documentée dans [PRIVACY.md](PRIVACY.md).
+Le JavaScript du projet s’exécute pour préserver les interactions. La CSP de compatibilité autorise certains scripts inline et évaluations dans cette origine confinée. Responsiver n’est pas une machine virtuelle : n’ouvrez pas un projet malveillant en supposant qu’il est inoffensif.
 
-La CSP de compatibilité des projets autorise les scripts inline et certaines évaluations à l’intérieur de l’origine de preview. Cette liberté est nécessaire pour rendre des sites existants, mais reste confinée par l’iframe cross-origin, le sandbox Chromium et le blocage réseau. N’ouvrez pas un projet malveillant en supposant que Responsiver est une machine virtuelle.
+## URL publique et localhost
 
-## Distribution non signée
+- Une URL distante est rendue dans un `WebContentsView` sandboxé, sans Node, preload ou API fichier.
+- Chaque session utilise une partition Chromium aléatoire non persistante.
+- Permissions, téléchargements et popups sont refusés.
+- Le mode public exige HTTPS ; toutes les adresses DNS doivent être publiques.
+- Le mode localhost accepte uniquement la boucle locale, jamais le LAN.
+- Redirections et sous-ressources sont revalidées afin de réduire SSRF et DNS rebinding.
+- La navigation principale reste dans le périmètre d’hôtes approuvé.
+- Le stockage est effacé et le debugger détaché à la fermeture.
 
-Les paquets de développement et GitHub sont non signés par défaut. Vérifiez leur hash et leur provenance avant exécution. La signature et la notarisation nécessitent des certificats distincts et devront être activées explicitement avant une diffusion à grande échelle.
+Le site distant exécute son JavaScript dans Chromium et peut consommer CPU, mémoire ou réseau autorisé. Le sandbox réduit son accès au système, sans garantir qu’un site hostile est sans danger.
+
+## Audit visuel
+
+- Le script de collecte limite nœuds, constats, textes, sélecteurs, styles et durée d’exécution.
+- Le résultat JavaScript est considéré comme non fiable et assaini dans le processus principal.
+- Route, URL et viewport du résultat sont remplacés par le contexte déjà approuvé.
+- Les captures sont bornées en dimensions et en taille.
+- Un sélecteur utilisé pour cibler un constat est limité puis évalué dans la page sans exposition d’IPC.
+
+## Espace code et écritures
+
+- Seuls les chemins relatifs à une racine locale autorisée sont acceptés.
+- Les fichiers cachés, dépendances, vendors, builds, binaires, liens symboliques, secrets, clés, certificats, bases et dumps sont exclus.
+- Les fichiers et budgets mémoire sont plafonnés ; seuls les textes UTF-8 sont éditables.
+- Chaque overlay possède une version et des hashes source/courant.
+- La preview lit des copies mémoire et ne vaut jamais confirmation d’écriture.
+- **Appliquer au fichier** vérifie que la source n’a pas changé, écrit un fichier temporaire dans le même dossier puis effectue un renommage atomique.
+
+Une application explicite peut introduire une régression ou une vulnérabilité. Relisez le diff et utilisez Git ou une sauvegarde ; la protection technique empêche les écritures implicites et conflits connus, pas les mauvaises décisions humaines.
+
+## Assistant IA local
+
+- Seules les adresses HTTP `127.0.0.1`, `localhost` et `::1` sont acceptées ; `localhost` est normalisé vers `127.0.0.1`.
+- Identifiants, paramètres, fragments et redirections sont refusés.
+- Prompts, contextes, captures et réponses sont plafonnés.
+- Les fichiers sensibles sont exclus et les chemins de sortie sont revalidés.
+- Le modèle ne dispose d’aucun terminal, shell, outil système ou accès direct au disque.
+- La consigne système traite le contenu de la page et du projet comme non fiable.
+- Une proposition IA rejoint uniquement l’overlay jusqu’à une application explicite.
+- Aucun fallback cloud n’existe.
+
+Un autre processus local peut tenter d’occuper le port configuré ou un modèle peut produire du code dangereux. Vérifiez l’identité du moteur, protégez votre session utilisateur et considérez chaque sortie comme non fiable. Responsiver ne peut pas garantir la sécurité, la licence ou la politique de logs d’un moteur ou modèle tiers.
+
+## Compagnon Chrome
+
+- L’extension demande uniquement `activeTab` et `nativeMessaging`, sans `<all_urls>`, cookies, historique ou injection de script.
+- Le host limite l’appelant à l’identifiant présent dans `allowed_origins`.
+- Le protocole Native Messaging utilise un framing borné à 64 Kio et un schéma fermé.
+- Seules les URL HTTP(S) sans identifiants intégrés sont admises.
+- La file est privée sur POSIX, bornée à 128 demandes et ses noms ne contiennent pas l’URL.
+- Electron réclame atomiquement les fichiers, refuse symlinks, tailles ou schémas inconnus et supprime les demandes expirées.
+- Le host ne lance aucun shell et ne place jamais l’URL dans `argv`.
+
+Le host ne démarre pas l’application. L’installation manuelle et la dépendance actuelle à Node sur macOS/Linux sont des limites de distribution, détaillées dans [docs/compagnon-chrome.md](docs/compagnon-chrome.md). Aucun host Windows autonome n’est livré à ce stade.
+
+## Historique, staging et exports
+
+- L’historique contient uniquement chemins et compteurs dans un JSON privé, borné, validé et atomique.
+- Un projet `blocked` ou `needs-build` ne peut créer proposition ou staging.
+- Les staging re-hachent les sources et refusent les changements concurrents.
+- Les exports contrôlent traversées, liens symboliques et destinations internes au projet.
+- Les dossiers d’export sont réservés atomiquement avec des permissions privées sur POSIX.
+- Les rapports omettent chemins absolus et origines temporaires.
+
+## Packaging et chaîne de livraison
+
+- `LICENSE`, `NOTICE`, `THIRD_PARTY_NOTICES.md` et les ressources du compagnon sont vérifiés après packaging.
+- Les releases incluent un SBOM SPDX et `SHA256SUMS` couvrant les paquets.
+- La publication refuse une version de tag différente de `package.json`.
+- Le paquet macOS retire les descriptions de permissions inutilisées ; ATS refuse les chargements arbitraires tout en autorisant localhost.
+
+Les paquets restent non signés. Vérifiez provenance et hashes. Une diffusion grand public nécessite signature, notarisation et un Native Messaging Host autonome par plateforme.
 
 ## Signaler une vulnérabilité
 
-Ne publiez pas une vulnérabilité exploitable dans une issue publique. Ouvrez plutôt une discussion privée avec le mainteneur du dépôt et fournissez : version concernée, reproduction minimale, impact estimé et correctif éventuel.
-
-Une version de correction et une note de sécurité seront publiées dès que possible.
+Ne publiez pas une vulnérabilité exploitable dans une issue publique. Contactez le mainteneur par un canal privé avec version, reproduction minimale, impact et correctif éventuel.

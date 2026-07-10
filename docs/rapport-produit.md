@@ -1,108 +1,141 @@
-# Rapport produit — Responsiver 0.5
+# Rapport produit — Responsiver 0.6
 
 ## Résultat
 
-Responsiver est un atelier desktop local utilisable sur des projets statiques ou déjà compilés. La version 0.5 fiabilise l’entrée dans le laboratoire : préparation complète dès l’import, artefact compilé monté automatiquement, projet incomplet bloqué avec diagnostic, smoke-test du rendu réel et historique local sans cache de code. Les propositions, validations et exports de la version précédente restent séparés et non destructifs.
+Responsiver 0.6 élargit le laboratoire local à trois usages cohérents : travailler sur un projet local, auditer une URL publique en lecture seule et inspecter un localhost éventuellement lié à ses sources.
 
-La direction UI s’appuie sur les principes observés dans [Agency Agents](https://github.com/msitarzewski/agency-agents) et son application compagnon — espace de travail opérationnel, hiérarchie nette, panneau maître/détail et traçabilité — sans copier leur code, leurs assets ou leur identité. Le résultat adopte sa propre grammaire : rail graphite, papier minéral, accent vermillon, densité d’outil professionnel, contrôles compacts et absence de gradients ou de cartes SaaS décoratives.
+La version ajoute un rendu distant Chromium réellement navigable, un audit visuel sur cinq largeurs, un espace Monaco avec overlays et application explicite, un assistant facultatif connecté uniquement à Ollama ou llama.cpp en local, ainsi qu’un compagnon Chrome minimal. Les workflows déterministes de proposition, thème, avant/après, staging et export restent disponibles pour les projets locaux.
+
+La direction UI conserve sa propre grammaire — rail graphite, papier minéral, accent vermillon, densité d’outil professionnel et panneaux maître/détail — en s’inspirant des principes opérationnels observés dans [Agency Agents](https://github.com/msitarzewski/agency-agents), sans reprendre son code, ses assets ou son identité.
 
 ## Traçabilité des demandes
 
-| Demande | Livraison | Preuve ou critère de validation |
-|---|---|---|
-| Déposer un fichier ou dossier | Sélecteurs séparés, chemin local et glisser-déposer | API preload typée + parcours Electron |
-| Analyser dès l’import | Pipeline en six étapes avant redirection, overlay différé si l’attente devient visible | Progression IPC + E2E Electron |
-| Éviter toute preview blanche silencieuse | Readiness statique puis smoke-test runtime à 600/1 800 ms | Fixture incomplète et bundle en erreur |
-| Réutiliser les anciens projets | Chemins locaux persistés, disponibilité vérifiée et réanalyse complète | Store atomique + parcours Electron |
-| Prévisualiser une sortie compilée existante | Détection et mount canonique, y compris imbriqué, de `dist`, `build`, `out`, `.output/public` | Tests moteur et serveur |
-| Voir le vrai site | Serveur loopback interactif, scripts et assets locaux | Démo et Portfolio V.0.4 servis |
-| Naviguer dans toutes les pages et démos | Routes détectées, liens, ancres, historique, popups internes | Navigation `index ↔ journal` et routes Portfolio |
-| Smartphone, tablette, ordinateur | Familles séparées, modèles connus, dimensions libres, rotation | UI + test E2E |
-| Redimensionner comme une fenêtre | Poignées sur les bords et angles, synchronisées avec les dimensions personnalisées | Dimensions modifiées par geste puis relues dans les champs |
-| Voir le site en grand | Scène de preview en plein écran, fermeture explicite et touche Échap | Entrée/sortie plein écran en E2E |
-| Comparer plusieurs tailles | Trois aperçus simultanés | Test E2E, trois iframes |
-| Éviter la pollution des démos | Analyse CSS par route et filtre « Page active / Toutes les pages » | Portfolio : entrée racine prioritaire |
-| Détecter les défauts responsive | Règles HTML/CSS + mesure runtime des débordements | Tests moteur et serveur |
-| Corriger sans IA | Transformations PostCSS et overrides CSS déterministes | Patch comparé aux overlays |
-| Ouvrir un constat dans son contexte | Activation de sa route, recherche de son sélecteur, centrage et repère visuel | Messages bridge + vérification dans les deux previews |
-| Voir l’avant/après avant de décider | Origines Source et Proposition distinctes, synchronisées par route et taille | Comparaison contextualisée en E2E |
-| Accepter ou refuser chaque correctif | Consultation sans effet, puis actions explicites « Valider » et « Écarter » | Sélection retenue vérifiée avant staging |
-| Séparer proposition et export | Proposition éphémère non exportable ; staging reconstruit avec les seules décisions validées | E2E proposition → validation → staging |
-| Copier ou télécharger le code changé | Presse-papiers, `.patch`, fichiers modifiés, copie complète | IPC et sécurités d’export |
-| Ne pas masquer la nature d’un artefact | Avertissement au laboratoire, en révision et à l’export ; patch à reporter dans les sources | Présence conditionnelle sur `previewBasePath` |
-| Demander un ajustement par chat | Grammaire locale couleur/espacement/rayon/texte/navigation | E2E conversation sans IA |
-| Prévisualiser un thème clair ou sombre | Le choix affiche une proposition si la variante manque, ou active la variante native si elle existe | Attribut, palette et origine contrôlés dans la preview |
-| Valider le thème séparément | Aperçu non validé, validation ou rejet explicite, puis inclusion conditionnelle au staging | État candidat/validé vérifié en E2E |
-| Générer un thème complémentaire | Génération sémantique claire pour un site sombre, sombre pour un site clair | Démo sombre → variante claire |
-| Ne pas proposer un doublon | Détection `dark/light/dual` statique et runtime | Test dédié thème existant |
-| Démo fonctionnelle | Atelier Nord multi-page, filtres et panier | Même runner, E2E packagé |
-| UI/UX premium et lisible | Workbench à quatre destinations, inspecteur maître/détail, modes Appareils et Avant/Après séparés | QA à 1024/1280 et Electron Retina |
-| Fonctionnement local et open source | Aucune API produit, télémétrie ou IA ; licences documentées | Audit npm et notices |
-| Distribution GitHub | Paquets macOS/Windows/Linux, notices embarquées, SBOM et `SHA256SUMS` | Workflow bloquant sur formats, tag et empreintes |
-| Commits français | Historique découpé par capacité | Vérification Git finale |
+| Demande | Livraison 0.6 | Limite ou preuve |
+| --- | --- | --- |
+| Déposer un fichier ou dossier | Sélecteurs, chemin et glisser-déposer | Pipeline local testé |
+| Analyser dès l’import | Inventaire, routes, CSS, readiness et runner avant redirection | Progression IPC et tests moteur |
+| Éviter les previews blanches | Verdict `ready/degraded/blocked/needs-build` et smoke-test runtime | Fixtures incomplètes et bundle en erreur |
+| Retrouver les anciens projets | Historique de chemins, sans cache de code, avec réanalyse | Store privé et atomique |
+| Voir plusieurs appareils | Presets, dimensions libres, rotation, poignées et plein écran | Preview locale et distante |
+| Naviguer dans le site | Navigation multi-page locale ; arrière/avant/rechargement/adresse en URL | La route reste dans le périmètre autorisé |
+| Auditer une URL publique | Session `WebContentsView` HTTPS en lecture seule | DNS et redirections anti-SSRF |
+| Auditer un localhost | Boucle locale uniquement | Aucun accès LAN implicite |
+| Travailler sur Symfony/MySQL/Docker | Connexion au localhost déjà lancé | Responsiver ne démarre ni backend, DB, conteneur ou migration |
+| Associer le code au localhost | Dossier source facultatif, session `linked-localhost` | L’association est explicite |
+| Détecter des problèmes visuels | Balayage 360/390/768/1024/1440 avec mesures DOM | Route courante uniquement, pas de crawler |
+| Détecter les défauts objectifs | Overflow, clipping, texte, tactile, fixe, image, contraste, runtime | Ce n’est pas une note esthétique universelle |
+| Ouvrir un constat dans son contexte | Route, sélecteur, scroll et contour temporaire | Fallback route si le sélecteur n’existe plus |
+| Voir l’avant/après | Source et Proposition séparées | Projets locaux déterministes |
+| Accepter ou refuser chaque correctif | Consultation sans effet puis décision explicite | Staging reconstruit uniquement avec les choix retenus |
+| Prévisualiser clair/sombre | Activation native ou proposition complémentaire | Validation du thème séparée |
+| Modifier le code soi-même | Monaco, explorateur, overlay, diff, écarter/appliquer | Écriture seulement via **Appliquer au fichier** |
+| Voir immédiatement le résultat | Runner workspace local ; injection CSS sur localhost lié | HTML/JS distant dépendent du rechargement du serveur de dev |
+| Protéger les sources | Secrets, binaires, builds, dépendances et symlinks exclus | Hash, version et renommage atomique |
+| Ajouter une IA sans cloud | Connecteurs loopback Ollama et llama.cpp | Moteur et modèle non embarqués |
+| Donner du contexte à l’IA | Constats, route, viewport, capture et fichiers bornés | Aucun terminal ni accès disque direct |
+| Valider une proposition IA | Chargement dans l’overlay Monaco, puis diff | Sortie modèle considérée non fiable |
+| Ouvrir depuis Chrome | Manifest V3 `activeTab` + `nativeMessaging` | Installation manuelle, app non lancée automatiquement |
+| Minimiser les données Chrome | URL/titre/viewport/DPR après clic | Aucun DOM, cookie, historique ou `<all_urls>` |
+| Fonctionnement local-first | Pas de compte, télémétrie, API cloud ou fallback distant | Une URL auditée contacte nécessairement son site |
+| Distribution GitHub | Paquets, notices, SBOM, hashes et ressources du compagnon | Paquets et compagnon encore non signés / partiellement manuels |
 
 ## Choix techniques
 
-- **Electron** : distribution desktop multi-plateforme, dialogues et isolation de contexte.
-- **React + TypeScript** : interface structurée et contrats partagés renderer/main.
-- **PostCSS** : lecture et modification ciblée des déclarations CSS sans génération probabiliste.
-- **Serveur HTTP Node local** : comportement navigateur réaliste, navigation et assets relatifs.
-- **Store JSON main-process** : historique MRU minimal, privé, atomique et indépendant du renderer.
-- **Overlays en mémoire** : une couche de proposition remplaçable pour décider, puis une couche de staging reconstruite pour exporter.
-- **Playwright** : validation du parcours Electron réel et du paquet construit.
-- **electron-builder** : DMG/ZIP, NSIS/ZIP, AppImage/DEB et automatisation GitHub.
+- **Electron** : desktop multi-plateforme, `WebContentsView`, sandbox et dialogues natifs.
+- **React + TypeScript** : interface et contrats partagés renderer/preload/main.
+- **PostCSS** : analyse et transformations CSS déterministes.
+- **Serveurs Node loopback** : previews locale, proposition, staging et workspace.
+- **Chrome DevTools Protocol** : métriques d’appareil et collecte visuelle dans la session distante.
+- **Monaco Editor** : édition locale des sources texte.
+- **Overlays en mémoire** : prévisualisation avant décision ou écriture.
+- **Ollama / llama.cpp** : moteurs facultatifs externes, joints uniquement sur loopback.
+- **Native Messaging** : compagnon Chrome sans permission globale sur les sites.
+- **Playwright** : validation Electron et navigateur.
+- **electron-builder** : paquets desktop et ressources compagnon.
 
-Les réglages de la fenêtre suivent les recommandations de sécurité d’[Electron](https://www.electronjs.org/docs/latest/tutorial/security) : isolation de contexte, sandbox, CSP, restrictions de navigation et validation IPC.
+## Deux cycles de modification
 
-## Cycle de décision
+### Correctifs déterministes
 
-Le laboratoire conserve trois références distinctes :
+```text
+Source → Proposition éphémère → Accepter/Écarter → Staging → Export
+```
 
-- **Source** : rendu original en lecture seule, jamais transformé sur disque.
-- **Proposition** : rendu temporaire du constat ou du thème en cours d’examen. Ouvrir, redimensionner ou afficher ce rendu en plein écran ne l’accepte pas.
-- **Staging** : rendu cumulatif des seuls constats acceptés, du thème validé et des instructions locales retenues ; il sert à la révision finale et aux exports.
+La source reste intacte. Les fichiers sont re-hachés avant l’export et une modification concurrente invalide le staging.
 
-Un clic sur un constat active son chemin de page et transmet son sélecteur aux deux previews Avant / Après. Le bridge centre et signale la cible lorsqu’elle existe. Cette contextualisation permet de décider au niveau de l’élément concerné sans mélanger la comparaison d’un correctif avec le mode de comparaison des familles d’appareils.
+### Éditeur et assistant
 
-Le thème suit le même contrat lorsqu’une variante doit être créée : cliquer sur **Clair** ou **Sombre** affiche immédiatement la proposition, mais un bouton distinct est nécessaire pour la valider. Une variante déjà présente est simplement activée dans la source pour inspection et n’ajoute aucun faux correctif. Un rejet n’affecte ni la source ni les décisions déjà retenues. À chaque étape, les données restent dans la session locale et une nouvelle proposition remplace la précédente.
+```text
+Source → Overlay Monaco → Preview + Diff → Appliquer au fichier
+```
+
+La frappe et les propositions IA restent en mémoire. Le clic **Appliquer au fichier** autorise une écriture atomique dans la source. Si son hash ou sa version a changé, Responsiver refuse l’opération.
+
+Cette distinction est volontaire : le staging sert à préparer une livraison non destructive ; Monaco sert à modifier réellement un fichier après confirmation.
+
+## Analyse visuelle
+
+Le moteur distant exécute les mêmes mesures sur cinq viewports et conserve des preuves structurées : sélecteur, rectangle, style, valeur observée, seuil attendu et confiance. Les résultats de la page sont assainis dans le processus principal avant de devenir des constats.
+
+Cette méthode détecte des incohérences mesurables, mais pas toutes les fautes de direction artistique. Sans maquette ou baseline approuvée, Responsiver ne peut pas savoir si une composition volontaire est « belle ». L’assistant local peut commenter une capture avec un modèle multimodal compatible, mais son avis reste probabiliste et non bloquant.
+
+## IA locale et confidentialité
+
+Le mode IA n’est ni une connexion ChatGPT, Claude ou Gemini, ni une API cloud. L’utilisateur fournit un moteur Ollama ou llama.cpp déjà actif sur sa machine et choisit un modèle installé.
+
+Responsiver refuse toute adresse non loopback, toute redirection et tout identifiant dans l’endpoint. Il n’installe et ne télécharge aucun modèle. Le contexte transmis au processus local est sélectionné et borné ; les secrets et fichiers de données sont exclus de l’espace code.
+
+Le modèle ne dispose d’aucun outil système. Ses propositions sont filtrées puis placées dans un overlay, jamais écrites directement. Cette architecture limite les conséquences d’une hallucination ou d’une prompt injection, mais ne remplace pas une revue du diff.
+
+Un service présent sur loopback reste un logiciel distinct : l’utilisateur doit s’assurer qu’il s’agit bien de son moteur, contrôler ses journaux et vérifier la licence du modèle.
+
+## Compagnon Chrome
+
+Le compagnon est implémenté et empaqueté comme ressource, mais son installation reste destinée au développement et aux utilisateurs techniques :
+
+- chargement manuel depuis `chrome://extensions` ;
+- manifeste Native Messaging associé à l’identifiant exact ;
+- host Node disponible sur macOS/Linux ;
+- aucun host Windows autonome à ce stade ;
+- aucun lancement automatique de Responsiver ;
+- demandes supprimées si elles ont plus de dix minutes.
+
+Ces limites sont détaillées dans [compagnon-chrome.md](compagnon-chrome.md). Le projet n’inclut plus de chantier Safari.
 
 ## Confidentialité, licences et coût
 
-Le runtime ne nécessite aucun abonnement, serveur ou clé API. Google Fonts reste la seule exception réseau autorisée pour conserver le rendu d’un projet qui la référence déjà. Les workflows GitHub et le téléchargement npm interviennent uniquement pendant le développement et la construction.
+Responsiver ne nécessite aucun serveur ou abonnement. Une installation Ollama/llama.cpp et le téléchargement volontaire d’un modèle peuvent toutefois consommer stockage, mémoire et réseau en dehors de Responsiver.
 
-L’historique contient seulement les chemins canoniques et des métadonnées sommaires. Les sources, previews et correctifs ne sont pas dupliqués ; rouvrir signifie toujours valider le chemin, réanalyser et recréer le runner.
+Les projets locaux, overlays et conversations restent dans la session. Une URL publique produit une connexion normale au site ; Google Fonts reste l’exception réseau du runner local lorsqu’un projet la référence déjà.
 
-Les licences MIT/Apache-2.0 imposent de conserver leurs avis ; elles ne demandent pas de paiement. GitHub et Google Fonts ont également leurs propres conditions. Le projet est donc sans coût logiciel obligatoire, mais pas « sans aucune obligation juridique ». Les fichiers `LICENSE`, `NOTICE` et `THIRD_PARTY_NOTICES.md` organisent ces obligations.
+Les composants distribués sont couverts par les avis du dépôt. Ollama, llama.cpp et surtout les modèles choisis par l’utilisateur possèdent leurs propres licences. « Modèle local » ne signifie pas automatiquement « redistribuable ».
 
-Les binaires sont non signés par défaut. C’est compatible avec une distribution gratuite depuis GitHub, mais les systèmes d’exploitation peuvent avertir l’utilisateur. Supprimer ces avertissements demanderait des certificats et, selon la plateforme, un programme développeur payant.
+Les paquets restent non signés. Une diffusion sans avertissements système et une publication Chrome Web Store nécessiteront signature, comptes développeur et conformité aux politiques concernées.
 
 ## Limites assumées
 
-- Le runner cible les sites statiques ou les sorties déjà compilées ; il n’exécute pas de build arbitraire, de backend ou de SSR.
-- Un projet sans contenu exploitable ne peut pas être « rendu compatible » automatiquement : Responsiver expose précisément les fichiers incomplets au lieu d’inventer l’interface.
-- Les heuristiques CSS proposent des corrections à relire, pas une preuve universelle de défaut.
-- Un constat sans sélecteur exploitable ouvre sa route mais ne peut pas garantir un centrage au niveau d’un élément précis.
-- Le rendu correspond à Chromium/Electron ; un futur élargissement pourra automatiser Firefox et WebKit.
-- Les dépendances distantes hors Google Fonts sont bloquées et doivent être intégrées localement après vérification de licence.
-- La signature/notarisation des paquets reste volontairement hors scope tant qu’elle n’est pas décidée et financée.
+- L’audit public exige HTTPS ; le mode localhost reste limité à la boucle locale.
+- L’audit distant couvre la route active et cinq largeurs, pas tout le site ni tous les breakpoints possibles.
+- Le rendu est Chromium/Electron ; Firefox et WebKit ne sont pas automatisés.
+- Une URL publique ne donne pas accès aux sources auteur et ne peut pas être corrigée sur le serveur.
+- Un localhost lié permet l’édition locale ; seule la CSS est injectée directement dans la session distante.
+- Le moteur visuel applique des règles objectives mais ne remplace pas une revue UI/UX humaine.
+- L’assistant dépend d’un moteur et d’un modèle locaux installés séparément ; aucun modèle n’est embarqué.
+- Une sortie IA peut être incorrecte, vulnérable ou trop large malgré les filtres.
+- Responsiver ne lance aucun build, backend, base, Docker Compose ou migration.
+- Le compagnon Chrome ne s’installe ni ne démarre l’app automatiquement ; Windows attend encore son host natif.
+- La signature et la notarisation restent hors du paquet actuel.
 
-## Validation réalisée pour la livraison 0.5
+## Validation réalisée pour la livraison 0.6
 
-Le dépôt contient 35 tests unitaires et d’intégration. Sur le diff consolidé, les contrôles reproductibles dans l’environnement local restreint ont donné :
+Contrôles reproductibles exécutés sur l’état consolidé :
 
-- `npm run typecheck` et `npm run build` : réussis ;
-- analyseur : 18/18, historique : 6/6, sécurité d’export : 4/4 ;
-- syntaxe du bridge injecté, du scénario Electron et du workflow YAML : validée ;
-- génération locale du SBOM : SPDX 2.3, inventaire non vide ;
-- dernier parcours `npm run test:e2e` complet : réussi après la consolidation renderer (runtime, thème par route, SPA, clavier, plein écran, staging et historique) ;
-- les six tests HTTP restants, le nouvel E2E complet et `package:dir` doivent être rejoués par la CI dans un environnement autorisant l’écoute `127.0.0.1` et les téléchargements Electron ; le sandbox local final a refusé ces deux capacités.
+- `npm run typecheck` : réussi ;
+- `npm test` : 52 tests applicatifs réussis ;
+- `npm run test:native-host` : 14 tests du protocole Chrome réussis ;
+- `npm run build` : réussi ;
+- `npm run package:dir` : paquet macOS arm64 construit ;
+- ressources `companion/chrome` et `companion/native-host` présentes dans l’application ;
+- bit exécutable du host macOS conservé.
 
-Les scénarios fonctionnels déjà exercés couvrent :
-
-- démo : navigation, constat → route et sélecteur → Avant / Après → rejet ou validation → staging ;
-- thème : clic Clair → proposition immédiate → validation explicite → staging conditionnel ;
-- preview : dimensions prédéfinies → redimensionnement manuel → plein écran avec focus dans l’iframe → retour par Échap ;
-- import : squelette HTML incomplet → quatre diagnostics manuels → aucun runner blanc ; bundle JS en erreur → détection runtime ;
-- historique : anciens projets relus depuis leur chemin puis retrait sans suppression des sources ;
-- Portfolio V.0.4 : `/index.html` sélectionné, 3 routes navigables, thème sombre détecté, variante claire prévisualisée sans validation implicite, ressource Font Awesome distante signalée et démos séparées.
-- Site Jessica réel : `index.html` incomplet, CSS vide et médias orphelins correctement classés `blocked` ; aucune correction responsive fictive n’est générée.
+Les tests couvrent notamment analyseur, readiness, historique, URL/SSRF, audit distant, workspace, assistant local, file Chrome, serveur de preview, staging et exports. Le parcours E2E Electron complet de la v0.6 doit encore être rejoué sur chaque plateforme avant une release publique ; la construction locale ne remplace pas cette matrice.
