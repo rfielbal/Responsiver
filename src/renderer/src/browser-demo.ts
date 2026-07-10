@@ -10,8 +10,10 @@ export const browserDemoProject: ProjectSnapshot = {
   previewHtml,
   previewOrigin: null,
   entryPath: '/index.html',
-  routes: [{ path: '/index.html', label: 'index.html' }],
-  theme: { detected: 'light', hasDark: false, hasLight: true },
+  routes: [{ path: '/index.html', label: 'index.html', title: 'Atelier Atlas', theme: 'light' }],
+  theme: { detected: 'light', hasDark: false, hasLight: true, evidence: ['Fond clair détecté dans la démo navigateur.'], variables: [] },
+  capabilities: { interactive: false, staging: false, framework: null, packageManager: null, buildRequired: false },
+  analysis: { truncated: false, scannedFiles: 1, scannedStyles: 1 },
   issues: [
     {
       id: 'demo-navigation',
@@ -20,6 +22,7 @@ export const browserDemoProject: ProjectSnapshot = {
       severity: 'attention',
       coverage: 'heuristique',
       viewport: '390 × 844',
+      routePath: '/index.html',
       source: { file: 'index.html', line: 1 },
       rule: 'css.nowrap',
       proposal: 'Conserver l’effacement mobile ou autoriser le retour à la ligne selon le contenu réel.'
@@ -31,6 +34,7 @@ export const browserDemoProject: ProjectSnapshot = {
       severity: 'information',
       coverage: 'manuel',
       viewport: 'Clair / sombre',
+      routePath: '/index.html',
       source: { file: 'styles/tokens.css', line: 1 },
       rule: 'theme.color-scheme',
       proposal: 'Créer une couche de variables CSS pour le mode sombre.'

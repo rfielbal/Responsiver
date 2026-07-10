@@ -7,9 +7,17 @@ import './styles.css'
 if (!window.responsiver) {
   window.responsiver = {
     chooseProject: async () => null,
+    chooseProjectFile: async () => null,
     openProjectPath: async () => { throw new Error('L’ouverture par chemin est disponible uniquement dans Electron.') },
     openDemoProject: async () => browserDemoProject,
-    exportReport: async () => 'Rapport de démonstration disponible uniquement dans Electron.'
+    buildStaging: async () => { throw new Error('Le staging est disponible uniquement dans Electron.') },
+    clearStaging: async () => undefined,
+    exportPatch: async () => null,
+    exportChangedFiles: async () => null,
+    exportProjectCopy: async () => null,
+    exportReport: async () => 'Rapport de démonstration disponible uniquement dans Electron.',
+    copyText: async (text) => navigator.clipboard.writeText(text),
+    getPathForFile: () => ''
   }
 }
 
