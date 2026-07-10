@@ -32,7 +32,13 @@ test('le runner sert uniquement localhost, injecte le bridge et gère les média
 
   const page = await fetch(`${server.origin}/index.html`)
   assert.equal(page.status, 200)
-  assert.match(await page.text(), /data-responsiver-bridge/)
+  const pageBody = await page.text()
+  assert.match(pageBody, /data-responsiver-bridge/)
+  assert.match(pageBody, /focus-selector/)
+  assert.match(pageBody, /set-theme-preview/)
+  const bridgeSource = pageBody.match(/<script data-responsiver-bridge>([\s\S]*?)<\/script>/)?.[1]
+  assert.ok(bridgeSource)
+  assert.doesNotThrow(() => new Function(bridgeSource))
   assert.match(page.headers.get('content-security-policy') ?? '', /connect-src 'self'/)
   assert.equal(page.headers.get('cache-control'), 'no-store')
 
@@ -63,4 +69,21 @@ test('un serveur staged privilégie ses fichiers virtuels', async (context) => {
 
   assert.match(await (await fetch(`${server.origin}/`)).text(), /Staging/)
   assert.match(await (await fetch(`${server.origin}/.responsiver/responsiver.generated.css`)).text(), /green/)
+})
+
+test('une proposition possède son origine et ses overlays éphémères', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'responsiver-proposal-'))
+  await writeFile(join(root, 'index.html'), '<!doctype html><html><body><nav>Source</nav></body></html>')
+  const overrides = new Map<string, Buffer>([
+    ['index.html', Buffer.from('<!doctype html><html><body><nav>Proposition</nav></body></html>')]
+  ])
+  const server = await startProjectServer(root, { mode: 'proposal', overrides })
+  context.after(async () => {
+    await server.close()
+    await rm(root, { recursive: true, force: true })
+  })
+
+  const response = await fetch(`${server.origin}/`)
+  assert.equal(response.headers.get('x-responsiver-mode'), 'proposal')
+  assert.match(await response.text(), /Proposition/)
 })

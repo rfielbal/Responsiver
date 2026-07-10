@@ -43,11 +43,20 @@ try {
 
   await page.getByRole('tab', { name: 'Thème' }).click()
   await page.getByText('Thème sombre détecté').waitFor()
-  assert.equal(await page.getByRole('radio', { name: /Clair/ }).isChecked(), true)
+  const lightTheme = page.getByRole('radio', { name: /Clair/ })
+  assert.equal(await lightTheme.isChecked(), false)
+  await lightTheme.check()
+  await page.locator('.proposal-decision').filter({ hasText: 'Variante claire' }).waitFor({ state: 'visible' })
+  assert.match(await page.locator('.proposal-decision').textContent(), /Aperçu non validé/)
+  await page.frameLocator('.stage-canvas iframe').first().locator('html[data-responsiver-generated-theme="light"]').waitFor({ state: 'attached' })
 
   await page.getByRole('tab', { name: /Constats/ }).click()
   const externalNotice = page.locator('.issue-item').filter({ hasText: 'Ressource externe indisponible' })
-  if (await externalNotice.count()) await externalNotice.first().click()
+  if (await externalNotice.count()) {
+    await externalNotice.first().click()
+    await projectFrame.locator('body').waitFor({ state: 'attached' })
+    if (await preloader.count()) await preloader.waitFor({ state: 'hidden' })
+  }
 
   const output = join(root, 'output', 'playwright')
   await mkdir(output, { recursive: true })
