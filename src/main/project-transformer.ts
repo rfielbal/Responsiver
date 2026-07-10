@@ -202,7 +202,7 @@ function findInstructionColor(instruction: string): string | null {
 export function interpretLocalInstruction(instruction: string): InstructionInterpretation {
   const normalized = normalizeInstruction(instruction)
   const requestedBreakpoint = Number(normalized.match(/(\d{3,4})\s*px/)?.[1] ?? 768)
-  const responsiveBreakpoint = Math.min(1_100, Math.max(320, Number.isFinite(requestedBreakpoint) ? requestedBreakpoint : 768))
+  const responsiveBreakpoint = Math.min(2_560, Math.max(320, Number.isFinite(requestedBreakpoint) ? requestedBreakpoint : 768))
   const requestedSelector = instruction.match(/\bcible\s+((?:[a-z][\w-]*)?(?:[.#][\w-]+){1,4}|[a-z][\w-]*)/i)?.[1] ?? null
   const requestedTheme = extractRequestedTheme(instruction)
   if (requestedTheme) {
@@ -291,17 +291,20 @@ export function interpretLocalInstruction(instruction: string): InstructionInter
   }
 
   if (/(?:navigation|menu|liens?).*(?:rangee|defil|scroll)|(?:rangee|defil|scroll).*(?:navigation|menu)/.test(normalized)) {
+    const navigationRoots = requestedSelector
+      ? `${requestedSelector}, ${requestedSelector} > ul, ${requestedSelector} > ol`
+      : 'nav, nav > ul, nav > ol, [role="navigation"], [role="navigation"] > ul, [role="navigation"] > ol'
     const navigationContainers = requestedSelector
-      ? `${requestedSelector}, ${requestedSelector} ul, ${requestedSelector} ol`
-      : 'nav ul, nav ol, [class*="nav" i], [class*="menu" i]'
+      ? `${requestedSelector} > ul, ${requestedSelector} > ol, ${requestedSelector}:not(:has(> ul, > ol))`
+      : 'nav > ul, nav > ol, nav:not(:has(> ul, > ol)), [role="navigation"] > ul, [role="navigation"] > ol, [role="navigation"]:not(:has(> ul, > ol))'
     const navigationItems = requestedSelector
-      ? `${requestedSelector} a, ${requestedSelector} button`
-      : 'nav a, nav button, [class*="nav" i] a, [class*="menu" i] a'
+      ? `${requestedSelector} > a, ${requestedSelector} > button, ${requestedSelector} > ul > li > a, ${requestedSelector} > ul > li > button, ${requestedSelector} > ol > li > a, ${requestedSelector} > ol > li > button`
+      : 'nav > a, nav > button, nav > ul > li > a, nav > ul > li > button, nav > ol > li > a, nav > ol > li > button, [role="navigation"] > a, [role="navigation"] > button, [role="navigation"] > ul > li > a, [role="navigation"] > ul > li > button, [role="navigation"] > ol > li > a, [role="navigation"] > ol > li > button'
     return {
       instruction,
       recognized: true,
       title: 'Stabiliser la navigation mobile',
-      css: `@media (max-width: ${responsiveBreakpoint}px) {\n  :where(${navigationContainers}) {\n    min-inline-size: 0 !important;\n    max-inline-size: 100%;\n    flex-wrap: nowrap !important;\n    overflow-x: auto;\n    overscroll-behavior-inline: contain;\n    scrollbar-width: thin;\n  }\n\n  :where(${navigationItems}) {\n    flex: 0 0 auto;\n    min-block-size: 2.75rem;\n  }\n}`
+      css: `@media (max-width: ${responsiveBreakpoint}px) {\n  :where(${navigationRoots}) {\n    min-inline-size: 0 !important;\n    max-inline-size: 100%;\n  }\n\n  :where(${navigationContainers}) {\n    flex-wrap: nowrap !important;\n    overflow-x: auto;\n    overscroll-behavior-inline: contain;\n    scrollbar-width: thin;\n  }\n\n  :where(${navigationItems}) {\n    flex: 0 0 auto;\n    min-block-size: 2.75rem;\n  }\n}`
     }
   }
 

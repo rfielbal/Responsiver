@@ -25,7 +25,7 @@ Responsiver ne prétend pas retrouver le code auteur d’un site public à parti
 - Diagnostic explicite des projets incomplets, des builds absents et des rendus vides au lieu d’une preview blanche.
 - Historique local d’anciens projets fondé sur leurs chemins, sans copie du code et avec réanalyse à la réouverture.
 - Navigation multi-page, ancres, historique et interactions locales via un runner lié à `127.0.0.1`.
-- Audit runtime de la page active : overflow, clipping, texte tronqué, cibles tactiles, éléments fixes, images et contraste simple, avec plafonds et sélecteurs localisables.
+- Audit runtime de la page active sur quatre profils canoniques (smartphone, tablette portrait, tablette paysage et ordinateur) : overflow réel, clipping, texte tronqué, navigation déséquilibrée, collisions, densité, typographie disproportionnée, groupes tactiles ambigus, éléments fixes, images et contraste simple. Les carrousels, liens correctement espacés et répétitions multi-viewport sont filtrés ou regroupés.
 
 ### Appareils et validation
 
@@ -35,7 +35,7 @@ Responsiver ne prétend pas retrouver le code auteur d’un site public à parti
 - Comparaison de plusieurs appareils distincte de la comparaison Source / Proposition.
 - Ouverture d’un constat sur sa route et son sélecteur lorsque celui-ci est disponible.
 - Avant / Après contextualisé avant validation d’un correctif.
-- Thème clair ou sombre prévisualisé immédiatement ; une variante existante est activée sans générer de doublon, une variante absente reste à valider séparément.
+- Thème clair ou sombre prévisualisé immédiatement ; une variante existante est activée sans doublon. Une variante absente n’est générée que si les rôles fond/texte et leurs contrastes sont fiables ; images, filtres et accents de marque restent intacts, sinon le moteur refuse prudemment.
 
 ### URL publique et localhost
 
@@ -45,7 +45,8 @@ Responsiver ne prétend pas retrouver le code auteur d’un site public à parti
 - Émulation Chromium des dimensions, du DPR, du tactile et du mode mobile.
 - Audit automatique de cinq largeurs : 360, 390, 768, 1024 et 1440 CSS px.
 - Chaque nouvelle route réellement visitée est auditée après son chargement ; les constats restent cumulés route par route sans exploration autonome des liens.
-- Détection objective des débordements, contenus masqués, textes tronqués, petites cibles tactiles, éléments fixes obstructifs, images absentes ou déformées, contrastes faibles et erreurs JavaScript.
+- Détection objective des débordements, contenus masqués, textes tronqués, navigations illisibles ou mal réparties, chevauchements, densité incohérente, typographie disproportionnée, groupes tactiles ambigus, éléments fixes obstructifs, images absentes ou déformées, contrastes faibles et erreurs JavaScript.
+- Un même défaut DOM mesuré à plusieurs tailles est regroupé avec ses viewports et sa preuve la plus sévère ; les familles bruyantes sont plafonnées.
 - Clic sur un constat distant pour restaurer sa route exacte, son viewport et mettre en évidence l’élément s’il existe encore.
 - Limites de scan signalées dans l’interface, synthèse copiable et rapport JSON exportable avec solutions proposées.
 

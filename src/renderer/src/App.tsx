@@ -126,7 +126,13 @@ const devices: Device[] = [
   { id: 'desktop-wide', family: 'computer', name: 'Bureau large', width: 2560, height: 1440 }
 ]
 
-const compareDevices = [devices[1], devices[5], devices[7]]
+const compareDevices = [devices[1], devices[4], devices[7]]
+const auditDevices: Device[] = [
+  devices[1],
+  devices[4],
+  { id: 'tablet-landscape-audit', family: 'tablet', name: 'Tablette paysage', width: 1024, height: 768 },
+  devices[7]
+]
 
 const destinations: Array<{ id: Destination; label: string; icon: string }> = [
   { id: 'projects', label: 'Projets', icon: 'projects' },
@@ -163,7 +169,9 @@ function Icon({ name, size = 18 }: { name: string; size?: number }): ReactElemen
     back: <><path d="m15 18-6-6 6-6" /><path d="M9 12h11" /></>,
     forward: <><path d="m9 18 6-6-6-6" /><path d="M15 12H4" /></>,
     refresh: <><path d="M20 11a8 8 0 0 0-14.8-4L3 10" /><path d="M3 4v6h6" /><path d="M4 13a8 8 0 0 0 14.8 4L21 14" /><path d="M21 20v-6h-6" /></>,
-    rotate: <><path d="M17 3v4h-4M7 21v-4h4" /><path d="M20 11a8 8 0 0 0-13.6-5.7L3 7M4 13a8 8 0 0 0 13.6 5.7L21 17" /></>,
+    swap: <><path d="M4 8h14" /><path d="m15 5 3 3-3 3" /><path d="M20 16H6" /><path d="m9 13-3 3 3 3" /></>,
+    panelCollapse: <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16M16 9l-3 3 3 3" /></>,
+    panelExpand: <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16M13 9l3 3-3 3" /></>,
     close: <><path d="m6 6 12 12M18 6 6 18" /></>,
     check: <path d="m5 12 4 4L19 6" />,
     copy: <><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1" /></>,
@@ -219,6 +227,11 @@ const runtimeAuditRules = new Set<RuntimeAudit['findings'][number]['rule']>([
   'layout.viewport-overflow',
   'layout.clipped-content',
   'layout.truncated-text',
+  'layout.navigation-wrap',
+  'layout.element-overlap',
+  'layout.density-hierarchy',
+  'layout.useful-area-overflow',
+  'typography.disproportionate',
   'interaction.small-target',
   'layout.fixed-obstruction',
   'media.image-error',
@@ -228,6 +241,18 @@ const runtimeAuditRules = new Set<RuntimeAudit['findings'][number]['rule']>([
 
 function cleanRuntimeText(value: unknown, maximum: number): string {
   return typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, maximum) : ''
+}
+
+function actionError(error: unknown, fallback: string): string {
+  if (!(error instanceof Error)) return fallback
+  const detail = error.message
+    .replace(/^Error invoking remote method '[^']+': Error:\s*/i, '')
+    .replace(/^Error:\s*/i, '')
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 420)
+  return detail || fallback
 }
 
 function cleanRuntimeNumber(value: unknown, minimum: number, maximum: number, fallback = 0): number {
@@ -291,6 +316,12 @@ export function sanitizeRuntimeAudit(value: unknown, device: Device): RuntimeAud
 }
 
 function deviceForIssue(issue: ProjectIssue, current: Device): Pick<Device, 'family' | 'width' | 'height'> | null {
+  const measured = issue.evidence?.viewport
+  if (measured && Number.isFinite(measured.width) && Number.isFinite(measured.height)) {
+    const width = clampDimension(String(measured.width), 240, 2560, current.width)
+    const height = clampDimension(String(measured.height), 320, 2000, current.height)
+    return { family: width < 600 ? 'smartphone' : width < 1100 ? 'tablet' : 'computer', width, height }
+  }
   const exact = issue.viewport.match(/(\d{3,4})\s*[×x]\s*(\d{3,4})/i)
   if (exact) {
     const width = clampDimension(exact[1], 240, 2560, current.width)
@@ -306,6 +337,138 @@ function deviceForIssue(issue: ProjectIssue, current: Device): Pick<Device, 'fam
   }
   if (/tablette|tablet/i.test(issue.viewport)) return { family: 'tablet', width: 820, height: 1180 }
   return null
+}
+
+function deterministicInstructionForIssue(issue: ProjectIssue | null | undefined): string | null {
+  if (!issue?.evidence?.selector) return null
+  const rawSelector = issue.evidence.selector.trim()
+  const simpleSelector = /^(?:(?:[a-z][\w-]*)?(?:[.#][\w-]+){1,4}|[a-z][\w-]*)$/i
+  const directSelector = simpleSelector.test(rawSelector) ? rawSelector : null
+  const selectorTail = rawSelector.split(/\s*>\s*/).at(-1)?.trim() ?? ''
+  const selector = directSelector ?? (simpleSelector.test(selectorTail) && /[.#]/.test(selectorTail) ? selectorTail : null)
+  if (!selector) return null
+  const measuredWidth = issue.evidence.viewport.width
+  const breakpoint = measuredWidth > 768 ? Math.min(2_560, Math.round(measuredWidth)) : 768
+  if (issue.rule === 'layout.navigation-wrap') return `Cible ${selector}. Jusqu’à ${breakpoint} px, stabilise le menu dans une rangée défilante sans masquer ses liens.`
+  if (issue.rule === 'typography.disproportionate') return `Cible ${selector}. Jusqu’à ${breakpoint} px, borne la taille des grands titres disproportionnés.`
+  return null
+}
+
+const localIssueLimitPerRoute = 18
+const localIssueLimitTotal = 60
+
+function stableRuntimeId(value: string): string {
+  let hash = 2166136261
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0')
+}
+
+function auditFamily(width: number): string {
+  return width < 600 ? 'Smartphone' : width < 1_100 ? 'Tablette' : 'Ordinateur'
+}
+
+function issuePriority(issue: ProjectIssue): number {
+  const severity = issue.severity === 'bloquant' ? 300 : issue.severity === 'attention' ? 200 : 100
+  const ruleWeights: Record<string, number> = {
+    'layout.element-overlap': 72,
+    'layout.navigation-wrap': 70,
+    'layout.viewport-overflow': 66,
+    'typography.disproportionate': 62,
+    'layout.density-hierarchy': 58,
+    'layout.useful-area-overflow': 56,
+    'layout.truncated-text': 50,
+    'layout.clipped-content': 48,
+    'layout.fixed-obstruction': 46,
+    'media.image-error': 44,
+    'media.image-distortion': 36,
+    'accessibility.low-contrast': 30,
+    'interaction.small-target': 14
+  }
+  return severity + (ruleWeights[issue.rule] ?? 20) +
+    (issue.coverage === 'standard' ? 16 : issue.coverage === 'heuristique' ? 8 : 0) +
+    (issue.confidence === 'certain' ? 12 : issue.confidence === 'probable' ? 6 : 0) +
+    (issue.fix?.confidence === 'safe' ? 6 : 0)
+}
+
+function prioritizedIssues(issues: ProjectIssue[], limit: number): ProjectIssue[] {
+  const perRule = new Map<string, number>()
+  const caps: Record<string, number> = {
+    'layout.navigation-wrap': 2,
+    'layout.element-overlap': 3,
+    'interaction.small-target': 2,
+    'accessibility.low-contrast': 3,
+    'layout.viewport-overflow': 3
+  }
+  const selected: ProjectIssue[] = []
+  for (const issue of [...issues].sort((left, right) => issuePriority(right) - issuePriority(left))) {
+    const count = perRule.get(issue.rule) ?? 0
+    if (count >= (caps[issue.rule] ?? 4)) continue
+    selected.push(issue)
+    perRule.set(issue.rule, count + 1)
+    if (selected.length >= limit) break
+  }
+  return selected
+}
+
+export function consolidatedRuntimeIssues(audits: RuntimeAudit[]): ProjectIssue[] {
+  const navigationScopes = new Set(audits.flatMap((audit) => audit.findings
+    .filter((finding) => finding.rule === 'layout.navigation-wrap')
+    .map(() => `${audit.route}\u001f${audit.viewport.width}x${audit.viewport.height}`)))
+  const groups = new Map<string, Array<{ audit: RuntimeAudit; finding: RuntimeAudit['findings'][number] }>>()
+  for (const audit of audits) {
+    for (const finding of audit.findings) {
+      const scope = `${audit.route}\u001f${audit.viewport.width}x${audit.viewport.height}`
+      if (finding.rule === 'interaction.small-target' && navigationScopes.has(scope) && /(?:^|[\s>.#_-])(?:nav|menu|navbar|topbar|toolbar|header)(?:[\s>.#_:-]|$)/i.test(finding.selector)) continue
+      const key = `${finding.rule}\u001f${finding.route}\u001f${finding.selector}`
+      const group = groups.get(key)
+      if (group) group.push({ audit, finding })
+      else groups.set(key, [{ audit, finding }])
+    }
+  }
+
+  return [...groups.entries()].map(([key, entries]) => {
+    const representative = [...entries].sort((left, right) =>
+      Number(right.finding.severity === 'error') - Number(left.finding.severity === 'error') ||
+      right.finding.confidence - left.finding.confidence)[0]
+    const viewports = [...new Map(entries.map(({ finding }) => [`${finding.viewport.width}x${finding.viewport.height}`, finding.viewport])).values()]
+      .sort((left, right) => left.width - right.width)
+    const familyNames = [...new Set(viewports.map((viewport) => auditFamily(viewport.width)))]
+    const viewportLabel = viewports.map((viewport) => `${viewport.width} × ${viewport.height}`).join(' · ')
+    const affected = viewports.length > 1
+      ? ` Observé sur ${viewports.length} formats (${familyNames.join(', ').toLowerCase()}).`
+      : ''
+    const { finding } = representative
+    return {
+      id: `runtime:${stableRuntimeId(key)}`,
+      title: finding.title,
+      description: `${finding.description}${affected}`,
+      severity: 'attention',
+      coverage: finding.confidence >= 0.9 ? 'standard' : 'heuristique',
+      viewport: viewportLabel,
+      routePath: finding.route,
+      rule: finding.rule,
+      proposal: finding.proposal,
+      confidence: finding.confidence >= 0.9 ? 'certain' : finding.confidence >= 0.7 ? 'probable' : 'review',
+      evidence: {
+        selector: finding.selector,
+        route: finding.route,
+        viewport: { width: finding.viewport.width, height: finding.viewport.height },
+        rectangle: finding.rect,
+        measurements: {
+          runtime: true,
+          tag: finding.tag,
+          label: finding.label,
+          affectedViewports: viewportLabel,
+          inspectedNodes: entries.reduce((total, entry) => total + entry.audit.inspectedNodes, 0),
+          truncated: entries.some((entry) => entry.audit.truncated)
+        },
+        screenshotDataUrl: null
+      }
+    } satisfies ProjectIssue
+  })
 }
 
 function PreviewFrame({ project, origin, device, path, compact = false, label, focusSelector, themeOverride, resizable = false, allowUpscale = false, onResize, onPathChange, onThemeChange, onExternal, onAudit, onRenderStatus, onEscape }: {
@@ -521,6 +684,9 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
 }
 
 export default function App(): ReactElement {
+  const [railCollapsed, setRailCollapsed] = useState(() => {
+    try { return window.localStorage.getItem('responsiver.rail-collapsed') === 'true' } catch { return false }
+  })
   const [destination, setDestination] = useState<Destination>('projects')
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>('findings')
   const [project, setProject] = useState<(ProjectSnapshot & ProjectExtra) | null>(null)
@@ -545,6 +711,7 @@ export default function App(): ReactElement {
   const [messages, setMessages] = useState<ConversationMessage[]>([{ id: 'welcome', author: 'system', text: 'Décrivez un ajustement précis. Responsiver applique uniquement les règles locales qu’il sait interpréter et vous montre le résultat avant export.' }])
   const [draft, setDraft] = useState('')
   const [runtimeAudit, setRuntimeAudit] = useState<RuntimeAudit | null>(null)
+  const [, setLocalAuditRevision] = useState(0)
   const [runtimeRenderStatus, setRuntimeRenderStatus] = useState<RuntimeRenderState | null>(null)
   const [remoteAudit, setRemoteAudit] = useState<RemoteAuditResult | null>(null)
   const [remoteState, setRemoteState] = useState<RemotePageState | null>(null)
@@ -567,6 +734,8 @@ export default function App(): ReactElement {
   const activeProjectId = useRef<string | null>(null)
   const fullscreenButtonRef = useRef<HTMLButtonElement>(null)
   const remoteAudits = useRef(new Map<string, RemoteAuditResult>())
+  const localRuntimeAudits = useRef(new Map<string, RuntimeAudit>())
+  const localSourceIssues = useRef<ProjectIssue[]>([])
 
   async function refreshRecentProjects(): Promise<void> {
     if (!api().listRecentProjects) {
@@ -608,6 +777,9 @@ export default function App(): ReactElement {
   const inspectorIssues = showAllIssues ? project?.issues ?? [] : routeIssues
   const scopedProject = useMemo(() => project ? { ...project, issues: inspectorIssues } : null, [inspectorIssues, project])
   const selectedIssue = inspectorIssues.find((issue) => issue.id === selectedIssueId) ?? inspectorIssues[0] ?? null
+  const localAuditProfileCount = new Set([...localRuntimeAudits.current.values()]
+    .filter((audit) => documentPath(audit.route) === documentPath(activePath))
+    .map((audit) => `${audit.viewport.width}x${audit.viewport.height}`)).size
   const isRemote = project?.source.kind === 'remote-url' || project?.source.kind === 'linked-localhost'
   const workspaceEnabled = Boolean(project && !project.source.readOnly && project.source.localRoot)
   const detectedTheme: RuntimeTheme = runtimeTheme !== 'unknown' ? runtimeTheme : project?.theme.detected === 'dark' ? 'dark' : project?.theme.detected === 'light' ? 'light' : 'unknown'
@@ -616,8 +788,11 @@ export default function App(): ReactElement {
     : (previewMode === 'proposal' || previewMode === 'before-after') && proposal?.previewOrigin
       ? proposal.previewOrigin
       : workspaceOrigin ?? project?.previewOrigin ?? null
-  const focusedSelector = proposalContext?.kind === 'issue'
-    ? ((project?.issues.find((issue) => issue.id === proposalContext.issueId) as (ProjectIssue & IssueExtra) | undefined)?.fix?.selector ?? null)
+  const focusedSelector = proposalContext?.issueId
+    ? (() => {
+        const issue = project?.issues.find((candidate) => candidate.id === proposalContext.issueId) as (ProjectIssue & IssueExtra) | undefined
+        return issue?.fix?.selector ?? issue?.evidence?.selector ?? null
+      })()
     : null
   const nativeThemeTarget = previewMode === 'source' && proposalContext?.kind === 'theme' && previewThemeTarget && project && (
     project.theme.detected === 'dual' || project.theme.detected === previewThemeTarget || (previewThemeTarget === 'dark' ? project.theme.hasDark : project.theme.hasLight)
@@ -642,6 +817,10 @@ export default function App(): ReactElement {
     const unsubscribeWorkspace = window.responsiver.onWorkspacePreviewOrigin(setWorkspaceOrigin)
     return () => { unsubscribe?.(); unsubscribeExtension(); unsubscribeBlocked(); unsubscribeWorkspace() }
   }, [])
+
+  useEffect(() => {
+    try { window.localStorage.setItem('responsiver.rail-collapsed', String(railCollapsed)) } catch { /* préférence non persistée dans ce contexte */ }
+  }, [railCollapsed])
 
   const preparationActive = preparation !== null
 
@@ -692,6 +871,8 @@ export default function App(): ReactElement {
     draftRevision.current += 1
     const next = snapshot as ProjectSnapshot & ProjectExtra
     activeProjectId.current = next.id
+    localSourceIssues.current = next.source.kind === 'local-project' ? [...next.issues] : []
+    localRuntimeAudits.current.clear()
     setProject(next)
     setStaging(null)
     setProposal(null)
@@ -775,6 +956,25 @@ export default function App(): ReactElement {
     }
   }
 
+  async function associateCurrentLocalhostRoot(): Promise<void> {
+    if (!project || project.source.network !== 'localhost') return
+    setBusy(true)
+    try {
+      const root = await window.responsiver.chooseLinkedRoot()
+      if (!root) return
+      const snapshot = await window.responsiver.associateRemoteRoot({ projectId: project.id, root })
+      activeProjectId.current = snapshot.id
+      setProject(snapshot as ProjectSnapshot & ProjectExtra)
+      setLocalhostRoot(root)
+      setWorkspaceOrigin(null)
+      flash('Dossier source associé. L’éditeur local est maintenant disponible.')
+    } catch (error) {
+      flash(error instanceof Error ? error.message : 'Le dossier source n’a pas pu être associé à ce localhost.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   async function openRecentProject(id: string): Promise<void> {
     if (!api().openRecentProject) return
     await openWith(() => api().openRecentProject!(id), 'Projet réanalysé et prêt dans le laboratoire.')
@@ -819,8 +1019,8 @@ export default function App(): ReactElement {
       if (context.kind === 'theme' && context.themeTarget) setPreviewThemeTarget(context.themeTarget)
       setPreviewMode(mode)
       return result
-    } catch {
-      if (sequence === previewSequence.current) flash('La proposition n’a pas pu être prévisualisée. Aucun choix n’a été validé.')
+    } catch (error) {
+      if (sequence === previewSequence.current) flash(actionError(error, 'La proposition n’a pas pu être prévisualisée. Aucun choix n’a été validé.'))
       return null
     } finally {
       if (sequence === previewSequence.current) setPreviewBusy(false)
@@ -880,6 +1080,16 @@ export default function App(): ReactElement {
           : 'La route et le viewport sont restaurés, mais l’élément a changé ou n’existe plus dans le DOM actuel.')
       return
     }
+    const runtimeInstruction = deterministicInstructionForIssue(issue)
+    if (project?.capabilities?.staging && runtimeInstruction && (!extra.fix || extra.fix.kind === 'manual')) {
+      const result = await requestProposal(
+        { issueIds: [], themeTarget: null, instructions: [runtimeInstruction] },
+        { kind: 'instruction', instruction: runtimeInstruction, issueId: issue.id },
+        'before-after'
+      )
+      if (result) flash('Une correction CSS prudente est affichée en avant / après. Elle reste à réviser et à valider explicitement.')
+      return
+    }
     if (!project?.capabilities?.staging || !extra.fix || extra.fix.kind === 'manual') {
       const expectedOrigin = proposal?.previewOrigin ?? null
       previewSequence.current += 1
@@ -931,8 +1141,12 @@ export default function App(): ReactElement {
     }
     if (proposalContext.kind === 'instruction' && proposalContext.instruction) {
       setInstructions((current) => current.includes(proposalContext.instruction!) ? current : [...current, proposalContext.instruction!])
-      setMessages((current) => [...current, { id: `s-${Date.now()}`, author: 'system', text: 'Ajustement validé et ajouté au plan de correctifs. Le projet source reste intact.' }])
-      flash('Ajustement validé. Construisez le staging depuis Correctifs pour le rendre exportable.')
+      if (proposalContext.issueId) {
+        flash('Correctif visuel validé. Il reste isolé du projet source jusqu’à la construction du staging.')
+      } else {
+        setMessages((current) => [...current, { id: `s-${Date.now()}`, author: 'system', text: 'Ajustement validé et ajouté au plan de correctifs. Le projet source reste intact.' }])
+        flash('Ajustement validé. Construisez le staging depuis Correctifs pour le rendre exportable.')
+      }
     }
   }
 
@@ -1089,45 +1303,62 @@ export default function App(): ReactElement {
     setActivePath(path)
   }
 
-  function applyRuntimeAudit(audit: RuntimeAudit): void {
-    setRuntimeAudit(audit)
-    const viewportLabel = `${audit.viewport.width} × ${audit.viewport.height}`
-    const runtimeIssues: ProjectIssue[] = audit.findings.map((finding) => ({
-      id: `runtime:${finding.id}:${audit.viewport.width}x${audit.viewport.height}`,
-      title: finding.title,
-      description: finding.description,
-      severity: 'attention',
-      coverage: finding.confidence >= 0.9 ? 'standard' : 'heuristique',
-      viewport: viewportLabel,
-      routePath: finding.route,
-      rule: finding.rule,
-      proposal: finding.proposal,
-      confidence: finding.confidence >= 0.9 ? 'certain' : finding.confidence >= 0.7 ? 'probable' : 'review',
-      evidence: {
-        selector: finding.selector,
-        route: finding.route,
-        viewport: { width: finding.viewport.width, height: finding.viewport.height },
-        rectangle: finding.rect,
-        measurements: {
-          runtime: true,
-          tag: finding.tag,
-          label: finding.label,
-          inspectedNodes: audit.inspectedNodes,
-          truncated: audit.truncated
-        },
-        screenshotDataUrl: null
-      }
-    }))
+  function applyRuntimeAudit(audit: RuntimeAudit, primary = true): void {
+    if (primary) setRuntimeAudit(audit)
+    const auditKey = `${audit.route}\u001f${audit.viewport.width}x${audit.viewport.height}`
+    const newProfile = !localRuntimeAudits.current.has(auditKey)
+    localRuntimeAudits.current.delete(auditKey)
+    localRuntimeAudits.current.set(auditKey, audit)
+    if (newProfile) setLocalAuditRevision((revision) => revision + 1)
+    const canonicalProfiles = new Set(auditDevices.map((device) => `${device.width}x${device.height}`))
+    const routeEntries = [...localRuntimeAudits.current.entries()].filter(([, entry]) => entry.route === audit.route)
+    while (routeEntries.length > 6) {
+      const removableIndex = routeEntries.findIndex(([, entry]) => !canonicalProfiles.has(`${entry.viewport.width}x${entry.viewport.height}`))
+      const [removed] = routeEntries.splice(removableIndex >= 0 ? removableIndex : 0, 1)
+      localRuntimeAudits.current.delete(removed[0])
+    }
+    while (localRuntimeAudits.current.size > 48) {
+      const oldest = localRuntimeAudits.current.keys().next().value as string | undefined
+      if (!oldest) break
+      localRuntimeAudits.current.delete(oldest)
+    }
+
     setProject((current) => {
       if (!current || current.source.kind !== 'local-project') return current
-      const sameScope = (issue: ProjectIssue): boolean => issue.id.startsWith('runtime:') && issue.routePath === audit.route
-      const previousScope = current.issues.filter(sameScope)
-      const unchanged = previousScope.length === runtimeIssues.length && previousScope.every((issue, index) => issue.id === runtimeIssues[index]?.id && issue.description === runtimeIssues[index]?.description)
-      const truncated = current.analysis.truncated || audit.truncated
+      const runtimeIssues = consolidatedRuntimeIssues([...localRuntimeAudits.current.values()])
+      const allIssues = [...localSourceIssues.current, ...runtimeIssues]
+      const projectIssues = allIssues.filter((issue) => !(issue.routePath ?? issue.evidence?.route))
+      const routeGroups = new Map<string, ProjectIssue[]>()
+      for (const issue of allIssues) {
+        const route = issue.routePath ?? issue.evidence?.route
+        if (!route) continue
+        const group = routeGroups.get(route)
+        if (group) group.push(issue)
+        else routeGroups.set(route, [issue])
+      }
+      const routeOrder = [
+        ...current.routes.map((route) => route.path),
+        ...[...routeGroups.keys()].filter((route) => !current.routes.some((known) => known.path === route))
+      ]
+      const retainedIds = new Set(selectedIssueIds)
+      const nextIssues = allIssues.filter((issue) => retainedIds.has(issue.id))
+      const selectedIds = new Set(nextIssues.map((issue) => issue.id))
+      nextIssues.push(...prioritizedIssues(projectIssues.filter((issue) => !selectedIds.has(issue.id)), Math.min(12, Math.max(0, localIssueLimitTotal - nextIssues.length))))
+      for (const issue of nextIssues) selectedIds.add(issue.id)
+      for (const route of routeOrder) {
+        const available = localIssueLimitTotal - nextIssues.length
+        if (available <= 0) break
+        const routeIssues = (routeGroups.get(route) ?? []).filter((issue) => !selectedIds.has(issue.id))
+        const additions = prioritizedIssues(routeIssues, Math.min(localIssueLimitPerRoute, available))
+        nextIssues.push(...additions)
+        for (const issue of additions) selectedIds.add(issue.id)
+      }
+      const truncated = current.analysis.truncated || [...localRuntimeAudits.current.values()].some((entry) => entry.truncated) || nextIssues.length < allIssues.length
+      const unchanged = current.issues.length === nextIssues.length && current.issues.every((issue, index) => issue.id === nextIssues[index]?.id && issue.description === nextIssues[index]?.description)
       if (unchanged && truncated === current.analysis.truncated) return current
       return {
         ...current,
-        issues: [...current.issues.filter((issue) => !sameScope(issue)), ...runtimeIssues],
+        issues: nextIssues,
         analysis: { ...current.analysis, truncated }
       }
     })
@@ -1163,10 +1394,10 @@ export default function App(): ReactElement {
     changes: staging?.changes.length ?? 0
   } : { blockers: 0, issues: 0, selected: 0, changes: 0 }
 
-  return <div className="app-shell">
+  return <div className={railCollapsed ? 'app-shell is-rail-collapsed' : 'app-shell'}>
     <aside className="nav-rail" aria-label="Navigation principale">
-      <button className="brand" onClick={() => go('projects')} aria-label="Responsiver — Projets"><Mark /><span><strong>Responsiver</strong><small>Responsive workbench</small></span></button>
-      <nav>{destinations.map((item) => <button key={item.id} className={`${destination === item.id ? 'nav-link is-active' : 'nav-link'}${isRemote && item.id === 'review' ? ' is-limited' : ''}`} onClick={() => go(item.id)} aria-current={destination === item.id ? 'page' : undefined}><Icon name={item.icon} /><span>{item.label}</span>{item.id === 'review' && counts.changes > 0 && <b>{counts.changes}</b>}</button>)}</nav>
+      <div className="rail-head"><button className="brand" onClick={() => go('projects')} aria-label="Responsiver — Projets"><Mark /><span><strong>Responsiver</strong><small>Responsive workbench</small></span></button><button className="rail-toggle" type="button" onClick={() => setRailCollapsed((current) => !current)} aria-label={railCollapsed ? 'Déployer le menu latéral' : 'Replier le menu latéral'} aria-expanded={!railCollapsed} title={railCollapsed ? 'Déployer le menu' : 'Replier le menu'}><Icon name={railCollapsed ? 'panelExpand' : 'panelCollapse'} size={17} /></button></div>
+      <nav>{destinations.map((item) => <button key={item.id} className={`${destination === item.id ? 'nav-link is-active' : 'nav-link'}${isRemote && item.id === 'review' ? ' is-limited' : ''}`} onClick={() => go(item.id)} aria-label={item.label} aria-current={destination === item.id ? 'page' : undefined} title={item.label}><Icon name={item.icon} /><span>{item.label}</span>{item.id === 'review' && counts.changes > 0 && <b>{counts.changes}</b>}</button>)}</nav>
       <div className="rail-foot"><span><Icon name="shield" size={15} /> Local strict par défaut</span><small>v0.6 · open source</small></div>
     </aside>
 
@@ -1207,16 +1438,20 @@ export default function App(): ReactElement {
               {isRemote ? <RemotePreview projectId={project.id} device={currentDevice} visible={destination === 'lab'} allowUpscale={stageFullscreen} onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onAudit={applyRemoteAudit} onState={(state) => { setRemoteState(state); setActivePath(state.path) }} onNotice={flash} /> : labMode === 'device' && previewMode === 'before-after' && proposal ? <div className="before-after-grid" aria-label="Comparaison avant et après le correctif">
                 <div className="comparison-pane"><header><span>Avant</span><strong>Source</strong></header><PreviewFrame compact project={project} origin={project.previewOrigin} device={currentDevice} path={activePath} label="Avant — Source" focusSelector={focusedSelector} onPathChange={changePreviewPath} onThemeChange={setRuntimeTheme} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} /></div>
                 <div className="comparison-pane comparison-pane--after"><header><span>Après</span><strong>Proposition non validée</strong></header><PreviewFrame compact project={project} origin={proposal.previewOrigin} device={currentDevice} path={activePath} label="Après — Proposition" focusSelector={focusedSelector} onPathChange={changePreviewPath} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} /></div>
-              </div> : labMode === 'device' ? <PreviewFrame project={project} origin={activeOrigin} device={currentDevice} path={activePath} focusSelector={focusedSelector} themeOverride={nativeThemeTarget} resizable allowUpscale={stageFullscreen} onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onPathChange={changePreviewPath} onThemeChange={activeOrigin === project.previewOrigin ? setRuntimeTheme : undefined} onAudit={applyRuntimeAudit} onRenderStatus={setRuntimeRenderStatus} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} /> : <div className="comparison-grid">{compareDevices.map((device) => <PreviewFrame key={device.id} project={project} origin={activeOrigin} device={device} path={activePath} compact focusSelector={focusedSelector} themeOverride={nativeThemeTarget} label={device.family === 'smartphone' ? 'Smartphone' : device.family === 'tablet' ? 'Tablette' : 'Ordinateur'} onPathChange={changePreviewPath} onThemeChange={activeOrigin === project.previewOrigin ? setRuntimeTheme : undefined} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} />)}</div>}
+              </div> : labMode === 'device' ? <PreviewFrame project={project} origin={activeOrigin} device={currentDevice} path={activePath} focusSelector={focusedSelector} themeOverride={nativeThemeTarget} resizable allowUpscale={stageFullscreen} onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onPathChange={changePreviewPath} onThemeChange={activeOrigin === project.previewOrigin ? setRuntimeTheme : undefined} onAudit={activeOrigin === project.previewOrigin ? applyRuntimeAudit : undefined} onRenderStatus={setRuntimeRenderStatus} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} /> : <div className="comparison-grid">{compareDevices.map((device) => <PreviewFrame key={device.id} project={project} origin={activeOrigin} device={device} path={activePath} compact focusSelector={focusedSelector} themeOverride={nativeThemeTarget} label={device.family === 'smartphone' ? 'Smartphone' : device.family === 'tablet' ? 'Tablette' : 'Ordinateur'} onPathChange={changePreviewPath} onThemeChange={activeOrigin === project.previewOrigin ? setRuntimeTheme : undefined} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} />)}</div>}
             </div>
           </div>
           {scopedProject && <Inspector project={scopedProject} activeIssueCount={routeIssues.length} totalIssueCount={project.issues.length} showAllIssues={showAllIssues} onShowAllIssues={setShowAllIssues} tab={inspectorTab} onTab={setInspectorTab} selectedIssue={selectedIssue} selectedIds={selectedIssueIds} onPreviewIssue={(issue) => void previewIssue(issue)} onToggleIssue={toggleAcceptedIssue} detectedTheme={detectedTheme} themeTarget={themeTarget} previewThemeTarget={previewThemeTarget} onPreviewTheme={(target) => void previewTheme(target)} onRemoveTheme={removeTheme} proposal={proposal} proposalContext={proposalContext} previewBusy={previewBusy} staging={staging} runtimeAudit={runtimeAudit} runtimeRenderStatus={runtimeRenderStatus} instructions={instructions} onRemoveInstruction={removeInstruction} messages={messages} draft={draft} onDraft={setDraft} onSubmit={submitInstruction} busy={busy} onAcceptProposal={acceptProposal} onRejectProposal={rejectProposal} onBuild={() => void buildStaging()} onClear={() => void clearStaging()} assistantRoute={remoteState?.path ?? activePath} assistantViewport={{ width: currentDevice.width, height: currentDevice.height, deviceScaleFactor: 1, mobile: currentDevice.family !== 'computer', touch: currentDevice.family !== 'computer' }} assistantScreenshot={remoteAudit?.screenshotDataUrl ?? null} workspaceEnabled={workspaceEnabled} onWorkspacePreviewOrigin={setWorkspaceOrigin} onNotice={flash} onOpenCode={() => go('code')} />}
         </div>
-        <footer className="activity-bar"><span><i className="status-dot status-dot--ok" /> {isRemote ? `${remoteAudits.current.size} route${remoteAudits.current.size > 1 ? 's' : ''} auditée${remoteAudits.current.size > 1 ? 's' : ''}` : `${project.routes.length} page${project.routes.length > 1 ? 's' : ''}`}</span>{project.capabilities?.buildRequired ? <span className="activity-alert" title="Responsiver n’exécute jamais les scripts arbitraires d’un projet sans consentement. Ouvrez plutôt le fichier HTML généré dans dist ou out.">Sources à compiler · choisir dist/out</span> : <span className={counts.blockers ? 'activity-alert' : ''}>{counts.blockers} bloquant{counts.blockers > 1 ? 's' : ''}</span>}<span>{isRemote ? remoteAudit ? `${project.issues.length} constats cumulés · ${remoteAudit.viewports.length} largeurs` : 'Audit visuel en préparation' : runtimeAudit ? `${runtimeAudit.findingCount ?? runtimeAudit.overflowCount} constat${(runtimeAudit.findingCount ?? runtimeAudit.overflowCount) > 1 ? 's' : ''} à ${runtimeAudit.viewportWidth}px` : 'Audit visuel en attente'}</span><span className="activity-end"><Icon name="shield" size={13} /> {project.source.network === 'local-only' ? 'Hors ligne' : project.source.network === 'localhost' ? 'Serveur local · dépendances web autorisées' : 'Session réseau éphémère'}</span></footer>
+        {!isRemote && previewMode === 'source' && project.previewOrigin && (project.previewReadiness.status === 'ready' || project.previewReadiness.status === 'degraded') && <div className="runtime-audit-probes" aria-hidden="true" inert>
+          {auditDevices.map((device) => <PreviewFrame key={`${project.id}:${device.id}`} compact project={project} origin={project.previewOrigin} device={device} path={activePath} label={`Sonde ${auditFamily(device.width)}`} onAudit={(audit) => applyRuntimeAudit(audit, false)} />)}
+        </div>}
+        <footer className="activity-bar"><span><i className="status-dot status-dot--ok" /> {isRemote ? `${remoteAudits.current.size} route${remoteAudits.current.size > 1 ? 's' : ''} auditée${remoteAudits.current.size > 1 ? 's' : ''}` : `${project.routes.length} page${project.routes.length > 1 ? 's' : ''}`}</span>{project.capabilities?.buildRequired ? <span className="activity-alert" title="Responsiver n’exécute jamais les scripts arbitraires d’un projet sans consentement. Ouvrez plutôt le fichier HTML généré dans dist ou out.">Sources à compiler · choisir dist/out</span> : <span className={counts.blockers ? 'activity-alert' : ''}>{counts.blockers} bloquant{counts.blockers > 1 ? 's' : ''}</span>}<span>{isRemote ? remoteAudit ? `${project.issues.length} constats cumulés · ${remoteAudit.viewports.length} largeurs` : 'Audit visuel en préparation' : localAuditProfileCount ? `${routeIssues.length} constat${routeIssues.length > 1 ? 's' : ''} consolidé${routeIssues.length > 1 ? 's' : ''} · ${localAuditProfileCount}/${auditDevices.length} formats` : 'Audit visuel en attente'}</span><span className="activity-end"><Icon name="shield" size={13} /> {project.source.network === 'local-only' ? 'Hors ligne' : project.source.network === 'localhost' ? 'Serveur local · dépendances web autorisées' : 'Session réseau éphémère'}</span></footer>
       </div>}
 
       {destination === 'code' && project && <div className="code-page">
-        <header className="page-head page-head--code"><div><span className="overline">Espace de changements</span><h1>Code</h1><p>Éditez dans un overlay temporaire, observez le rendu à côté du fichier, puis appliquez uniquement les changements explicitement validés.</p></div><span className={workspaceEnabled ? 'code-capability is-ready' : 'code-capability'}><i />{workspaceEnabled ? 'Sources locales liées' : 'Lecture seule'}</span></header>
+        <header className="page-head page-head--code"><div><span className="overline">Espace de changements</span><h1>Code</h1><p>Éditez dans un overlay temporaire, observez le rendu à côté du fichier, puis appliquez uniquement les changements explicitement validés.</p></div><div className="code-head-actions">{project.source.network === 'localhost' && !workspaceEnabled && <button className="button button--secondary" type="button" onClick={() => void associateCurrentLocalhostRoot()} disabled={busy}><Icon name="folder" size={15} /> Associer les sources</button>}<span className={workspaceEnabled ? 'code-capability is-ready' : 'code-capability'}><i />{workspaceEnabled ? 'Sources locales liées' : 'Lecture seule'}</span></div></header>
+        {project.source.kind === 'linked-localhost' && <div className="code-runtime-note"><Icon name="info" size={16} /><div><strong>Aperçu instantané pour les feuilles CSS</strong><span>Pour HTML, Twig, PHP, JavaScript ou les fichiers de framework, prévisualisez le diff puis appliquez explicitement le fichier : Responsiver recharge ensuite le serveur local, sans exécuter lui-même Symfony, Docker ou votre build.</span></div></div>}
         <div className="code-studio">
           <React.Suspense fallback={<div className="code-workspace code-loading"><span /> Chargement de l’éditeur local…</div>}><CodeWorkspace projectId={project.id} enabled={workspaceEnabled} preferredPath={selectedIssue?.source?.file ?? null} onNotice={flash} onPreviewOrigin={setWorkspaceOrigin} /></React.Suspense>
           <aside className="code-live-preview">
@@ -1224,7 +1459,7 @@ export default function App(): ReactElement {
             <div className="code-preview-body">
               {isRemote
                 ? <RemotePreview projectId={project.id} device={currentDevice} visible={destination === 'code'} embedded automaticAudit={false} onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onAudit={applyRemoteAudit} onState={(state) => { setRemoteState(state); setActivePath(state.path) }} onNotice={flash} />
-                : <PreviewFrame compact project={project} origin={workspaceOrigin ?? project.previewOrigin} device={currentDevice} path={activePath} resizable onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onPathChange={changePreviewPath} onThemeChange={setRuntimeTheme} onAudit={applyRuntimeAudit} onRenderStatus={setRuntimeRenderStatus} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} />}
+                : <PreviewFrame compact project={project} origin={workspaceOrigin ?? project.previewOrigin} device={currentDevice} path={activePath} resizable onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onPathChange={changePreviewPath} onThemeChange={setRuntimeTheme} onAudit={!workspaceOrigin ? applyRuntimeAudit : undefined} onRenderStatus={setRuntimeRenderStatus} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} />}
             </div>
             <footer><span><i /> Overlay en mémoire</span><code>{currentDevice.width} × {currentDevice.height}</code></footer>
           </aside>
@@ -1337,7 +1572,7 @@ function DeviceControls({ family, devices: choices, selectedId, width, height, o
   return <div className="device-controls">
     <div className="family-switch" role="group" aria-label="Catégorie d’appareil">{families.map((item) => <button key={item.id} className={family === item.id ? 'is-active' : ''} onClick={() => onFamily(item.id)} title={item.label}><Icon name={item.icon} size={16} /><span>{item.label}</span></button>)}</div>
     <label className="model-select"><span>Modèle</span><select value={selectedId === 'custom' ? 'custom' : selectedId} onChange={(event) => onDevice(event.target.value)}>{choices.map((device) => <option key={device.id} value={device.id}>{device.name} — {device.width}×{device.height}</option>)}<option value="custom">Dimensions libres</option></select></label>
-    <div className="dimension-fields"><label><span>Largeur</span><input inputMode="numeric" value={width} onChange={(event) => onWidth(event.target.value)} onBlur={(event) => onWidth(String(clampDimension(event.target.value, 240, 2560, 393)))} /><small>px</small></label><b aria-hidden="true">×</b><label><span>Hauteur</span><input inputMode="numeric" value={height} onChange={(event) => onHeight(event.target.value)} onBlur={(event) => onHeight(String(clampDimension(event.target.value, 320, 2000, 852)))} /><small>px</small></label><button className="icon-button rotate-button" onClick={onRotate} aria-label="Pivoter les dimensions"><Icon name="rotate" size={16} /></button></div>
+    <div className="dimension-fields"><label><span>Largeur</span><input inputMode="numeric" value={width} onChange={(event) => onWidth(event.target.value)} onBlur={(event) => onWidth(String(clampDimension(event.target.value, 240, 2560, 393)))} /><small>px</small></label><b aria-hidden="true">×</b><label><span>Hauteur</span><input inputMode="numeric" value={height} onChange={(event) => onHeight(event.target.value)} onBlur={(event) => onHeight(String(clampDimension(event.target.value, 320, 2000, 852)))} /><small>px</small></label><button className="icon-button rotate-button" onClick={onRotate} aria-label="Intervertir la largeur et la hauteur" title="Intervertir largeur et hauteur"><Icon name="swap" size={16} /></button></div>
   </div>
 }
 
@@ -1385,10 +1620,11 @@ function Inspector({ project, activeIssueCount, totalIssueCount, showAllIssues, 
 }): ReactElement {
   const issueExtra = selectedIssue as (ProjectIssue & IssueExtra) | null
   const acceptedCount = selectedIds.length + instructions.length + (themeTarget ? 1 : 0)
-  const selectedProposal = proposalContext?.kind === 'issue' && proposalContext.issueId === selectedIssue?.id ? proposal : null
-  const selectedAccepted = selectedIssue ? selectedIds.includes(selectedIssue.id) : false
+  const selectedInstruction = deterministicInstructionForIssue(selectedIssue)
+  const selectedProposal = proposalContext?.issueId === selectedIssue?.id ? proposal : null
+  const selectedAccepted = selectedIssue ? selectedIds.includes(selectedIssue.id) || Boolean(selectedInstruction && instructions.includes(selectedInstruction)) : false
   const canStage = project.capabilities?.staging !== false
-  const selectedActionable = canStage && Boolean(issueExtra?.fix && issueExtra.fix.kind !== 'manual')
+  const selectedActionable = canStage && Boolean(issueExtra?.fix && issueExtra.fix.kind !== 'manual' || selectedInstruction)
   const instructionProposal = proposalContext?.kind === 'instruction' ? proposal : null
   return <aside className="inspector" aria-label="Inspecteur">
     <div className="inspector-tabs" role="tablist" aria-label="Outils d’analyse">{inspectorTabs.map((item) => <button role="tab" aria-selected={tab === item.id} className={tab === item.id ? 'is-active' : ''} key={item.id} onClick={() => onTab(item.id)} title={item.label}><Icon name={item.icon} size={16} /><span>{item.label}</span>{item.id === 'findings' && <b>{project.issues.length}</b>}</button>)}</div>
@@ -1401,8 +1637,11 @@ function Inspector({ project, activeIssueCount, totalIssueCount, showAllIssues, 
         {runtimeRenderStatus && runtimeRenderStatus.failureCount > 0 && <div className="runtime-alert runtime-alert--errors" aria-live="polite"><Icon name="finding" size={16} /><div><strong>{runtimeRenderStatus.failureCount} erreur{runtimeRenderStatus.failureCount > 1 ? 's' : ''} observée{runtimeRenderStatus.failureCount > 1 ? 's' : ''} pendant le rendu</strong><span>{runtimeRenderStatus.firstFailure ?? 'Le site reste navigable ; vérifiez les scripts et ressources signalés dans la console du projet.'}</span></div></div>}
         {runtimeAudit && runtimeAudit.overflowCount > 0 && <div className="runtime-alert"><Icon name="ruler" size={16} /><div><strong>{runtimeAudit.overflowCount} débordement{runtimeAudit.overflowCount > 1 ? 's' : ''} visible{runtimeAudit.overflowCount > 1 ? 's' : ''}</strong><span>Mesuré à {runtimeAudit.viewportWidth}px sur la page active.</span></div></div>}
         <div className="issue-list">{project.issues.length ? project.issues.map((issue) => {
-          const accepted = selectedIds.includes(issue.id)
-          return <button key={issue.id} className={`${selectedIssue?.id === issue.id ? 'issue-item is-active' : 'issue-item'}${accepted ? ' is-accepted' : ''}`} onClick={() => onPreviewIssue(issue)} disabled={busy} aria-label={`${issue.title} — ouvrir la page et ${((issue as ProjectIssue & IssueExtra).fix?.kind === 'manual' || !(issue as ProjectIssue & IssueExtra).fix) ? 'localiser le constat' : 'prévisualiser l’avant et l’après'}`}><i className={`severity-dot severity-dot--${issue.severity}`} /><span><strong>{issue.title}</strong><small>{(issue as ProjectIssue & IssueExtra).routePath ?? issue.viewport}</small></span><em>{accepted ? 'Retenu' : severityLabel(issue)}</em></button>
+          const generatedInstruction = deterministicInstructionForIssue(issue)
+          const accepted = selectedIds.includes(issue.id) || Boolean(generatedInstruction && instructions.includes(generatedInstruction))
+          const fix = (issue as ProjectIssue & IssueExtra).fix
+          const previewable = Boolean(generatedInstruction || fix && fix.kind !== 'manual')
+          return <button key={issue.id} className={`${selectedIssue?.id === issue.id ? 'issue-item is-active' : 'issue-item'}${accepted ? ' is-accepted' : ''}`} onClick={() => onPreviewIssue(issue)} disabled={busy} aria-label={`${issue.title} — ouvrir la page et ${previewable ? 'prévisualiser l’avant et l’après' : 'localiser le constat'}`}><i className={`severity-dot severity-dot--${issue.severity}`} /><span><strong>{issue.title}</strong><small>{(issue as ProjectIssue & IssueExtra).routePath ?? issue.viewport}</small></span><em>{accepted ? 'Retenu' : severityLabel(issue)}</em></button>
         }) : <div className="empty-panel"><Icon name="check" /><strong>Aucun motif connu détecté</strong><span>Continuez la vérification visuelle sur les trois familles d’appareils.</span></div>}</div>
         {selectedIssue && <article className="issue-detail"><header><span className={`severity severity--${selectedIssue.severity}`}>{severityLabel(selectedIssue)}</span><code>{selectedIssue.rule}</code></header><h3>{selectedIssue.title}</h3><p>{selectedIssue.description}</p><dl><div><dt>Source</dt><dd>{selectedIssue.source ? <code>{selectedIssue.source.file}:{selectedIssue.source.line}</code> : selectedIssue.evidence?.selector ? <code>{selectedIssue.evidence.selector}</code> : 'Mesure à l’exécution'}</dd></div><div><dt>Proposition</dt><dd>{selectedIssue.proposal}</dd></div>{selectedIssue.confidence && <div><dt>Confiance</dt><dd>{selectedIssue.confidence === 'certain' ? 'Certaine' : selectedIssue.confidence === 'probable' ? 'Probable' : 'À vérifier'}</dd></div>}</dl>{selectedIssue.source && workspaceEnabled && <button className="text-button issue-code-link" onClick={onOpenCode}><Icon name="code" size={14} /> Ouvrir le fichier associé</button>}
           {!selectedActionable ? <div className="manual-review"><Icon name="info" size={15} /><span>Ce point ne possède pas de transformation automatique sûre. Responsiver vous amène à la page concernée sans simuler un résultat.</span></div> : previewBusy && proposalContext?.issueId === selectedIssue.id ? <div className="proposal-pending" role="status"><span className="loading-mark" /> Préparation de l’avant / après…</div> : selectedProposal ? <ProposalDecision title="Correctif isolé" accepted={selectedAccepted} changeCount={selectedProposal.changes.length} disabled={busy} onAccept={onAcceptProposal} onReject={onRejectProposal} /> : <button className="button button--primary button--full" onClick={() => onPreviewIssue(selectedIssue)} disabled={busy}><Icon name="compare" /> Voir l’avant / après</button>}
@@ -1429,9 +1668,26 @@ function ProposalDecision({ title, accepted, changeCount, disabled = false, onAc
   return <div className={accepted ? 'proposal-decision is-accepted' : 'proposal-decision'}><header><span><i />{accepted ? 'Validé dans le plan' : 'Aperçu non validé'}</span><b>{changeCount} changement{changeCount > 1 ? 's' : ''}</b></header><strong>{title}</strong><p>{accepted ? 'Ce choix sera inclus lors de la prochaine construction du staging.' : 'La proposition reste temporaire et ne peut pas être exportée tant que vous ne la validez pas.'}</p><div><button className="button button--quiet" onClick={onReject} disabled={disabled}>Écarter</button><button className="button button--primary" onClick={onAccept} disabled={disabled || accepted || !changeCount}><Icon name={accepted ? 'check' : 'plus'} size={15} />{accepted ? 'Validé' : 'Valider'}</button></div></div>
 }
 
+function resolvableThemeRoles(variables: Array<{ name: string; value: string; role: string }>): Set<string> {
+  const byName = new Map(variables.map((variable) => [variable.name, variable]))
+  const resolves = (variable: { name: string; value: string }, visited = new Set<string>()): boolean => {
+    if (/^\s*(?:#[\da-f]{3,8}|rgba?\([^)]*\))\s*$/i.test(variable.value)) return true
+    const reference = variable.value.match(/var\(\s*(--[\w-]+)/)?.[1]
+    if (!reference || visited.has(reference)) return false
+    const next = byName.get(reference)
+    if (!next) return false
+    const nextVisited = new Set(visited)
+    nextVisited.add(reference)
+    return resolves(next, nextVisited)
+  }
+  return new Set(variables.filter((variable) => resolves(variable)).map((variable) => variable.role))
+}
+
 function ThemePanel({ project, detectedTheme, acceptedTarget, previewTarget, proposal, busy, disabled, onPreview, onAccept, onReject, onRemoveAccepted }: { project: ProjectSnapshot & ProjectExtra; detectedTheme: RuntimeTheme; acceptedTarget: ThemeTarget | null; previewTarget: ThemeTarget | null; proposal: StagingSnapshot | null; busy: boolean; disabled: boolean; onPreview: (target: ThemeTarget) => void; onAccept: () => void; onReject: () => void; onRemoveAccepted: () => void }): ReactElement {
   const hasDark = project.theme.hasDark || project.theme.detected === 'dual'
   const hasLight = project.theme.hasLight || project.theme.detected === 'dual'
+  const semanticRoles = resolvableThemeRoles(project.theme.variables ?? [])
+  const generationReady = project.theme.detected !== 'unknown' && semanticRoles.has('background') && semanticRoles.has('text')
   const recommendation = hasDark && !hasLight ? 'light' : hasLight && !hasDark ? 'dark' : detectedTheme === 'dark' ? 'light' : 'dark'
   const dual = hasDark && hasLight
   const analyzedTheme: RuntimeTheme = project.theme.detected === 'dark' ? 'dark' : project.theme.detected === 'light' ? 'light' : 'unknown'
@@ -1444,8 +1700,9 @@ function ThemePanel({ project, detectedTheme, acceptedTarget, previewTarget, pro
         ? `Rendu ${detectedTheme === 'dark' ? 'sombre' : 'clair'} sur la page active`
         : 'Thème non classé'
   return <><div className="inspector-heading"><div><span className="overline">Palette complémentaire</span><h2>Thème</h2></div><span className={`theme-chip theme-chip--${dual ? 'dual' : displayedTheme}`}>{dual ? 'Clair + sombre' : displayedTheme === 'dark' ? 'Sombre' : displayedTheme === 'light' ? 'Clair' : 'À confirmer'}</span></div>
-    <div className="theme-diagnosis"><div className={`theme-swatch theme-swatch--${displayedTheme}`}><span>Aa</span></div><div><strong>{diagnosis}</strong><p>{dual ? 'Responsiver n’ajoute aucune variante identique.' : `Cliquez sur la variante ${recommendation === 'light' ? 'claire' : 'sombre'} pour la voir immédiatement, avant toute validation.`}</p></div></div>
-    <fieldset className="theme-options"><legend>Prévisualiser une variante</legend><label className={`${previewTarget === 'light' ? 'is-selected' : ''}${hasLight ? ' is-existing' : ''}`}><input type="radio" name="theme-preview" checked={previewTarget === 'light'} onChange={() => onPreview('light')} disabled={busy || disabled} /><span className="palette-preview palette-preview--light"><i /><i /><i /></span><span><strong>Clair {hasLight && <em>Déjà présent</em>}</strong><small>{hasLight ? 'Afficher la variante native, sans la dupliquer' : 'Fond minéral, texte graphite'}</small></span></label><label className={`${previewTarget === 'dark' ? 'is-selected' : ''}${hasDark ? ' is-existing' : ''}`}><input type="radio" name="theme-preview" checked={previewTarget === 'dark'} onChange={() => onPreview('dark')} disabled={busy || disabled} /><span className="palette-preview palette-preview--dark"><i /><i /><i /></span><span><strong>Sombre {hasDark && <em>Déjà présent</em>}</strong><small>{hasDark ? 'Afficher la variante native, sans la dupliquer' : 'Graphite profond, surfaces étagées'}</small></span></label></fieldset>
+    <div className="theme-diagnosis"><div className={`theme-swatch theme-swatch--${displayedTheme}`}><span>Aa</span></div><div><strong>{diagnosis}</strong><p>{dual ? 'Responsiver n’ajoute aucune variante identique.' : generationReady ? `Cliquez sur la variante ${recommendation === 'light' ? 'claire' : 'sombre'} pour la voir immédiatement, avant toute validation.` : 'La génération reste suspendue tant que les rôles fond et texte ne sont pas identifiés avec assez de certitude.'}</p></div></div>
+    {!generationReady && !dual && <div className="manual-review"><Icon name="shield" size={15} /><span>Palette automatique indisponible : Responsiver préfère ne rien produire plutôt qu’un thème illisible. Les variantes déjà présentes restent prévisualisables.</span></div>}
+    <fieldset className="theme-options"><legend>Prévisualiser une variante</legend><label className={`${previewTarget === 'light' ? 'is-selected' : ''}${hasLight ? ' is-existing' : ''}`}><input type="radio" name="theme-preview" checked={previewTarget === 'light'} onChange={() => onPreview('light')} disabled={busy || disabled || (!hasLight && !generationReady)} /><span className="palette-preview palette-preview--light"><i /><i /><i /></span><span><strong>Clair {hasLight && <em>Déjà présent</em>}</strong><small>{hasLight ? 'Afficher la variante native, sans la dupliquer' : generationReady ? 'Fond minéral, texte graphite' : 'Rôles sémantiques insuffisants'}</small></span></label><label className={`${previewTarget === 'dark' ? 'is-selected' : ''}${hasDark ? ' is-existing' : ''}`}><input type="radio" name="theme-preview" checked={previewTarget === 'dark'} onChange={() => onPreview('dark')} disabled={busy || disabled || (!hasDark && !generationReady)} /><span className="palette-preview palette-preview--dark"><i /><i /><i /></span><span><strong>Sombre {hasDark && <em>Déjà présent</em>}</strong><small>{hasDark ? 'Afficher la variante native, sans la dupliquer' : generationReady ? 'Graphite profond, surfaces étagées' : 'Rôles sémantiques insuffisants'}</small></span></label></fieldset>
     {busy && <div className="proposal-pending" role="status"><span className="loading-mark" /> Génération locale de la palette…</div>}
     {proposal && previewTarget && <ProposalDecision title={`Variante ${previewTarget === 'dark' ? 'sombre' : 'claire'}`} accepted={acceptedTarget === previewTarget} changeCount={proposal.changes.length} disabled={disabled} onAccept={onAccept} onReject={onReject} />}
     {!proposal && previewTarget && (previewTarget === 'dark' ? hasDark : hasLight) && <div className="native-theme-preview"><Icon name="check" size={15} /><span><strong>Aperçu natif {previewTarget === 'dark' ? 'sombre' : 'clair'}</strong><small>Cette variante existe déjà : elle est simulée dans la source et ne demande aucune validation.</small></span></div>}

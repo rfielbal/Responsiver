@@ -55,11 +55,16 @@ try {
     await page.locator('.theme-diagnosis').waitFor({ state: 'visible' })
     const missingVariant = page.locator('.theme-options label:not(.is-existing) input').first()
     if (await missingVariant.count()) {
-      await missingVariant.check()
-      const decision = page.locator('.proposal-decision')
-      await decision.waitFor({ state: 'visible' })
-      assert.match(await decision.textContent(), /Aperçu non validé/)
-      assert.equal(await missingVariant.isChecked(), true)
+      if (await missingVariant.isDisabled()) {
+        assert.match(await page.locator('.manual-review').filter({ hasText: 'Palette automatique indisponible' }).textContent(), /plutôt qu’un thème illisible/)
+        assert.equal(await page.locator('.proposal-decision').count(), 0)
+      } else {
+        await missingVariant.check()
+        const decision = page.locator('.proposal-decision')
+        await decision.waitFor({ state: 'visible' })
+        assert.match(await decision.textContent(), /Aperçu non validé/)
+        assert.equal(await missingVariant.isChecked(), true)
+      }
     } else {
       const nativeVariant = page.locator('.theme-options input').first()
       await nativeVariant.check()

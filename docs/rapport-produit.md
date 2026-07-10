@@ -22,7 +22,7 @@ La direction UI conserve sa propre grammaire — rail graphite, papier minéral,
 | Auditer un localhost | Boucle locale uniquement | Aucun accès LAN implicite |
 | Travailler sur Symfony/MySQL/Docker | Connexion au localhost déjà lancé | Responsiver ne démarre ni backend, DB, conteneur ou migration |
 | Associer le code au localhost | Dossier source facultatif, session `linked-localhost` | L’association est explicite |
-| Détecter des problèmes visuels | Balayage distant 360/390/768/1024/1440 et audit runtime local sur huit règles | Routes visitées cumulées, pas de crawler autonome |
+| Détecter des problèmes visuels | Balayage distant 360/390/768/1024/1440 et audit runtime local : overflow, navigation, collisions, densité, typographie, interaction, médias et contraste | Routes visitées cumulées, pas de crawler autonome |
 | Détecter les défauts objectifs | Overflow, clipping, texte, tactile, fixe, image, contraste, runtime | Ce n’est pas une note esthétique universelle |
 | Ouvrir un constat dans son contexte | Route exacte, viewport, sélecteur, scroll et contour temporaire | L’interface signale si le sélecteur n’existe plus |
 | Conserver l’audit URL | Agrégation de session, synthèse copiable et rapport JSON | Aucune persistance sans export explicite |
@@ -76,9 +76,11 @@ Cette distinction est volontaire : le staging sert à préparer une livraison no
 
 ## Analyse visuelle
 
-Le moteur distant exécute les mêmes mesures sur cinq viewports et conserve des preuves structurées : sélecteur, rectangle, style, valeur observée, seuil attendu et confiance. Les résultats de la page sont assainis dans le processus principal avant de devenir des constats. Chaque nouvelle route visitée est auditée automatiquement et rejoint l’historique de session ; une réanalyse remplace seulement cette route. Les plafonds atteints sont visibles et exportés.
+Le moteur distant exécute les mêmes mesures sur cinq viewports et conserve des preuves structurées : sélecteur, rectangle, style, valeur observée, seuil attendu et confiance. Il cible aussi les navigations déséquilibrées, collisions, pertes de zone utile, densités de commandes et échelles typographiques anormales. Les résultats de la page sont assainis dans le processus principal avant de devenir des constats. Les répétitions multi-viewport sont regroupées par route/règle/sélecteur avec la preuve la plus sévère ; un budget global et des caps par famille préservent les défauts les plus utiles. Chaque nouvelle route visitée est auditée automatiquement et rejoint l’historique de session ; une réanalyse remplace seulement cette route. Les plafonds atteints sont visibles et exportés.
 
-Le runner local complète désormais l’analyse statique avec huit familles de mesures runtime sur le viewport actif. Son message est à nouveau borné et assaini dans le renderer, car le JavaScript du projet reste une entrée non fiable.
+Le runner local complète désormais l’analyse statique avec des mesures runtime alignées et localisables. Les petites cibles sont regroupées par commande parente et ne sont signalées que si leur espacement rend l’activation ambiguë ; les carrousels, labels visuellement masqués et couleurs décoratives de marque sont exclus des faux positifs connus. Son message est à nouveau borné et assaini dans le renderer, car le JavaScript du projet reste une entrée non fiable.
+
+La génération clair/sombre suit une politique de refus prudent : elle exige des rôles fond et texte résolvables, vérifie les contrastes de la palette et ne modifie ni images, ni filtres, ni accents de marque. Si ces garanties manquent, aucune variante n’est produite.
 
 Cette méthode détecte des incohérences mesurables, mais pas toutes les fautes de direction artistique. Sans maquette ou baseline approuvée, Responsiver ne peut pas savoir si une composition volontaire est « belle ». L’assistant local peut commenter une capture avec un modèle multimodal compatible, mais son avis reste probabiliste et non bloquant.
 

@@ -34,8 +34,8 @@ const server = createServer((request, response) => {
   }
   response.setHeader('content-type', 'text/html; charset=utf-8')
   response.end(`<!doctype html><html lang="fr"><head><title>Audit distant contrôlé</title><style>
-    body{margin:0;background:#fff;color:#111}.copy{font-size:10px;line-height:11px;width:260px}.wide{width:900px;height:20px}
-  </style></head><body><p class="copy">Ce paragraphe volontairement petit permet de vérifier la lisibilité typographique mobile avec une preuve mesurée.</p><div class="wide">Débordement contrôlé</div></body></html>`)
+    body{margin:0;background:#fff;color:#111}.fixture-nav{width:100%}.fixture-nav ul{display:flex;gap:24px;min-width:1600px;margin:0;padding:12px;list-style:none}.copy{font-size:10px;line-height:11px;width:260px}.wide{width:900px;height:20px}
+  </style></head><body><nav class="fixture-nav" aria-label="Navigation de test"><ul><li><a href="#un">Un</a></li><li><a href="#deux">Deux</a></li><li><a href="#trois">Trois</a></li></ul></nav><p class="copy">Ce paragraphe volontairement petit permet de vérifier la lisibilité typographique mobile avec une preuve mesurée.</p><div class="wide">Débordement contrôlé</div></body></html>`)
 })
 
 await new Promise((resolve, reject) => {
@@ -75,6 +75,7 @@ try {
 
   await page.getByText('Viewport mobile non déclaré').first().waitFor({ state: 'visible' })
   await page.getByText('Texte difficile à lire sur mobile').first().waitFor({ state: 'visible' })
+  await page.getByText('Navigation déséquilibrée à cette largeur').first().waitFor({ state: 'visible' })
   assert.match(await page.locator('.activity-bar').textContent(), /constats cumulés · 5 largeurs/)
 
   const auditLimits = await page.evaluate(() => window.responsiver.auditRemote([

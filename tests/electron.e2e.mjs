@@ -97,6 +97,14 @@ try {
     assert.equal(await page.getByRole('button', { name: 'Exporter une copie' }).isDisabled(), true)
   }
 
+  const rail = page.locator('.app-shell')
+  await page.getByRole('button', { name: 'Replier le menu latéral' }).click()
+  await page.waitForFunction(() => document.querySelector('.app-shell')?.classList.contains('is-rail-collapsed'))
+  assert.equal(await page.getByRole('button', { name: 'Laboratoire', exact: true }).isVisible(), true)
+  await page.getByRole('button', { name: 'Déployer le menu latéral' }).click()
+  assert.equal(await rail.evaluate((element) => element.classList.contains('is-rail-collapsed')), false)
+  console.log('E2E · rail latéral repliable et navigation accessible')
+
   await page.getByLabel('Chemin local').fill(incompleteRoot)
   await page.locator('.path-bar').getByRole('button', { name: 'Ouvrir' }).click()
   const readinessCard = page.locator('.readiness-card')
@@ -107,15 +115,15 @@ try {
   await dismissToast()
   await page.locator('.projects-page').screenshot({ path: join(root, 'output', 'playwright', 'electron-import-diagnostic.png'), animations: 'disabled' })
   await page.getByRole('button', { name: 'Voir le diagnostic' }).click()
-  await page.locator('.preview-diagnostic').waitFor({ state: 'visible' })
+  await page.locator('.stage-canvas .preview-diagnostic').waitFor({ state: 'visible' })
   assert.equal(await page.locator('.stage-canvas iframe').count(), 0)
-  assert.match(await page.locator('.preview-diagnostic').textContent(), /runner reste arrêté/)
+  assert.match(await page.locator('.stage-canvas .preview-diagnostic').textContent(), /runner reste arrêté/)
   await page.getByRole('button', { name: 'Projets', exact: true }).click()
   console.log('E2E · projet incomplet diagnostiqué sans écran blanc silencieux')
 
   await page.getByLabel('Chemin local').fill(runtimeBlankRoot)
   await page.locator('.path-bar').getByRole('button', { name: 'Ouvrir' }).click()
-  const runtimeDiagnostic = page.locator('.preview-diagnostic')
+  const runtimeDiagnostic = page.locator('.stage-canvas .preview-diagnostic')
   await runtimeDiagnostic.waitFor({ state: 'visible', timeout: 8_000 })
   assert.match(await runtimeDiagnostic.textContent(), /aucun contenu visible n’a été produit/)
   assert.match(await runtimeDiagnostic.textContent(), /1 erreur de script ou de ressource/)
@@ -134,7 +142,7 @@ try {
   await pseudoBody.waitFor({ state: 'attached' })
   assert.match(await pseudoBody.evaluate((body) => getComputedStyle(body, '::before').content), /Interface peinte/)
   await page.waitForTimeout(3_000)
-  assert.equal(await page.locator('.preview-diagnostic').count(), 0)
+  assert.equal(await page.locator('.stage-canvas .preview-diagnostic').count(), 0)
   const lateRuntimeAlert = page.locator('.runtime-alert--errors')
   await lateRuntimeAlert.waitFor({ state: 'visible' })
   assert.match(await lateRuntimeAlert.textContent(), /Erreur de montage contrôlée/)
@@ -145,13 +153,13 @@ try {
   await page.locator('.path-bar').getByRole('button', { name: 'Ouvrir' }).click()
   await page.frameLocator('.stage-canvas iframe').first().getByText('Texte visible directement').waitFor({ state: 'visible' })
   await page.waitForTimeout(2_000)
-  assert.equal(await page.locator('.preview-diagnostic').count(), 0)
+  assert.equal(await page.locator('.stage-canvas .preview-diagnostic').count(), 0)
   await page.getByRole('button', { name: 'Projets', exact: true }).click()
   console.log('E2E · texte direct du body reconnu comme contenu réellement peint')
 
   await page.getByLabel('Chemin local').fill(delayedMountRoot)
   await page.locator('.path-bar').getByRole('button', { name: 'Ouvrir' }).click()
-  const delayedDiagnostic = page.locator('.preview-diagnostic')
+  const delayedDiagnostic = page.locator('.stage-canvas .preview-diagnostic')
   await delayedDiagnostic.waitFor({ state: 'visible', timeout: 5_000 })
   await page.frameLocator('.stage-canvas iframe').first().getByText('Interface montée tardivement').waitFor({ state: 'visible', timeout: 6_000 })
   await delayedDiagnostic.waitFor({ state: 'detached', timeout: 3_000 })
@@ -225,8 +233,8 @@ try {
   await waitForActivePath('/journal.html')
   console.log('E2E · navigation réelle multi-page synchronisée')
 
-  const nowrapIssue = page.locator('.issue-item').filter({ hasText: 'Texte forcé sur une ligne' })
-  await nowrapIssue.click()
+  const navigationIssue = page.locator('.issue-item').filter({ hasText: 'Navigation déséquilibrée à cette largeur' })
+  await navigationIssue.click()
   const beforeAfter = page.locator('.before-after-grid')
   await beforeAfter.waitFor({ state: 'visible' })
   assert.equal(await beforeAfter.locator('iframe').count(), 2)
@@ -242,16 +250,16 @@ try {
   await afterDocument.locator(revealSelector).waitFor({ state: 'attached' })
   const beforeNavigationStyle = await beforeDocument.locator('.site-nav').evaluate((element) => ({
     minWidth: getComputedStyle(element).minWidth,
-    whiteSpace: getComputedStyle(element).whiteSpace
+    overflowX: getComputedStyle(element).overflowX
   }))
   const afterNavigationStyle = await afterDocument.locator('.site-nav').evaluate((element) => ({
     minWidth: getComputedStyle(element).minWidth,
-    whiteSpace: getComputedStyle(element).whiteSpace
+    overflowX: getComputedStyle(element).overflowX
   }))
   assert.equal(beforeNavigationStyle.minWidth, '720px')
-  assert.equal(afterNavigationStyle.minWidth, '720px')
-  assert.equal(beforeNavigationStyle.whiteSpace, 'nowrap')
-  assert.equal(afterNavigationStyle.whiteSpace, 'normal')
+  assert.equal(afterNavigationStyle.minWidth, '0px')
+  assert.equal(beforeNavigationStyle.overflowX, 'visible')
+  assert.equal(afterNavigationStyle.overflowX, 'auto')
   assert.match(await page.locator('.comparison-pane--after header').textContent(), /Proposition non validée/)
   await page.screenshot({ path: join(root, 'output', 'playwright', 'electron-lab.png'), fullPage: true })
   console.log('E2E · constat localisé et avant/après isolé vérifié')
@@ -265,13 +273,13 @@ try {
   await decision.waitFor({ state: 'detached' })
   await page.locator('.toast').filter({ hasText: 'proposition a été écartée' }).waitFor({ state: 'visible' })
   await dismissToast()
-  assert.equal(await nowrapIssue.evaluate((element) => element.classList.contains('is-accepted')), false)
+  assert.equal(await navigationIssue.evaluate((element) => element.classList.contains('is-accepted')), false)
 
-  await nowrapIssue.click()
+  await navigationIssue.click()
   await beforeAfter.waitFor({ state: 'visible' })
   await afterDocument.locator(revealSelector).waitFor({ state: 'attached' })
   await page.locator('.proposal-decision').getByRole('button', { name: 'Valider' }).click()
-  await page.waitForFunction(() => document.querySelector('.issue-item.is-accepted')?.textContent?.includes('Texte forcé sur une ligne'))
+  await page.waitForFunction(() => document.querySelector('.issue-item.is-accepted')?.textContent?.includes('Navigation déséquilibrée à cette largeur'))
   assert.match(await page.locator('.proposal-decision').textContent(), /Validé dans le plan/)
   await dismissToast()
   console.log('E2E · rejet puis validation explicite du correctif vérifiés')
@@ -338,7 +346,7 @@ try {
   await page.keyboard.press('ArrowDown')
   await page.waitForFunction((previousHeight) => Number(document.querySelectorAll('.dimension-fields input')[1]?.value) === previousHeight - 4, heightAfterSouthKey)
   await page.getByRole('button', { name: 'Ajuster à la zone' }).click()
-  await page.getByRole('button', { name: 'Pivoter les dimensions' }).click()
+  await page.getByRole('button', { name: 'Intervertir la largeur et la hauteur' }).click()
   await page.getByRole('button', { name: 'Afficher la prévisualisation en plein écran' }).click()
   await page.locator('.stage-column.is-fullscreen').waitFor({ state: 'visible' })
   const fullscreenDialog = page.getByRole('dialog', { name: 'Prévisualisation en plein écran' })
@@ -366,7 +374,7 @@ try {
   console.log('E2E · premier staging construit depuis les choix validés')
 
   // Toute mutation du plan invalide immédiatement le staging et verrouille l'export.
-  await page.getByRole('button', { name: 'Retirer Texte forcé sur une ligne' }).click()
+  await page.locator('.fix-list article').filter({ hasText: 'stabilise le menu' }).getByRole('button').click()
   await page.locator('.staging-summary').waitFor({ state: 'detached' })
   assert.equal(await page.getByRole('button', { name: /^Staging/ }).isDisabled(), true)
   await assertExportUnavailable()
@@ -399,7 +407,7 @@ try {
   }, { stagingOrigin: stagingOriginBeforeInstruction, originalOrigin: sourceOrigin })
   await waitForPreviewState((state) => state.generatedInstructions, 'La proposition issue de la conversation')
   await instructionDecision.getByRole('button', { name: 'Valider' }).click()
-  await page.locator('.message--system').filter({ hasText: 'Ajustement validé et ajouté au plan' }).waitFor({ state: 'visible' })
+  await page.locator('.message--system').filter({ hasText: 'Ajustement validé et ajouté au plan' }).last().waitFor({ state: 'visible' })
   assert.equal(await page.getByRole('button', { name: /^Staging/ }).isDisabled(), true)
   await dismissToast()
   await page.getByRole('tab', { name: /Correctifs/ }).click()

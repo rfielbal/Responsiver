@@ -566,7 +566,10 @@ const bridge = `<style data-responsiver-bridge-style>
         const overlap = overlapOf(item.rect, other.rect);
         return overlap.width > 4 && overlap.height > 4;
       }));
-      const overflowAmount = Math.max(0, -candidate.rect.left, candidate.rect.right - viewportWidth, candidate.rect.width - viewportWidth);
+      const contentLeft = Math.min(candidate.rect.left, ...items.map((item) => item.rect.left));
+      const contentRight = Math.max(candidate.rect.right, ...items.map((item) => item.rect.right));
+      const intrinsicOverflow = Math.max(0, candidate.element.scrollWidth - candidate.element.clientWidth);
+      const overflowAmount = Math.max(0, -contentLeft, contentRight - viewportWidth, candidate.rect.width - viewportWidth, intrinsicOverflow);
       const extendsViewport = overflowAmount > 4 && !/^(?:auto|scroll)$/.test(candidate.style.overflowX);
       const awkwardWrap = viewport.mobile && rows.length > 1 && items.length >= 5 && lastWidth / firstWidth < .62;
       const unreadable = minimumFont < 12;

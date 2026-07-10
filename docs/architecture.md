@@ -44,11 +44,11 @@ Un verrou Electron d’instance unique évite deux consommateurs concurrents pou
 
 Une sélection peut être un dossier ou un fichier `.html/.htm`. L’ouverture suit une transaction locale : validation canonique, inventaire, routes, analyse responsive, readiness, puis démarrage du runner.
 
-L’analyseur privilégie l’entrée racine et pénalise les démos, tests, documentations et Storybook. Si l’entrée est un shell de framework, il recherche prudemment une sortie existante dans `dist`, `build`, `out` ou `.output/public`. Un simple `public/index.html` de framework n’est pas considéré comme un build final.
+L’analyseur privilégie l’entrée racine et sort les fragments, démos, tests, exemples et Storybook des routes principales. Une page auxiliaire reste ouvrable si l’utilisateur la choisit explicitement. Si l’entrée est un shell de framework, il recherche prudemment une sortie existante dans `dist`, `build`, `out` ou `.output/public`. Un simple `public/index.html` de framework n’est pas considéré comme un build final.
 
 Le verdict `ready`, `degraded`, `blocked` ou `needs-build` combine structure HTML, contenu visible potentiel, scripts réellement exécutables, CSS vide, médias orphelins, fraîcheur de l’artefact et exhaustivité de l’inventaire. Un projet bloqué n’obtient ni runner, ni proposition, ni staging.
 
-L’analyse statique conserve les routes et feuilles CSS effectivement liées. Les règles déterministes couvrent notamment viewport absent, `min-width` rigide, largeurs fixes importantes, `white-space: nowrap` et ressources externes incompatibles avec la politique locale. PostCSS structure les déclarations ; Sass, Less et CSS non reliés sont signalés mais pas réécrits aveuglément.
+L’analyse statique conserve les routes et feuilles CSS effectivement liées. Les règles déterministes couvrent notamment viewport absent, `min-width` rigide, largeurs fixes importantes, `white-space: nowrap` réellement risqué et ressources externes incompatibles avec la politique locale. Les mêmes déclarations partagées par plusieurs routes sont regroupées. La restitution est priorisée et bornée à 18 constats par route et 60 au total ; l’analyse signale honnêtement une troncature. PostCSS structure les déclarations ; Sass, Less et CSS non reliés sont signalés mais pas réécrits aveuglément.
 
 ## Runner et preview locale
 
@@ -59,7 +59,7 @@ Le HTML reçoit en mémoire un bridge sans accès Node pour :
 - navigation interne, historique et rechargement ;
 - redirection des fenêtres internes dans l’iframe ;
 - thème et mutations DOM ;
-- audit runtime borné de huit familles de défauts visuels ;
+- audit runtime borné des défauts visuels et regroupement des répétitions par conteneur ;
 - smoke-test du contenu réellement peint, y compris pseudo-éléments et Shadow DOM ouverts ;
 - centrage et mise en évidence d’un sélecteur.
 
@@ -94,19 +94,22 @@ Les règles implémentées sont :
 - débordement horizontal du viewport ou d’un conteneur ;
 - contenu coupé par `overflow` ;
 - texte probablement tronqué ;
-- cible tactile inférieure au seuil ;
+- navigation qui se chevauche, devient illisible ou se répartit en rangées déséquilibrées ;
+- collisions entre contenus frères, densité de commandes et contenu majoritairement hors zone utile ;
+- échelle typographique disproportionnée, notamment quand les métriques d’une police gonflent le titre ;
+- groupe de cibles tactiles réellement ambigu (les petits liens isolés et suffisamment espacés ne sont pas signalés) ;
 - élément fixe occupant une part obstructive du viewport ;
 - image non chargée ou déformée ;
 - contraste textuel calculable sous le seuil ;
 - erreur JavaScript capturée pendant la session.
 
-Chaque constat contient règle, route complète, viewport, sélecteur, rectangle, styles bornés, mesures et confiance. La troncature, le nombre de nœuds inspectés et les plafonds réels sont propagés au renderer. Un clic restaure d’abord la route, puis demande au `WebContentsView` de chercher le sélecteur, centrer l’élément et poser un contour temporaire ; l’interface indique honnêtement si le DOM a changé.
+Chaque constat contient règle, route complète, viewport, sélecteur, rectangle, styles bornés, mesures et confiance. Un même couple route/règle/sélecteur observé sur plusieurs tailles ne produit qu’un constat : il conserve la preuve la plus sévère et la liste des viewports touchés. La restitution distante est plafonnée à 20 constats par route, avec un cap par famille pour empêcher une avalanche de contrastes ou de débordements d’évincer une collision ou une navigation défaillante. La troncature, le nombre de nœuds inspectés et les plafonds réels sont propagés au renderer. Un clic restaure d’abord la route, puis demande au `WebContentsView` de chercher le sélecteur, centrer l’élément et poser un contour temporaire ; l’interface indique honnêtement si le DOM a changé.
 
 Une route nouvellement visitée déclenche automatiquement son propre balayage. Le processus principal remplace un ancien résultat de cette route, conserve les autres et construit ainsi un historique de session exportable. Il ne suit cependant aucun lien de lui-même : la couverture correspond aux routes effectivement visitées.
 
 Le moteur mesure des défauts objectifs. Il ne compare pas la page à une maquette, ne note pas son esthétique et ne lance ni Lighthouse ni axe-core. Une capture bornée de la dernière route auditée peut être fournie à l’assistant local.
 
-Le runner local utilise un collecteur distinct mais aligné : `TreeWalker` borné, déduplication par règle/sélecteur, huit règles runtime, preuves géométriques et seuils explicites. Le renderer traite même ce message comme non fiable, remplace ses dimensions par le viewport choisi et rejette règles, routes ou volumes hors contrat avant de les afficher.
+Le runner local utilise un collecteur distinct mais aligné : `TreeWalker` borné, déduplication par règle/sélecteur ou cluster parent, preuves géométriques et seuils explicites. Quatre sondes isolées mesurent la route active à 393 × 852, 768 × 1024, 1024 × 768 et 1440 × 900 CSS px ; leurs répétitions deviennent un seul constat avec la liste des formats touchés. Les carrousels, labels réservés aux lecteurs d’écran, contenus de marque décoratifs et liens tactiles correctement espacés sont exclus des faux positifs connus. Le renderer traite même ce message comme non fiable, remplace ses dimensions par le viewport choisi et rejette règles, routes ou volumes hors contrat avant de les afficher.
 
 ## Proposition déterministe et staging
 
@@ -117,7 +120,7 @@ Le pipeline historique conserve quatre étapes :
 3. **Accepter ou écarter** enregistre la décision humaine.
 4. **Construire le staging** reconstruit uniquement les constats et thèmes acceptés.
 
-Source, proposition et staging utilisent des origines distinctes. Le transformeur génère overlays, CSS complémentaire si nécessaire, patch unifié et empreintes SHA-256. Une proposition n’est pas directement exportable.
+Source, proposition et staging utilisent des origines distinctes. Le transformeur génère overlays, CSS complémentaire si nécessaire, patch unifié et empreintes SHA-256. Une variante de thème n’est générée que si un couple de rôles fond/texte fiable est résolu et si les contrastes texte/fond, texte/surface et texte atténué/fond passent les seuils. Les accents de marque, images et filtres ne sont jamais recolorés automatiquement ; à faible confiance, le moteur refuse la variante au lieu de produire un rendu destructeur. Une proposition n’est pas directement exportable.
 
 Avant tout export, les sources sont re-hachées. Un changement concurrent invalide le staging. Les exports de fichiers, copie ou patch restent hors de la racine source et sont protégés contre traversées et substitutions par lien symbolique.
 

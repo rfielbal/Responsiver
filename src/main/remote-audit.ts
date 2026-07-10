@@ -580,7 +580,10 @@ const REMOTE_AUDIT_COLLECTOR_TEMPLATE = String.raw`(() => {
       const overlap = overlapOf(item.rect, other.rect);
       return overlap.width > 4 && overlap.height > 4;
     }));
-    const overflowAmount = Math.max(0, -candidate.rect.left, candidate.rect.right - viewport.width, candidate.rect.width - viewport.width);
+    const contentLeft = Math.min(candidate.rect.left, ...items.map((item) => item.rect.left));
+    const contentRight = Math.max(candidate.rect.right, ...items.map((item) => item.rect.right));
+    const intrinsicOverflow = Math.max(0, candidate.element.scrollWidth - candidate.element.clientWidth);
+    const overflowAmount = Math.max(0, -contentLeft, contentRight - viewport.width, candidate.rect.width - viewport.width, intrinsicOverflow);
     const extendsViewport = overflowAmount > 4 && !/^(?:auto|scroll)$/.test(candidate.style.overflowX);
     const awkwardWrap = options.mobile && rows.length > 1 && items.length >= 5 && lastWidth / firstWidth < 0.62;
     const unreadable = minimumFont < 12;
