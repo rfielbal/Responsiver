@@ -10,7 +10,7 @@ Le flux est opérationnel lorsque ses trois éléments sont en place :
 
 Le connecteur ne démarre pas Responsiver. Il valide la demande et la dépose dans une file locale privée. L’application surveille cette file, ouvre l’URL dans une session isolée et place sa fenêtre au premier plan.
 
-Un message **Page transmise** confirme uniquement l’écriture dans cette file. Il ne confirme ni le chargement du site, ni la réussite de son audit.
+Un message **Demande validée localement** confirme uniquement la validation par le host et l’écriture dans cette file. La réponse porte explicitement `desktopAcknowledged: false` : elle ne confirme ni le chargement du site, ni la réussite de son audit.
 
 ## Installation depuis le dépôt
 
@@ -33,7 +33,7 @@ node native-host/register.mjs \
 
 8. Relancer la même commande avec `--format manifest`, créer manuellement le fichier à l’emplacement indiqué et y copier ce JSON.
 9. Fermer puis rouvrir Chrome.
-10. Garder Responsiver ouvert, visiter une page HTTP(S), ouvrir l’extension et cliquer sur **Ouvrir dans Responsiver**.
+10. Garder Responsiver ouvert, visiter une page HTTPS publique ou un localhost HTTP(S), ouvrir l’extension et cliquer sur **Ouvrir dans Responsiver**.
 
 Le script `register.mjs` est un dry-run : il n’écrit aucun fichier, ne modifie aucun registre et n’installe rien.
 
@@ -73,7 +73,7 @@ Les sources sont embarquées pour audit et développement, mais Chrome attend un
 
 Après un clic explicite, l’extension transmet localement :
 
-- l’URL complète HTTP(S), y compris query string et fragment ;
+- l’URL HTTPS complète, ou HTTP(S) sur loopback, y compris query string et fragment ;
 - le titre de l’onglet ;
 - la taille signalée par Chrome ;
 - la densité de pixels de la fenêtre ;
@@ -92,17 +92,17 @@ La demande attend dans le dossier de données de Responsiver :
 - nom aléatoire ne contenant aucune partie de l’URL ;
 - maximum de 128 demandes ;
 - expiration après dix minutes ;
-- suppression après traitement ou rejet, sans journal d’URL.
+- purge au prochain écrit du host, ou suppression par l’application après traitement ou rejet, sans journal d’URL.
 
 ## Modèle de menace et limites
 
 - `activeTab` n’est accordé qu’après le clic sur l’extension.
 - `allowed_origins` limite le host à l’identifiant Chrome déclaré.
 - Chaque message est encadré, limité à 64 Kio et revalidé deux fois : dans le host puis dans Electron.
-- Seules les URL HTTP(S) sans identifiants intégrés sont admises.
+- HTTPS est obligatoire pour Internet ; HTTP(S) reste limité à la boucle locale et les identifiants intégrés sont refusés.
 - Le host n’exécute aucun shell, ne reçoit aucune URL dans `argv` et ne contacte aucun serveur.
 - Une extension installée depuis un autre chemin peut obtenir un nouvel identifiant et sera refusée jusqu’à la mise à jour manuelle du manifeste.
-- Une réponse `queued` peut expirer si Responsiver n’est pas ouvert dans les dix minutes.
+- Une réponse `validated + queued` signifie « validée et écrite », jamais « chargée par le desktop » ; elle peut expirer si Responsiver n’est pas ouvert dans les dix minutes.
 - Le fonctionnement actuel est adapté au développement et aux utilisateurs techniques, pas encore à une distribution Chrome Web Store grand public.
 
 ## Avant une distribution publique

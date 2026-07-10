@@ -35,7 +35,9 @@ export async function handleNativeRequest(rawRequest, options = {}) {
       version: PROTOCOL_VERSION,
       requestId: request.requestId,
       ok: true,
+      validated: true,
       delivery: 'queued',
+      desktopAcknowledged: false,
       spoolId: persisted.spoolId
     }
   } catch (error) {

@@ -21,6 +21,7 @@ extraResources:
     filter:
       - host.mjs
       - protocol.mjs
+      - url-policy.mjs
       - spool.mjs
       - register.mjs
       - README.md
@@ -31,6 +32,10 @@ extraResources:
     to: NOTICE
   - from: THIRD_PARTY_NOTICES.md
     to: THIRD_PARTY_NOTICES.md
+  - from: PRIVACY.md
+    to: PRIVACY.md
+  - from: SECURITY.md
+    to: SECURITY.md
 
 mac:
   icon: build/icon.png

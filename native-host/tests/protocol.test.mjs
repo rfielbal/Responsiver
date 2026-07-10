@@ -81,8 +81,8 @@ test('refuse les propriétés inconnues', () => {
   )
 })
 
-test('refuse les protocoles non web et les identifiants intégrés', () => {
-  for (const url of ['file:///etc/passwd', 'javascript:alert(1)', 'https://user:secret@example.com']) {
+test('refuse les protocoles non web, HTTP public et les identifiants intégrés', () => {
+  for (const url of ['file:///etc/passwd', 'javascript:alert(1)', 'http://example.com', 'https://user:secret@example.com']) {
     const request = validRequest({
       payload: { ...validRequest().payload, url }
     })
@@ -90,6 +90,13 @@ test('refuse les protocoles non web et les identifiants intégrés', () => {
       assert.ok(error.code === 'INVALID_URL' || error.code === 'FORBIDDEN_URL')
       return true
     })
+  }
+})
+
+test('conserve HTTP uniquement pour les hôtes de boucle locale', () => {
+  for (const url of ['http://localhost:5173', 'http://app.localhost:3000', 'http://127.0.0.42:8080', 'http://[::1]:9000']) {
+    const result = validateOpenUrlRequest(validRequest({ payload: { ...validRequest().payload, url } }))
+    assert.equal(new URL(result.payload.url).protocol, 'http:')
   }
 })
 

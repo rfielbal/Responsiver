@@ -18,7 +18,7 @@ L’extension ne demande pas `tabs`, `scripting`, `<all_urls>`, les cookies, l�
 5. Copier l’identifiant de 32 caractères affiché sous l’extension.
 6. Préparer manuellement le Native Messaging Host en suivant [`native-host/README.md`](../../native-host/README.md).
 7. Recharger Chrome après l’enregistrement du connecteur.
-8. Ouvrir Responsiver, puis cliquer sur l’extension depuis une page HTTP ou HTTPS.
+8. Ouvrir Responsiver, puis cliquer sur l’extension depuis une page HTTPS publique ou un localhost HTTP(S).
 
 L’interface peut être testée sans connecteur. Le bouton affichera alors clairement « Application introuvable ».
 
@@ -28,7 +28,7 @@ Le paquet desktop embarque également ces fichiers sous `resources/companion/chr
 
 Le message local contient uniquement :
 
-- l’URL HTTP ou HTTPS active, y compris son chemin, sa query string et son fragment ;
+- l’URL HTTPS active, ou HTTP(S) si elle reste sur la boucle locale, y compris son chemin, sa query string et son fragment ;
 - le titre de l’onglet ;
 - la largeur et la hauteur disponibles signalées par Chrome ;
 - la densité de pixels de la fenêtre de l’extension ;
@@ -40,11 +40,11 @@ Le contenu DOM, le texte de la page, les formulaires, les cookies, les mots de p
 
 ## États affichés
 
-- **Page transmise** : le connecteur a validé et déposé la demande dans la file privée de Responsiver ;
+- **Demande validée localement** : le host a revalidé puis déposé la demande ; l’application ne l’a pas encore acquittée ;
 - **Application introuvable** : le Native Messaging Host n’est pas installé ou n’autorise pas cette extension ;
-- **Ouverture impossible** : la page n’est pas HTTP(S), le protocole est incompatible ou le connecteur a refusé la demande.
+- **Ouverture impossible** : un site public n’est pas en HTTPS, le protocole est incompatible ou le connecteur a refusé la demande.
 
-Le connecteur ne passe jamais l’URL dans une ligne de commande. Il ne lance pas l’application : Responsiver doit être ouvert manuellement. Une demande transmise alors que l’application est fermée reste en attente pendant dix minutes au maximum et sera lue au prochain démarrage dans ce délai.
+Le host répond uniquement après validation et écriture atomique, avec `desktopAcknowledged: false`. Il ne peut pas promettre que la page est déjà ouverte. Il ne passe jamais l’URL dans une ligne de commande et ne lance pas l’application : Responsiver doit être ouvert manuellement. Une demande transmise alors que l’application est fermée reste utilisable pendant dix minutes. Les anciennes demandes sont purgées au prochain écrit ou démarrage de l’application.
 
 ## Publication
 

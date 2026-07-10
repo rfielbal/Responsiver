@@ -7,9 +7,10 @@
  * validated message to the local native host.
  */
 
+import { normalizeCompanionUrl } from './url-policy.mjs'
+
 const NATIVE_HOST = 'fr.responsiver.desktop'
 const PROTOCOL_VERSION = 1
-const MAX_URL_LENGTH = 8192
 const MAX_TITLE_LENGTH = 256
 
 const ERROR_CODES = Object.freeze({
@@ -36,31 +37,18 @@ function normalizeTitle(value) {
   return value.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, MAX_TITLE_LENGTH)
 }
 
-function normalizeUrl(value) {
-  if (typeof value !== 'string' || value.length === 0 || value.length > MAX_URL_LENGTH) return null
-
-  try {
-    const parsed = new URL(value)
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
-    if (parsed.username || parsed.password) return null
-    return parsed.href
-  } catch {
-    return null
-  }
-}
-
 function toBoundedInteger(value, fallback, minimum, maximum) {
   return Number.isFinite(value) ? Math.min(maximum, Math.max(minimum, Math.round(value))) : fallback
 }
 
 function buildNativeRequest(tab, devicePixelRatio) {
-  const url = normalizeUrl(tab?.url)
+  const url = normalizeCompanionUrl(tab?.url)
   if (!url) {
     return {
       ok: false,
       error: {
         code: ERROR_CODES.FORBIDDEN_URL,
-        message: 'Seules les pages HTTP et HTTPS peuvent être ouvertes.'
+        message: 'Utilisez HTTPS pour un site public ; HTTP reste autorisé uniquement sur localhost.'
       }
     }
   }
@@ -147,11 +135,24 @@ function sendToNativeHost(request) {
         return
       }
 
+      if (response.validated !== true || response.delivery !== 'queued' || response.desktopAcknowledged !== false) {
+        resolve({
+          ok: false,
+          error: {
+            code: ERROR_CODES.PROTOCOL_ERROR,
+            message: 'Le connecteur n’a pas confirmé la validation locale de la demande.'
+          }
+        })
+        return
+      }
+
       resolve({
         ok: true,
         result: {
           requestId: request.requestId,
-          delivery: response.delivery === 'queued' ? 'queued' : 'accepted'
+          validated: true,
+          delivery: 'queued',
+          desktopAcknowledged: false
         }
       })
     })

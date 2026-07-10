@@ -49,9 +49,11 @@ test('traite un échange complet stdin/stdout et dépose la demande', async () =
       version: responses[0].version,
       requestId: responses[0].requestId,
       ok: responses[0].ok,
-      delivery: responses[0].delivery
+      validated: responses[0].validated,
+      delivery: responses[0].delivery,
+      desktopAcknowledged: responses[0].desktopAcknowledged
     },
-    { version: 1, requestId: request.requestId, ok: true, delivery: 'queued' }
+    { version: 1, requestId: request.requestId, ok: true, validated: true, delivery: 'queued', desktopAcknowledged: false }
   )
   assert.match(responses[0].spoolId, /^[0-9a-f-]{36}$/)
 

@@ -6,13 +6,13 @@ Ce dossier contient un pont Node.js minimal entre le compagnon Chrome et Respons
 
 - schéma `open-url` fermé : les propriétés inconnues sont refusées ;
 - messages entrants et sortants limités à 64 Kio ;
-- URL limitées à HTTP(S), sans identifiants intégrés ;
+- HTTPS obligatoire pour Internet ; HTTP(S) limité à localhost et aux adresses loopback, sans identifiants intégrés ;
 - dimensions, DPR, titre, date et UUID bornés et validés ;
 - aucune commande shell ;
 - aucune URL placée dans `argv`, un protocole personnalisé ou une variable d’environnement ;
 - aucun réseau ;
 - écriture atomique d’un fichier privé `0600` dans un dossier `0700` sur POSIX ;
-- file plafonnée à 128 demandes afin d’éviter une croissance illimitée ;
+- file plafonnée à 128 demandes et purge des demandes expirées avant chaque nouvel écrit ;
 - seul l’identifiant Chrome déclaré dans `allowed_origins` peut appeler le host.
 
 Sur Windows, les modes POSIX n’existent pas : le dossier est créé sous `%APPDATA%` et hérite des ACL du profil utilisateur. Le paquet desktop devra vérifier ou renforcer ces ACL lors de son installation.
@@ -35,7 +35,7 @@ Node.js 22 ou supérieur :
 node --test native-host/tests/*.test.mjs
 ```
 
-Les tests couvrent le framing fragmenté, la limite de taille, le schéma strict, les URL interdites, l’écriture atomique et un échange complet avec le processus host. Ils n’installent rien dans Chrome.
+Les tests couvrent le framing fragmenté, la limite de taille, le schéma strict, la politique HTTPS/loopback partagée avec l’extension, la purge, l’écriture atomique et un échange complet avec le processus host. Ils n’installent rien dans Chrome.
 
 ## Préparer le manifeste sans modifier le système
 
@@ -90,7 +90,7 @@ Responsiver consomme la file lorsqu’il est ouvert. Le consommateur desktop :
 6. ouvre une session URL isolée, puis place la fenêtre au premier plan ;
 7. supprime la demande après son traitement, sans journaliser son URL.
 
-Le host répond `delivery: "queued"` dès que l’écriture locale est terminée. Cette réponse ne signifie pas encore que la page a été chargée. Le connecteur ne lance pas l’application et ne passe jamais l’URL en argument : ouvrez Responsiver manuellement. Une demande expire après dix minutes ; si l’application est démarrée dans ce délai, elle la consomme automatiquement.
+Le host répond avec `validated: true`, `delivery: "queued"` et `desktopAcknowledged: false` dès que la validation et l’écriture locale sont terminées. Cette réponse ne signifie pas que la page a été chargée. Le connecteur ne lance pas l’application et ne passe jamais l’URL en argument : ouvrez Responsiver manuellement. Une demande expire après dix minutes ; elle est supprimée par l’application à sa prochaine lecture ou par le host avant un nouvel écrit.
 
 Les sources du connecteur sont incluses dans les paquets sous `resources/companion/native-host`, mais elles ne constituent pas encore un exécutable autonome destiné au grand public. macOS et Linux exigent actuellement Node.js 22 accessible par le processus Chrome. Windows exige un binaire natif qui n’est pas encore produit. Le guide du dépôt `docs/compagnon-chrome.md` détaille ces limites.
 

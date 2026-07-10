@@ -1,8 +1,9 @@
 import { TextDecoder } from 'node:util'
+import { MAX_COMPANION_URL_LENGTH, normalizeNativeHostUrl } from './url-policy.mjs'
 
 export const PROTOCOL_VERSION = 1
 export const MAX_MESSAGE_BYTES = 64 * 1024
-export const MAX_URL_LENGTH = 8192
+export const MAX_URL_LENGTH = MAX_COMPANION_URL_LENGTH
 export const MAX_TITLE_LENGTH = 256
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -34,31 +35,11 @@ function normalizeTitle(value) {
 }
 
 function normalizeUrl(value) {
-  if (
-    typeof value !== 'string' ||
-    value.length === 0 ||
-    value.length > MAX_URL_LENGTH ||
-    CONTROL_CHARACTERS.test(value)
-  ) {
-    throw new ProtocolError('INVALID_URL', 'L’URL est invalide.')
+  const normalized = normalizeNativeHostUrl(value)
+  if (!normalized) {
+    throw new ProtocolError('FORBIDDEN_URL', 'HTTPS est requis pour Internet ; HTTP reste limité à la boucle locale.')
   }
-
-  let parsed
-  try {
-    parsed = new URL(value)
-  } catch {
-    throw new ProtocolError('INVALID_URL', 'L’URL est invalide.')
-  }
-
-  if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:') || parsed.username || parsed.password) {
-    throw new ProtocolError('FORBIDDEN_URL', 'Seules les URL HTTP et HTTPS sans identifiants sont acceptées.')
-  }
-
-  if (parsed.href.length > MAX_URL_LENGTH) {
-    throw new ProtocolError('INVALID_URL', 'L’URL est trop longue.')
-  }
-
-  return parsed.href
+  return normalized
 }
 
 function validateViewport(value) {

@@ -58,12 +58,10 @@ button.addEventListener('click', async () => {
     if (response?.ok) {
       setStatus(
         'success',
-        'Page transmise',
-        response.result?.delivery === 'queued'
-          ? 'La demande est prête. Ouvrez Responsiver si l’application n’est pas déjà lancée.'
-          : 'Responsiver prépare le laboratoire avec cet onglet.'
+        'Demande validée localement',
+        'Le connecteur l’a placée dans la file privée. Ouvrez Responsiver pour confirmer le chargement de la page.'
       )
-      buttonLabel.textContent = 'Transmis à Responsiver'
+      buttonLabel.textContent = 'Mise en attente locale'
       return
     }
 

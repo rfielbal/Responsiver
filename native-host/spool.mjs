@@ -4,6 +4,7 @@ import { homedir } from 'node:os'
 import path from 'node:path'
 
 export const MAX_PENDING_REQUESTS = 128
+export const MAX_PENDING_AGE_MS = 10 * 60 * 1_000
 
 export class SpoolError extends Error {
   constructor(code, message) {
@@ -59,18 +60,34 @@ function isPendingRequest(name) {
   return /^open-url-[0-9]{13}-[0-9a-f-]{36}\.json$/i.test(name)
 }
 
+async function purgeExpiredRequests(inboxPath, entries, now) {
+  let pendingCount = 0
+  for (const entry of entries) {
+    if (!isPendingRequest(entry.name)) continue
+    const timestamp = Number(entry.name.split('-').slice(2, 3)[0])
+    const expired = !Number.isFinite(timestamp) || Math.abs(now - timestamp) > MAX_PENDING_AGE_MS
+    if (expired || entry.isSymbolicLink()) {
+      await unlink(path.join(inboxPath, entry.name)).catch(() => undefined)
+      continue
+    }
+    if (entry.isFile()) pendingCount += 1
+  }
+  return pendingCount
+}
+
 export async function persistOpenUrlRequest(request, { inboxPath = resolveInboxPath(), now = Date.now } = {}) {
   await ensurePrivateDirectory(inboxPath)
 
   const entries = await readdir(inboxPath, { withFileTypes: true })
-  const pendingCount = entries.filter((entry) => entry.isFile() && isPendingRequest(entry.name)).length
+  const timestamp = now()
+  if (!Number.isFinite(timestamp)) throw new SpoolError('INVALID_CLOCK', 'L’horloge locale ne permet pas de dater la demande.')
+  const pendingCount = await purgeExpiredRequests(inboxPath, entries, timestamp)
   if (pendingCount >= MAX_PENDING_REQUESTS) {
     throw new SpoolError('QUEUE_FULL', 'Trop de demandes sont déjà en attente dans Responsiver.')
   }
 
   const spoolId = randomUUID()
-  const receivedAt = new Date(now()).toISOString()
-  const timestamp = Date.parse(receivedAt)
+  const receivedAt = new Date(timestamp).toISOString()
   const finalName = `open-url-${timestamp}-${spoolId}.json`
   const temporaryName = `.open-url-${spoolId}.tmp`
   const finalPath = path.join(inboxPath, finalName)

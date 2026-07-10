@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, readdir, stat } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { persistOpenUrlRequest, resolveInboxPath } from '../spool.mjs'
+import { MAX_PENDING_AGE_MS, persistOpenUrlRequest, resolveInboxPath } from '../spool.mjs'
 import { validateOpenUrlRequest } from '../protocol.mjs'
 
 function request() {
@@ -69,4 +69,20 @@ test('refuse un chemin de test relatif', () => {
     () => resolveInboxPath({ env: { RESPONSIVER_EXTENSION_INBOX: './relative' } }),
     { code: 'UNSAFE_INBOX' }
   )
+})
+
+test('purge les demandes expirées lors d’un nouvel écrit, même sans application ouverte', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'responsiver-native-expiry-'))
+  const inboxPath = path.join(root, 'inbox')
+  const now = Date.parse('2026-07-10T12:00:00.000Z')
+  await persistOpenUrlRequest(request(), { inboxPath, now: () => now - MAX_PENDING_AGE_MS - 1 })
+  const staleName = (await readdir(inboxPath))[0]
+  assert.ok(staleName)
+  await writeFile(path.join(inboxPath, 'unrelated.txt'), 'conserver', 'utf8')
+
+  await persistOpenUrlRequest(request(), { inboxPath, now: () => now })
+  const names = await readdir(inboxPath)
+  assert.ok(!names.includes(staleName))
+  assert.ok(names.includes('unrelated.txt'))
+  assert.equal(names.filter((name) => name.startsWith('open-url-')).length, 1)
 })

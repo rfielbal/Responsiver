@@ -69,8 +69,8 @@ Un autre processus local peut tenter d’occuper le port configuré ou un modèl
 - L’extension demande uniquement `activeTab` et `nativeMessaging`, sans `<all_urls>`, cookies, historique ou injection de script.
 - Le host limite l’appelant à l’identifiant présent dans `allowed_origins`.
 - Le protocole Native Messaging utilise un framing borné à 64 Kio et un schéma fermé.
-- Seules les URL HTTP(S) sans identifiants intégrés sont admises.
-- La file est privée sur POSIX, bornée à 128 demandes et ses noms ne contiennent pas l’URL.
+- HTTPS est obligatoire pour Internet ; HTTP(S) est limité à la boucle locale et les identifiants intégrés sont refusés.
+- La file est privée sur POSIX, bornée à 128 demandes, purgée avant chaque nouvel écrit et ses noms ne contiennent pas l’URL.
 - Electron réclame atomiquement les fichiers, refuse symlinks, tailles ou schémas inconnus et supprime les demandes expirées.
 - Le host ne lance aucun shell et ne place jamais l’URL dans `argv`.
 
@@ -87,7 +87,7 @@ Le host ne démarre pas l’application. L’installation manuelle et la dépend
 
 ## Packaging et chaîne de livraison
 
-- `LICENSE`, `NOTICE`, `THIRD_PARTY_NOTICES.md` et les ressources du compagnon sont vérifiés après packaging.
+- `LICENSE`, `NOTICE`, `THIRD_PARTY_NOTICES.md`, `PRIVACY.md`, `SECURITY.md` et les ressources du compagnon sont vérifiés après packaging.
 - Les releases incluent un SBOM SPDX et `SHA256SUMS` couvrant les paquets.
 - La publication refuse une version de tag différente de `package.json`.
 - Le paquet macOS retire les descriptions de permissions inutilisées ; ATS refuse les chargements arbitraires tout en autorisant localhost.

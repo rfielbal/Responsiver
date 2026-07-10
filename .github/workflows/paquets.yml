@@ -45,6 +45,11 @@ jobs:
         run: npm run typecheck
       - name: Tester le moteur local
         run: npm test
+      - name: Tester le connecteur Chrome
+        run: npm run test:native-host
+      - name: Tester la session URL dans Electron
+        if: matrix.system == 'Linux'
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24" npm run test:e2e:remote
       - name: Empaqueter
         run: npm run package
         env:
