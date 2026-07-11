@@ -4,7 +4,7 @@
 
 Responsiver 0.6 élargit le laboratoire local à trois usages cohérents : travailler sur un projet local, auditer une URL publique en lecture seule et inspecter un localhost éventuellement lié à ses sources.
 
-La version ajoute un rendu distant Chromium réellement navigable, un audit visuel sur cinq largeurs, un espace Monaco avec overlays et application explicite, un assistant facultatif connecté uniquement à Ollama ou llama.cpp en local, ainsi qu’un compagnon Chrome minimal. Le laboratoire distingue désormais le rendu du code, consolide les preuves statiques/runtime et ajoute un parcours direct réversible pour les corrections locales simples.
+La version ajoute un rendu distant Chromium réellement navigable, un audit visuel sur cinq largeurs, un inspecteur F12 intégré, un Atelier visuel, un espace Monaco avec overlays et application explicite, un assistant facultatif connecté uniquement à Ollama ou llama.cpp en local, ainsi qu’un compagnon Chrome minimal. Le laboratoire distingue le rendu du code, consolide les preuves statiques/runtime et ajoute des parcours directs réversibles pour les corrections locales simples.
 
 La direction UI conserve sa propre grammaire — rail graphite, papier minéral, accent vermillon, densité d’outil professionnel et panneaux maître/détail — en s’inspirant des principes opérationnels observés dans [Agency Agents](https://github.com/msitarzewski/agency-agents), sans reprendre son code, ses assets ou son identité.
 
@@ -29,6 +29,10 @@ La direction UI conserve sa propre grammaire — rail graphite, papier minéral,
 | Ouvrir un constat dans son contexte | Route exacte, viewport, sélecteur, scroll et contour temporaire | L’interface signale si le sélecteur n’existe plus |
 | Conserver l’audit URL | Agrégation de session, synthèse copiable et rapport JSON | Aucune persistance sans export explicite |
 | Voir l’avant/après | Source et Proposition séparées | Projets locaux déterministes |
+| Inspecter comme avec F12 | Sélection DOM intégrée dans Laboratoire et Code, sans ouvrir les DevTools natifs | Photographie bornée ; aucune valeur de formulaire, HTML ou stockage |
+| Modifier visuellement | Atelier sémantique : cible, propriété, portée écran/page, undo/redo et preview CSS | Projet local durable ou export CSS avec sources associées |
+| Travailler sur une seule taille | Portées toutes tailles/mobile/tablette/personnalisée, synchronisées avec le viewport | Media queries explicites et visibles avant application |
+| Limiter une modification à la page | Attribut de route déterministe et règle préfixée | Refus sur une route dynamique non distinguable |
 | Accepter ou refuser chaque correctif | Consultation sans effet puis décision explicite | Staging reconstruit uniquement avec les choix retenus |
 | Corriger une navbar rapidement | Avant/Après puis **Valider et appliquer** sur la proposition isolée | Sources locales durables uniquement, route conservée |
 | Annuler l’application | Sauvegarde de la dernière écriture, contrôle des hashes et restauration fichiers/dossiers | Refus si un fichier a changé depuis |
@@ -51,6 +55,7 @@ La direction UI conserve sa propre grammaire — rail graphite, papier minéral,
 - **PostCSS** : analyse et transformations CSS déterministes.
 - **Serveurs Node loopback** : previews locale, proposition, staging et workspace.
 - **Chrome DevTools Protocol** : métriques d’appareil et collecte visuelle dans la session distante.
+- **CDP Overlay** : inspecteur intégré des URL/localhost sans DevTools natifs.
 - **Monaco Editor** : édition locale des sources texte.
 - **Overlays en mémoire** : prévisualisation avant décision ou écriture.
 - **Ollama / llama.cpp** : moteurs facultatifs externes, joints uniquement sur loopback.
@@ -58,7 +63,7 @@ La direction UI conserve sa propre grammaire — rail graphite, papier minéral,
 - **Playwright** : validation Electron et navigateur.
 - **electron-builder** : paquets desktop et ressources compagnon.
 
-## Trois niveaux de modification
+## Quatre niveaux de modification
 
 ### Correctif isolé et rapide
 
@@ -84,7 +89,15 @@ Source → Overlay Monaco → Preview + Diff → Appliquer au fichier
 
 La frappe et les propositions IA restent en mémoire. Le clic **Appliquer au fichier** autorise une écriture atomique dans la source. Si son hash ou sa version a changé, Responsiver refuse l’opération.
 
-Cette distinction est volontaire : le parcours court optimise une correction unique déjà comparée, le staging prépare une livraison groupée non destructive et Monaco reste l’outil de modification manuelle fichier par fichier.
+### Atelier visuel
+
+```text
+Sélection dans le rendu → Portée écran/page → Réglages CSS → Avant/Après → Appliquer ou exporter
+```
+
+L’Atelier conserve des opérations structurées et refuse le déplacement libre en coordonnées absolues. La preview utilise une feuille temporaire ; l’application locale produit une feuille Responsiver gérée et réversible. Un localhost lié reçoit uniquement cette CSS en direct puis un export à intégrer au framework. Une URL publique reste en inspection seule.
+
+Cette distinction est volontaire : le parcours court optimise une correction détectée, l’Atelier une retouche visuelle ciblée, le staging une livraison groupée non destructive et Monaco la modification manuelle fichier par fichier.
 
 ## Analyse visuelle
 
@@ -135,7 +148,9 @@ Les paquets restent non signés. Une diffusion sans avertissements système et u
 - L’audit distant cumule les routes visitées sur cinq largeurs, mais ne parcourt pas seul tout le site ni tous les breakpoints possibles.
 - Le rendu est Chromium/Electron ; Firefox et WebKit ne sont pas automatisés.
 - Une URL publique ne donne pas accès aux sources auteur et ne peut pas être corrigée sur le serveur.
+- L’inspecteur d’une URL publique est informatif ; l’Atelier exige une racine locale autorisée.
 - Un localhost lié permet l’édition locale ; seule la CSS est injectée directement dans la session distante. La stack Symfony/Laravel/Node/frontend est détectée depuis ses manifests, mais les templates de framework ne reçoivent pas encore de correctif automatique sans correspondance source fiable.
+- L’Atelier produit une surcharge CSS sûre. Il ne garantit pas la réécriture du composant Twig/JSX/Vue/Tailwind auteur et ne déplace pas librement les nœuds comme un logiciel de dessin.
 - L’application directe est volontairement absente sur un artefact compilé ; le staging peut l’exporter, mais un prochain build l’écraserait.
 - Le moteur visuel applique des règles objectives mais ne remplace pas une revue UI/UX humaine.
 - L’assistant dépend d’un moteur et d’un modèle locaux installés séparément ; aucun modèle n’est embarqué.
@@ -149,15 +164,16 @@ Les paquets restent non signés. Une diffusion sans avertissements système et u
 Contrôles reproductibles exécutés sur l’état consolidé :
 
 - `npm run typecheck` : réussi ;
-- `npm test` : 99 tests applicatifs réussis ;
+- `npm test` : 113 tests applicatifs réussis ;
 - `npm run test:native-host` : 17 tests du protocole Chrome réussis ;
-- `npm run test:e2e:remote` : redirection, historique multi-route, ciblage, rapport et formulaire localhost réussis ;
-- `npm run test:e2e` : parcours Electron complet, catégories, sélection, avant/après, application réelle, conservation de route et annulation réussis ;
-- `npm run test:e2e:localhost-link` : association à chaud, détection Symfony/React/Tailwind et écriture explicite réussies ;
+- `npm run test:e2e:visual` : F12 dans l’iframe, sélection réelle, application route-scopée et rendu après réanalyse réussis ;
+- `npm run test:e2e:remote` : redirection, audit mobile et formulaire localhost réussis ;
+- `npm run test:e2e` : parcours Electron complet, catégories, inspecteur, Atelier, avant/après, application réelle, conservation de route et annulation réussis ;
+- `npm run test:e2e:localhost-link` : association et remplacement à chaud sans écriture implicite réussis ;
 - `npm run build` : réussi ;
 - `npm run package:dir` : paquet macOS arm64 construit ;
 - `npm audit --audit-level=moderate` : aucune vulnérabilité signalée ;
 - ressources `companion/chrome` et `companion/native-host` présentes dans l’application ;
 - bit exécutable du host macOS conservé.
 
-Les tests couvrent notamment analyseur, readiness, historique, URL/SSRF, audits local et distant, assainissement des messages du projet, workspace, assistant local, file Chrome, serveur de preview, staging et exports. Le parcours E2E Electron complet et les deux projets réels fournis ont été rejoués sur macOS ; cette validation locale ne remplace pas la matrice de release sur chaque plateforme.
+Les tests couvrent notamment analyseur, readiness, historique, URL/SSRF, audits local et distant, inspecteurs bridge/CDP, validation CSS, portée de route, workspace, assistant local, file Chrome, serveur de preview, staging et exports. Les parcours Electron ont été rejoués sur macOS ; cette validation locale ne remplace pas la matrice de release sur chaque plateforme ni une revue humaine sur chaque framework.

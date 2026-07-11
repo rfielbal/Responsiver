@@ -55,6 +55,8 @@ L’analyse statique conserve les routes et feuilles CSS effectivement liées. L
 
 Le serveur Node écoute uniquement `127.0.0.1` sur un port aléatoire. Il accepte `GET` et `HEAD`, contrôle `Host`, chemins réels, liens symboliques, fichiers cachés, types MIME et requêtes `Range`.
 
+Après une application explicite, le runner autorise uniquement le chemin physique `.responsiver/responsiver.generated.css` afin que la source réanalysée rende réellement la feuille gérée. Le reste du dossier caché demeure invisible ; la résolution canonique continue de refuser toute sortie par symlink.
+
 Le HTML reçoit en mémoire un bridge sans accès Node pour :
 
 - navigation interne, historique et rechargement ;
@@ -62,7 +64,9 @@ Le HTML reçoit en mémoire un bridge sans accès Node pour :
 - thème et mutations DOM ;
 - audit runtime borné des défauts visuels et regroupement des répétitions par conteneur ;
 - smoke-test du contenu réellement peint, y compris pseudo-éléments et Shadow DOM ouverts ;
-- centrage et mise en évidence d’un sélecteur.
+- centrage et mise en évidence d’un sélecteur ;
+- inspecteur DOM borné avec contours séparés pour le survol et la sélection ;
+- feuille CSS visuelle éphémère, limitée et retirée à la demande.
 
 L’iframe possède une origine loopback différente du renderer. Elle ne peut pas atteindre le preload ou IPC. Les sorties réseau sont bloquées à l’exception des Google Fonts déjà référencées.
 
@@ -81,6 +85,8 @@ Une URL n’est pas placée dans une iframe. Le processus principal crée un `We
 Le mode public exige HTTPS. Avant le chargement, tous les résultats DNS sont contrôlés et doivent être publics. Les plages privées, loopback, link-local, documentation, multicast et réservées sont refusées, y compris les IPv4 mappées en IPv6. Chaque redirection est normalisée et revalidée pour réduire les risques de SSRF et de DNS rebinding.
 
 Le mode localhost accepte uniquement `localhost`, ses sous-domaines et les adresses de boucle locale. Il n’autorise pas le LAN. Associer un dossier n’accorde aucun accès réseau supplémentaire : cela active seulement le `WorkspaceEditor` sur cette racine. Les manifests `package.json` et `composer.json` sont lus sans exécution afin d’identifier la stack affichée ; cette détection ne transforme pas automatiquement les templates de framework.
+
+L’inspection distante réutilise le Chrome DevTools Protocol déjà attaché à la session. `Overlay.setInspectMode` dessine la cible dans le vrai `WebContentsView`, puis le processus principal résout une photographie bornée de l’élément. Aucune fenêtre DevTools n’est ouverte. Le mode public ne permet aucune mutation ; seul un localhost associé accepte une feuille CSS temporaire limitée à 64 Kio.
 
 Les liens quittant le périmètre de navigation approuvé sont bloqués. Les sous-ressources HTTP(S) sont elles aussi limitées à la portée réseau du mode choisi. Le site reste du JavaScript non fiable exécuté par Chromium ; la session n’est pas une machine virtuelle anti-malware.
 
@@ -112,6 +118,24 @@ Le moteur mesure des défauts objectifs. Il ne compare pas la page à une maquet
 
 Le runner local utilise un collecteur distinct mais aligné : `TreeWalker` borné, déduplication par règle/sélecteur ou cluster parent, preuves géométriques et seuils explicites. Quatre sondes isolées mesurent la route active à 393 × 852, 768 × 1024, 1024 × 768 et 1440 × 900 CSS px ; leurs répétitions deviennent un seul constat avec la liste des formats touchés. Les carrousels, labels réservés aux lecteurs d’écran, contenus de marque décoratifs et liens tactiles correctement espacés sont exclus des faux positifs connus. Le renderer traite même ce message comme non fiable, remplace ses dimensions par le viewport choisi et rejette règles, routes ou volumes hors contrat avant de les afficher.
 
+## Inspecteur intégré et Atelier visuel
+
+L’inspecteur est un outil de sélection, pas un accès aux DevTools natifs. Il existe dans le Laboratoire et Code. Le bridge local ou CDP renvoie uniquement : route, sélecteur, nombre d’occurrences, balise, classes, rectangle, rôle, libellé, texte tronqué, box model et liste fermée de styles calculés. Les messages sont assainis à chaque frontière. Formulaires, HTML, cookies et stockages ne sont jamais lus.
+
+L’Atelier stocke des `VisualEditOperation` structurées :
+
+- cible et métadonnées de stabilité ;
+- propriété CSS prise dans une allowlist ;
+- valeur avant/après sans règle, commentaire, ressource distante ou `!important` fourni ;
+- portée `all`, `mobile`, `tablet` ou plage personnalisée ;
+- portée de route `current` ou `all`.
+
+La compilation produit une feuille déterministe avec media queries. Une même cible/propriété/portée ne peut recevoir deux valeurs concurrentes ; les doublons exacts sont regroupés. Un sélecteur touchant plusieurs éléments exige une confirmation, tandis que Shadow DOM, frame tierce ou sélecteur instable restent en inspection seule.
+
+La preview locale injecte la feuille dans un `<style data-responsiver-visual-preview>` sans écrire le disque. Undo/redo ne manipule que l’historique renderer. En mode Avant/Après, deux runners affichent source et feuille temporaire ; en mode localhost lié, une seule session réelle reçoit la CSS et la comparaison côte à côte est donc désactivée.
+
+Au staging, les opérations sont revalidées dans le processus principal. Un projet local durable reçoit `.responsiver/responsiver.generated.css` et un lien dans les pages concernées. Pour « page actuelle », le transformeur ajoute un attribut `data-responsiver-route` déterministe sur le document et préfixe la règle ; si plusieurs routes dynamiques partagent le même HTML, il refuse cette portée. Un artefact compilé ou localhost lié produit uniquement un export à intégrer aux sources auteur. Une URL publique n’accède jamais à l’Atelier.
+
 ## Proposition déterministe et staging
 
 Le workflow avancé conserve quatre étapes :
@@ -121,7 +145,7 @@ Le workflow avancé conserve quatre étapes :
 3. **Accepter ou écarter** enregistre la décision humaine.
 4. **Construire le staging** reconstruit uniquement les constats et thèmes acceptés.
 
-Source, proposition et staging utilisent des origines distinctes. Le transformeur génère overlays, CSS complémentaire si nécessaire, patch unifié, résultats par proposition et empreintes SHA-256. L’identité d’une opération CSS inclut fichier, ligne, sélecteur, propriété et breakpoint ; deux valeurs incompatibles sur une même cible, deux thèmes opposés ou deux instructions contradictoires produisent un conflit bloquant. La feuille Responsiver déjà gérée est enrichie au lieu de créer un nouveau lien à chaque application.
+Source, proposition et staging utilisent des origines distinctes. Le transformeur génère overlays, CSS complémentaire si nécessaire, opérations visuelles validées, patch unifié, résultats par proposition et empreintes SHA-256. L’identité d’une opération CSS inclut fichier, ligne, sélecteur, propriété et breakpoint ; deux valeurs incompatibles sur une même cible, deux thèmes opposés, deux instructions contradictoires ou deux opérations visuelles concurrentes produisent un conflit bloquant. La feuille Responsiver déjà gérée est enrichie au lieu de créer un nouveau lien à chaque application.
 
 Une variante de thème n’est générée que si un couple de rôles fond/texte fiable est résolu et si les contrastes texte/fond, texte/surface et texte atténué/fond passent les seuils. Les accents de marque, images et filtres ne sont jamais recolorés automatiquement ; à faible confiance, le moteur refuse la variante au lieu de produire un rendu destructeur.
 
@@ -184,7 +208,7 @@ L’historique JSON stocke seulement chemins, entrée, compteurs et dates. Les s
 
 Fermer une session locale arrête ses serveurs et nettoie son stockage navigateur. Fermer une session distante détache le debugger, retire le CSS injecté, efface son stockage et ferme le `WebContentsView`.
 
-Les rapports et exports ne sont créés qu’après choix explicite d’une destination. Pour une URL, le rapport agrège les routes visitées, leurs constats et le mode réseau réel ; il ne prétend pas être « hors ligne ». Une source ne peut être modifiée que par **Appliquer au fichier** dans Code ou **Valider et appliquer** après une proposition locale comparée.
+Les rapports et exports ne sont créés qu’après choix explicite d’une destination. Pour une URL, le rapport agrège les routes visitées, leurs constats et le mode réseau réel ; il ne prétend pas être « hors ligne ». Une source ne peut être modifiée que par **Appliquer au fichier** dans Code, **Valider et appliquer** après une proposition locale comparée ou **Appliquer au projet** après des opérations explicites dans l’Atelier. Ces trois chemins contrôlent version, hashes et confinement avant écriture.
 
 ## Projets backend, bases et Docker
 

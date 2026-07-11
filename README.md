@@ -2,7 +2,7 @@
 
 Responsiver est un laboratoire desktop open source pour inspecter la responsivité d’un projet local, d’un localhost ou d’un site public, puis préparer et valider des corrections sans service cloud imposé.
 
-La version 0.6 ajoute l’audit d’URL dans une session Chromium isolée, l’analyse visuelle multi-viewport, un espace code Monaco, un assistant IA local facultatif via Ollama ou llama.cpp et un compagnon Chrome. Le laboratoire sépare maintenant les défauts de rendu des diagnostics de code et propose un parcours court, réversible, pour appliquer un correctif responsive isolé sans traverser tout le workflow d’export.
+La version 0.6 ajoute l’audit d’URL dans une session Chromium isolée, l’analyse visuelle multi-viewport, un inspecteur intégré, un Atelier visuel, un espace code Monaco, un assistant IA local facultatif via Ollama ou llama.cpp et un compagnon Chrome. Le laboratoire sépare les défauts de rendu des diagnostics de code et propose des parcours courts, réversibles, pour corriger une responsivité sans traverser inutilement tout le workflow d’export.
 
 ## Trois sources, trois niveaux d’accès
 
@@ -40,6 +40,19 @@ Responsiver ne prétend pas retrouver le code auteur d’un site public à parti
 - Sélection multiple indépendante de l’ouverture du détail ; un constat sans transformation fiable reste consultatif et n’entre pas dans une fausse file d’application.
 - Avant / Après contextualisé avant validation d’un correctif.
 - Thème clair ou sombre prévisualisé immédiatement ; une variante existante est activée sans doublon. Une variante absente n’est générée que si les rôles fond/texte et leurs contrastes sont fiables ; images, filtres et accents de marque restent intacts, sinon le moteur refuse prudemment.
+
+### Atelier visuel et inspecteur intégré
+
+- Inspecteur accessible depuis le Laboratoire et Code, ainsi que par `F12`, `⌘⌥I` ou `⌘⇧C` sur macOS.
+- Survol et sélection dans le vrai rendu avec contour, sélecteur, route, rectangle, box model, rôle, libellé et styles calculés bornés.
+- Passage direct de la cible inspectée vers l’**Atelier visuel**, sans perdre la page ni le format observé.
+- Trois modes séparés : **Sélectionner** capture les clics, **Interagir** rend la navigation au site et **Avant / après** synchronise la source et la proposition.
+- Réglages sémantiques de mise en page, dimensions, espacements, typographie et apparence. L’Atelier produit des contraintes CSS ; il ne convertit pas les éléments en coordonnées absolues fragiles.
+- Portées indépendantes : toutes tailles, mobile, tablette ou plage personnalisée, puis page actuelle ou toutes les pages.
+- Sélection multiple explicitement confirmée lorsqu’un sélecteur touche plusieurs éléments ; Shadow DOM et frames tierces restent inspectables mais non persistables.
+- Prévisualisation CSS éphémère, undo/redo, avant/après, préparation du code, application atomique sur un projet HTML/CSS durable ou export sur un artefact/localhost lié.
+
+Une URL publique peut être inspectée dans le Laboratoire, mais l’Atelier reste désactivé sans sources. Sur un localhost lié, les réglages CSS sont visibles immédiatement puis préparés comme feuille à intégrer au framework : Responsiver ne prétend pas retrouver automatiquement le composant Twig, JSX, Vue ou Tailwind auteur.
 
 ### URL publique et localhost
 
@@ -91,11 +104,12 @@ L’installation est encore manuelle. Le connecteur ne démarre pas Responsiver 
 
 ## Corrections et écritures
 
-Trois niveaux coexistent afin qu’une correction simple reste rapide sans supprimer les garde-fous :
+Quatre niveaux coexistent afin qu’une correction simple reste rapide sans supprimer les garde-fous :
 
 1. **Parcours court** : constat visuel → Avant/Après → **Valider et appliquer**. Seule la proposition actuellement comparée est écrite, jamais le reste du plan ; la route et le viewport sont conservés après réanalyse.
 2. **Workflow avancé** : Source → Proposition → **Ajouter au plan** → Staging combiné → Révision → export. Il sert aux lots, thèmes et instructions.
-3. **Code et assistant** : Source → Overlay Monaco → Preview + Diff → **Appliquer au fichier**.
+3. **Atelier visuel** : sélectionner dans la preview → régler la portée et les propriétés → Avant/Après → **Appliquer au projet** ou préparer l’export.
+4. **Code et assistant** : Source → Overlay Monaco → Preview + Diff → **Appliquer au fichier**.
 
 L’application directe est réservée aux sources HTML/CSS locales durables, pas aux URLs, localhost ou artefacts compilés. Tous les chemins et hashes sont validés avant la première substitution ; les fichiers sont remplacés atomiquement, les conflits bloquent le lot entier et la dernière application reste annulable tant que personne n’a remodifié les fichiers. L’annulation restaure aussi les nouveaux fichiers et dossiers créés. La feuille gérée `.responsiver/responsiver.generated.css` est réutilisée au lieu d’accumuler des variantes numérotées.
 
@@ -138,6 +152,7 @@ npm run typecheck
 npm test
 npm run test:native-host
 npm run test:e2e
+npm run test:e2e:visual
 npm run test:e2e:remote
 npm run test:e2e:localhost-link
 npm run build

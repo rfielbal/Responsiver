@@ -20,6 +20,8 @@ L’espace Monaco utilise également des overlays en mémoire. La frappe, le dif
 
 Les conversations avec l’assistant, captures et buffers Monaco ne sont pas persistés par Responsiver après la session.
 
+L’inspecteur et l’Atelier conservent également leurs sélections et opérations uniquement en mémoire. Une sélection est limitée au sélecteur, à la route, à la géométrie, au rôle/libellé, à un court extrait textuel et à quelques styles calculés. Responsiver ne collecte ni HTML complet, valeurs de formulaire, cookies, stockage local, IndexedDB ou historique de navigation pour cette fonction. Une écriture ou un export n’a lieu qu’après le bouton explicite correspondant.
+
 ## Aperçu local interactif
 
 Un projet qualifié comme exploitable est servi temporairement sur `127.0.0.1`. Le serveur est fermé au changement de projet et à la fermeture de l’application. Le stockage navigateur de la preview — cookies, stockage local, IndexedDB, service workers et cache — est alors effacé.
@@ -37,7 +39,7 @@ Ouvrir une URL demande à Responsiver de s’y connecter comme un navigateur. Le
 
 Le mode public exige HTTPS et une destination réseau publique. Le mode localhost accepte seulement la boucle locale. Dans les deux cas, la session Chromium possède un stockage isolé et non persistant ; permissions sensibles et téléchargements sont refusés, puis le stockage est nettoyé à la fermeture.
 
-L’audit analyse localement le DOM, les styles, la géométrie, les erreurs runtime et une capture bornée. Responsiver n’envoie pas ces données à un service d’analyse distant. Une URL publique reste en lecture seule. Associer un dossier à un localhost active l’éditeur local mais ne donne aucun accès à sa base de données.
+L’audit analyse localement le DOM, les styles, la géométrie, les erreurs runtime et une capture bornée. Responsiver n’envoie pas ces données à un service d’analyse distant. L’inspecteur intégré peut lire la sélection minimale décrite plus haut, toujours localement. Une URL publique reste en lecture seule et ne reçoit aucune feuille de correction. Associer un dossier à un localhost active l’éditeur local et la prévisualisation CSS temporaire, mais ne donne aucun accès à sa base de données.
 
 ## Assistant IA local
 

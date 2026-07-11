@@ -12,6 +12,7 @@
 - La preview locale utilise une iframe d’origine loopback différente, sans Node ni accès au preload.
 - Le serveur écoute uniquement `127.0.0.1`, contrôle `Host`, méthode, MIME, chemins réels, fichiers cachés et liens symboliques.
 - Les sorties compilées sont montées depuis une base canonique sans exposer les dossiers serveur voisins.
+- Les chemins cachés restent bloqués ; seule la feuille exacte `.responsiver/responsiver.generated.css`, créée et liée explicitement après application, peut être servie. Les autres fichiers de ce dossier et les symlinks extérieurs restent inaccessibles.
 - La CSP de preview limite scripts, connexions, formulaires, workers et frames à l’origine locale, avec la seule exception Google Fonts HTTPS.
 - Caméra, micro, géolocalisation, notifications et autres permissions Chromium sont refusés.
 - Les nouvelles fenêtres internes sont ramenées dans la preview ; les destinations externes sont bloquées.
@@ -40,6 +41,16 @@ Le site distant exécute son JavaScript dans Chromium et peut consommer CPU, mé
 - Les captures sont bornées en dimensions et en taille.
 - Un sélecteur utilisé pour cibler un constat est limité puis évalué dans la page sans exposition d’IPC.
 
+## Inspecteur et Atelier visuel
+
+- Le bridge de preview et les événements CDP sont traités comme des entrées non fiables puis assainis avant affichage.
+- Une sélection ne contient que route, sélecteur borné, balise, classes, rectangle, rôle, libellé accessible, court extrait textuel et liste fermée de styles calculés. Valeurs de formulaire, HTML, cookies, stockages et secrets ne sont jamais collectés.
+- L’inspecteur distant utilise le mode Overlay du Chrome DevTools Protocol sans ouvrir les DevTools natifs. Il est réinitialisé puis restauré après une navigation autorisée, fermé au changement de session et le debugger est détaché à la fermeture.
+- L’Atelier n’accepte qu’une liste fermée de propriétés CSS. Valeurs contenant règle, commentaire, `url()`, `data:`, `@import`, `expression()`, `javascript:` ou `!important` fourni par l’utilisateur sont refusées.
+- Les opérations, sélecteurs, routes, plages et CSS éphémères sont plafonnés. Un sélecteur instable, cross-origin, Shadow DOM ou ambigu sans confirmation n’est pas persisté.
+- Une URL publique reste en inspection seule. L’injection CSS temporaire distante est limitée à un localhost explicitement lié à une racine locale et à 64 Kio.
+- Sur un projet local durable, la feuille gérée et ses liens HTML passent par le staging, le contrôle des hashes et l’écriture atomique. Une portée « page actuelle » reçoit un attribut de route généré ; une route dynamique non distinguable est refusée au lieu de produire une règle trompeuse.
+
 ## Espace code et écritures
 
 - Seuls les chemins relatifs à une racine locale autorisée sont acceptés.
@@ -49,6 +60,7 @@ Le site distant exécute son JavaScript dans Chromium et peut consommer CPU, mé
 - La preview lit des copies mémoire et ne vaut jamais confirmation d’écriture.
 - **Appliquer au fichier** vérifie que la source n’a pas changé, écrit un fichier temporaire dans le même dossier puis effectue un renommage atomique.
 - **Valider et appliquer** est limité à une proposition isolée sur un projet local durable. Tous les chemins, liens symboliques et hashes du lot sont contrôlés avant la première substitution ; une erreur déclenche un rollback des fichiers déjà remplacés.
+- **Appliquer au projet** dans l’Atelier suit les mêmes contrôles et n’est disponible que pour une source locale durable. Artefacts compilés et localhost liés produisent un staging exportable, sans écriture implicite.
 - L’annulation n’est autorisée que si chaque fichier appliqué possède encore son hash attendu. Elle restaure aussi les fichiers et dossiers créés par l’application.
 
 Une application explicite peut introduire une régression ou une vulnérabilité. Relisez le diff et utilisez Git ou une sauvegarde ; la protection technique empêche les écritures implicites et conflits connus, pas les mauvaises décisions humaines.
