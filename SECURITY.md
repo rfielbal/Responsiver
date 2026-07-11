@@ -48,6 +48,8 @@ Le site distant exécute son JavaScript dans Chromium et peut consommer CPU, mé
 - Chaque overlay possède une version et des hashes source/courant.
 - La preview lit des copies mémoire et ne vaut jamais confirmation d’écriture.
 - **Appliquer au fichier** vérifie que la source n’a pas changé, écrit un fichier temporaire dans le même dossier puis effectue un renommage atomique.
+- **Valider et appliquer** est limité à une proposition isolée sur un projet local durable. Tous les chemins, liens symboliques et hashes du lot sont contrôlés avant la première substitution ; une erreur déclenche un rollback des fichiers déjà remplacés.
+- L’annulation n’est autorisée que si chaque fichier appliqué possède encore son hash attendu. Elle restaure aussi les fichiers et dossiers créés par l’application.
 
 Une application explicite peut introduire une régression ou une vulnérabilité. Relisez le diff et utilisez Git ou une sauvegarde ; la protection technique empêche les écritures implicites et conflits connus, pas les mauvaises décisions humaines.
 
@@ -80,7 +82,7 @@ Le host ne démarre pas l’application. L’installation manuelle et la dépend
 
 - L’historique contient uniquement chemins et compteurs dans un JSON privé, borné, validé et atomique.
 - Un projet `blocked` ou `needs-build` ne peut créer proposition ou staging.
-- Les staging re-hachent les sources et refusent les changements concurrents.
+- Les stagings re-hachent les sources et refusent les changements concurrents ou propositions incompatibles.
 - Les exports contrôlent traversées, liens symboliques et destinations internes au projet.
 - Les dossiers d’export sont réservés atomiquement avec des permissions privées sur POSIX.
 - Les rapports omettent chemins absolus et origines temporaires.

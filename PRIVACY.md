@@ -14,7 +14,7 @@ Sur POSIX, le dossier et les fichiers sensibles créés par Responsiver utilisen
 
 ## Previews et corrections
 
-Les corrections déterministes et thèmes sont conservés dans des overlays en mémoire. Un export n’est écrit qu’à l’emplacement choisi explicitement et les copies complètes doivent rester hors du projet source.
+Les corrections déterministes et thèmes sont d’abord conservés dans des overlays en mémoire. Un export n’est écrit qu’à l’emplacement choisi explicitement et les copies complètes doivent rester hors du projet source. Sur un projet local compatible, **Valider et appliquer** constitue une autorisation explicite d’écrire uniquement la proposition comparée dans les sources. La sauvegarde permettant d’annuler cette dernière application reste en mémoire et disparaît avec la session.
 
 L’espace Monaco utilise également des overlays en mémoire. La frappe, le diff et la prévisualisation ne modifient pas le disque. Le bouton **Appliquer au fichier** constitue en revanche une autorisation explicite d’écrire dans le fichier source après vérification de son hash et de sa version.
 

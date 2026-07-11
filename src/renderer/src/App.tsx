@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState, type FormEvent, type ReactElement } from 'react'
 
 import type { ProjectPreparationProgress, RecentProjectSummary, RemoteAuditResult, RemotePageState, RemoteViewport, RuntimeAudit } from '../../shared/contracts'
+import { classifyProjectIssue, consolidateProjectIssues, deterministicVisualTarget, type FindingGroup, type FindingPolicy } from '../../shared/finding-policy'
+import { frameworkSupportFor } from '../../shared/framework-support'
 import LocalAssistant from './LocalAssistant'
 import RemotePreview from './RemotePreview'
 
@@ -74,6 +76,11 @@ interface StagingSnapshot {
   themeTarget: ThemeTarget | null
   instructions: string[]
   changedFiles: string[]
+  outcomes?: Array<{
+    proposalId: string
+    status: 'applied' | 'skipped' | 'conflict'
+    reason: string
+  }>
   createdAt: string
 }
 
@@ -99,6 +106,14 @@ interface ResponsiverApiExtension {
   openRecentProject?: (id: string) => Promise<ProjectSnapshot>
   forgetRecentProject?: (id: string) => Promise<RecentProjectSummary[]>
   onProjectPreparation?: (listener: (progress: ProjectPreparationProgress) => void) => () => void
+  applyStagingToSource?: () => Promise<unknown>
+  undoLastStagingApply?: () => Promise<unknown>
+}
+
+interface ChangePlanRequest {
+  issueIds: string[]
+  themeTarget: ThemeTarget | null
+  instructions: string[]
 }
 
 interface ConversationMessage {
@@ -201,6 +216,13 @@ function clampDimension(value: string, min: number, max: number, fallback: numbe
 
 function severityLabel(issue: ProjectIssue): string {
   return issue.severity === 'bloquant' ? 'Bloquant' : issue.severity === 'attention' ? 'À vérifier' : 'Information'
+}
+
+function findingPolicyBadge(policy: FindingPolicy): { label: 'Sûr' | 'Avant-après' | 'À relire' | 'Manuel'; tone: string } {
+  if (policy.action === 'advisory') return { label: 'Manuel', tone: 'manual' }
+  if (policy.verification === 'visual-before-after' || policy.verification === 'both') return { label: 'Avant-après', tone: 'visual' }
+  if (policy.action === 'auto-safe') return { label: 'Sûr', tone: 'safe' }
+  return { label: 'À relire', tone: 'review' }
 }
 
 function luminance(rgb: string): number | null {
@@ -340,14 +362,10 @@ function deviceForIssue(issue: ProjectIssue, current: Device): Pick<Device, 'fam
 }
 
 function deterministicInstructionForIssue(issue: ProjectIssue | null | undefined): string | null {
-  if (!issue?.evidence?.selector) return null
-  const rawSelector = issue.evidence.selector.trim()
-  const simpleSelector = /^(?:(?:[a-z][\w-]*)?(?:[.#][\w-]+){1,4}|[a-z][\w-]*)$/i
-  const directSelector = simpleSelector.test(rawSelector) ? rawSelector : null
-  const selectorTail = rawSelector.split(/\s*>\s*/).at(-1)?.trim() ?? ''
-  const selector = directSelector ?? (simpleSelector.test(selectorTail) && /[.#]/.test(selectorTail) ? selectorTail : null)
+  if (!issue) return null
+  const selector = deterministicVisualTarget(issue)
   if (!selector) return null
-  const measuredWidth = issue.evidence.viewport.width
+  const measuredWidth = issue.evidence?.viewport.width ?? 768
   const breakpoint = measuredWidth > 768 ? Math.min(2_560, Math.round(measuredWidth)) : 768
   if (issue.rule === 'layout.navigation-wrap') return `Cible ${selector}. Jusqu’à ${breakpoint} px, stabilise le menu dans une rangée défilante sans masquer ses liens.`
   if (issue.rule === 'typography.disproportionate') return `Cible ${selector}. Jusqu’à ${breakpoint} px, borne la taille des grands titres disproportionnés.`
@@ -704,6 +722,7 @@ export default function App(): ReactElement {
   const [runtimeTheme, setRuntimeTheme] = useState<RuntimeTheme>('unknown')
   const [selectedIssueId, setSelectedIssueId] = useState<string | null>(null)
   const [selectedIssueIds, setSelectedIssueIds] = useState<string[]>([])
+  const [queuedIssueIds, setQueuedIssueIds] = useState<string[]>([])
   const [showAllIssues, setShowAllIssues] = useState(false)
   const [themeTarget, setThemeTarget] = useState<ThemeTarget | null>(null)
   const [previewThemeTarget, setPreviewThemeTarget] = useState<ThemeTarget | null>(null)
@@ -728,10 +747,14 @@ export default function App(): ReactElement {
   const [notice, setNotice] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [previewBusy, setPreviewBusy] = useState(false)
+  const [undoAvailable, setUndoAvailable] = useState(false)
   const noticeTimer = useRef<number | null>(null)
   const previewSequence = useRef(0)
   const draftRevision = useRef(0)
   const activeProjectId = useRef<string | null>(null)
+  const activeProjectSnapshot = useRef<(ProjectSnapshot & ProjectExtra) | null>(null)
+  const activePathRef = useRef(activePath)
+  const fastApplyInFlight = useRef(false)
   const fullscreenButtonRef = useRef<HTMLButtonElement>(null)
   const remoteAudits = useRef(new Map<string, RemoteAuditResult>())
   const localRuntimeAudits = useRef(new Map<string, RuntimeAudit>())
@@ -781,6 +804,7 @@ export default function App(): ReactElement {
     .filter((audit) => documentPath(audit.route) === documentPath(activePath))
     .map((audit) => `${audit.viewport.width}x${audit.viewport.height}`)).size
   const isRemote = project?.source.kind === 'remote-url' || project?.source.kind === 'linked-localhost'
+  const frameworkSupport = useMemo(() => project ? frameworkSupportFor(project) : null, [project])
   const workspaceEnabled = Boolean(project && !project.source.readOnly && project.source.localRoot)
   const detectedTheme: RuntimeTheme = runtimeTheme !== 'unknown' ? runtimeTheme : project?.theme.detected === 'dark' ? 'dark' : project?.theme.detected === 'light' ? 'light' : 'unknown'
   const activeOrigin = previewMode === 'staging' && staging?.previewOrigin
@@ -803,6 +827,12 @@ export default function App(): ReactElement {
   }, [inspectorIssues, selectedIssueId])
 
   useEffect(() => {
+    if (!project) return
+    const knownIssueIds = new Set(project.issues.map((issue) => issue.id))
+    setQueuedIssueIds((current) => current.filter((id) => knownIssueIds.has(id)))
+  }, [project])
+
+  useEffect(() => {
     void refreshRecentProjects()
     const unsubscribe = api().onProjectPreparation?.((progress) => setPreparation(progress))
     const unsubscribeExtension = window.responsiver.onExtensionOpenProject((payload) => {
@@ -815,12 +845,37 @@ export default function App(): ReactElement {
     })
     const unsubscribeBlocked = window.responsiver.onRemoteBlockedNavigation((payload) => flash(`${payload.detail} ${payload.url}`))
     const unsubscribeWorkspace = window.responsiver.onWorkspacePreviewOrigin(setWorkspaceOrigin)
-    return () => { unsubscribe?.(); unsubscribeExtension(); unsubscribeBlocked(); unsubscribeWorkspace() }
+    const unsubscribeApplied = window.responsiver.onWorkspaceApplied(() => {
+      previewSequence.current += 1
+      setStaging(null)
+      setProposal(null)
+      setProposalContext(null)
+      setWorkspaceOrigin(null)
+      setPreviewMode('source')
+      localRuntimeAudits.current.clear()
+      setRuntimeAudit(null)
+      const current = activeProjectSnapshot.current
+      if (!current || fastApplyInFlight.current) return
+      if (current.source.kind === 'local-project') {
+        const pathBeforeWrite = activePathRef.current
+        void window.responsiver.reanalyzeCurrentProject().then((snapshot) => {
+          applyProject(snapshot)
+          if (snapshot.routes.some((route) => route.path === pathBeforeWrite)) setActivePath(pathBeforeWrite)
+        }).catch(() => {
+          flash('Les fichiers ont été appliqués. Rouvrez le projet pour recalculer tous les constats.')
+        })
+      }
+    })
+    return () => { unsubscribe?.(); unsubscribeExtension(); unsubscribeBlocked(); unsubscribeWorkspace(); unsubscribeApplied() }
   }, [])
 
   useEffect(() => {
     try { window.localStorage.setItem('responsiver.rail-collapsed', String(railCollapsed)) } catch { /* préférence non persistée dans ce contexte */ }
   }, [railCollapsed])
+
+  useEffect(() => {
+    activePathRef.current = activePath
+  }, [activePath])
 
   const preparationActive = preparation !== null
 
@@ -871,6 +926,7 @@ export default function App(): ReactElement {
     draftRevision.current += 1
     const next = snapshot as ProjectSnapshot & ProjectExtra
     activeProjectId.current = next.id
+    activeProjectSnapshot.current = next
     localSourceIssues.current = next.source.kind === 'local-project' ? [...next.issues] : []
     localRuntimeAudits.current.clear()
     setProject(next)
@@ -882,6 +938,7 @@ export default function App(): ReactElement {
     setRuntimeTheme(next.theme.detected === 'dark' ? 'dark' : next.theme.detected === 'light' ? 'light' : 'unknown')
     setSelectedIssueId(next.issues[0]?.id ?? null)
     setSelectedIssueIds([])
+    setQueuedIssueIds([])
     setShowAllIssues(false)
     setThemeTarget(null)
     setPreviewThemeTarget(null)
@@ -898,6 +955,7 @@ export default function App(): ReactElement {
     setLabMode('device')
     setStageFullscreen(false)
     setPreviewBusy(false)
+    setUndoAvailable(false)
     const readiness = next.previewReadiness?.status ?? 'ready'
     setDestination(readiness === 'blocked' || readiness === 'needs-build' ? 'projects' : 'lab')
   }
@@ -964,6 +1022,7 @@ export default function App(): ReactElement {
       if (!root) return
       const snapshot = await window.responsiver.associateRemoteRoot({ projectId: project.id, root })
       activeProjectId.current = snapshot.id
+      activeProjectSnapshot.current = snapshot as ProjectSnapshot & ProjectExtra
       setProject(snapshot as ProjectSnapshot & ProjectExtra)
       setLocalhostRoot(root)
       setWorkspaceOrigin(null)
@@ -1041,8 +1100,19 @@ export default function App(): ReactElement {
     flash(message)
   }
 
+  function discardNoopProposal(result: StagingSnapshot): boolean {
+    if (result.changes.length > 0) return false
+    previewSequence.current += 1
+    setProposal(null)
+    setPreviewMode('source')
+    if (result.previewOrigin) void api().clearPreviewStaging?.(result.previewOrigin).catch(() => undefined)
+    flash('Ce correctif est déjà couvert par la version actuelle. Aucun nouveau changement n’est nécessaire.')
+    return true
+  }
+
   async function previewIssue(issue: ProjectIssue): Promise<void> {
     const extra = issue as ProjectIssue & IssueExtra
+    const policy = classifyProjectIssue(issue, project?.issues)
     setSelectedIssueId(issue.id)
     if (extra.routePath) setActivePath(extra.routePath)
     setLabMode('device')
@@ -1081,16 +1151,17 @@ export default function App(): ReactElement {
       return
     }
     const runtimeInstruction = deterministicInstructionForIssue(issue)
-    if (project?.capabilities?.staging && runtimeInstruction && (!extra.fix || extra.fix.kind === 'manual')) {
+    if (policy.action !== 'advisory' && project?.capabilities?.staging && runtimeInstruction && (!extra.fix || extra.fix.kind === 'manual')) {
       const result = await requestProposal(
         { issueIds: [], themeTarget: null, instructions: [runtimeInstruction] },
         { kind: 'instruction', instruction: runtimeInstruction, issueId: issue.id },
         'before-after'
       )
+      if (result && discardNoopProposal(result)) return
       if (result) flash('Une correction CSS prudente est affichée en avant / après. Elle reste à réviser et à valider explicitement.')
       return
     }
-    if (!project?.capabilities?.staging || !extra.fix || extra.fix.kind === 'manual') {
+    if (policy.action === 'advisory' || !project?.capabilities?.staging || !extra.fix || extra.fix.kind === 'manual') {
       const expectedOrigin = proposal?.previewOrigin ?? null
       previewSequence.current += 1
       setPreviewBusy(false)
@@ -1098,13 +1169,19 @@ export default function App(): ReactElement {
       setProposal(null)
       setPreviewMode('source')
       if (expectedOrigin) void api().clearPreviewStaging?.(expectedOrigin).catch(() => undefined)
-      flash(project?.capabilities?.staging === false
-        ? 'Ce projet ne possède pas encore de layout exploitable : le constat reste consultable, sans générer de faux correctif.'
+      flash(project?.source.kind === 'linked-localhost'
+        ? 'Le localhost reste auditable. Ce constat n’a pas de transformation automatique fiable : ouvrez sa source associée pour l’ajuster avec le rendu réel.'
+        : project?.capabilities?.staging === false
+          ? 'Ce projet ne possède pas encore de layout exploitable : le constat reste consultable, sans générer de faux correctif.'
         : 'Ce constat demande une vérification manuelle : la source concernée est affichée sans faux correctif.')
       return
     }
-    const result = await requestProposal({ issueIds: [issue.id], themeTarget: null, instructions: [] }, { kind: 'issue', issueId: issue.id }, 'before-after')
-    if (result) flash('Avant et après sont synchronisés sur la zone concernée. Validez ou écartez ce correctif depuis le constat.')
+    const verificationMode: PreviewMode = policy.verification === 'source-diff' ? 'proposal' : 'before-after'
+    const result = await requestProposal({ issueIds: [issue.id], themeTarget: null, instructions: [] }, { kind: 'issue', issueId: issue.id }, verificationMode)
+    if (result && discardNoopProposal(result)) return
+    if (result) flash(verificationMode === 'before-after'
+      ? 'Avant et après sont synchronisés sur la zone concernée. Validez ou écartez ce correctif depuis le constat.'
+      : 'Le changement de code est prêt à être relu avant validation.')
   }
 
   async function previewTheme(target: ThemeTarget): Promise<void> {
@@ -1128,25 +1205,38 @@ export default function App(): ReactElement {
     if (result) flash(`Variante ${target === 'dark' ? 'sombre' : 'claire'} affichée en aperçu, pas encore validée.`)
   }
 
+  function planIncludingProposal(): ChangePlanRequest | null {
+    if (!proposal || !proposalContext || !proposal.changes.length) return null
+    const next: ChangePlanRequest = {
+      issueIds: [...selectedIssueIds],
+      themeTarget,
+      instructions: [...instructions]
+    }
+    if (proposalContext.kind === 'issue' && proposalContext.issueId && !next.issueIds.includes(proposalContext.issueId)) next.issueIds.push(proposalContext.issueId)
+    if (proposalContext.kind === 'theme' && proposalContext.themeTarget) next.themeTarget = proposalContext.themeTarget
+    if (proposalContext.kind === 'instruction' && proposalContext.instruction && !next.instructions.includes(proposalContext.instruction)) next.instructions.push(proposalContext.instruction)
+    return next
+  }
+
+  function retainPlan(request: ChangePlanRequest): void {
+    setSelectedIssueIds(request.issueIds)
+    setThemeTarget(request.themeTarget)
+    setInstructions(request.instructions)
+  }
+
   function acceptProposal(): void {
-    if (!proposal || !proposalContext || !proposal.changes.length) return
+    const next = planIncludingProposal()
+    if (!next) return
     invalidateStaging()
-    if (proposalContext.kind === 'issue' && proposalContext.issueId) {
-      setSelectedIssueIds((current) => current.includes(proposalContext.issueId!) ? current : [...current, proposalContext.issueId!])
-      flash('Correctif validé et ajouté au plan. Construisez le staging depuis Correctifs quand vous êtes prêt.')
-    }
-    if (proposalContext.kind === 'theme' && proposalContext.themeTarget) {
-      setThemeTarget(proposalContext.themeTarget)
+    retainPlan(next)
+    if (proposalContext?.issueId) setQueuedIssueIds((current) => current.filter((id) => id !== proposalContext.issueId))
+    if (proposalContext?.kind === 'theme') {
       flash('Variante validée et ajoutée au plan. Elle reste sans effet sur les exports avant construction du staging.')
-    }
-    if (proposalContext.kind === 'instruction' && proposalContext.instruction) {
-      setInstructions((current) => current.includes(proposalContext.instruction!) ? current : [...current, proposalContext.instruction!])
-      if (proposalContext.issueId) {
-        flash('Correctif visuel validé. Il reste isolé du projet source jusqu’à la construction du staging.')
-      } else {
-        setMessages((current) => [...current, { id: `s-${Date.now()}`, author: 'system', text: 'Ajustement validé et ajouté au plan de correctifs. Le projet source reste intact.' }])
-        flash('Ajustement validé. Construisez le staging depuis Correctifs pour le rendre exportable.')
-      }
+    } else if (proposalContext?.kind === 'instruction' && !proposalContext.issueId) {
+      setMessages((current) => [...current, { id: `s-${Date.now()}`, author: 'system', text: 'Ajustement validé et ajouté au plan de correctifs. Le projet source reste intact.' }])
+      flash('Ajustement validé. Construisez le staging depuis Correctifs pour le rendre exportable.')
+    } else {
+      flash('Correctif validé et ajouté au plan. Le projet source reste intact tant que vous ne l’appliquez pas.')
     }
   }
 
@@ -1159,23 +1249,24 @@ export default function App(): ReactElement {
     if (removesIssue && proposalContext?.issueId) setSelectedIssueIds((current) => current.filter((id) => id !== proposalContext.issueId))
     if (removesTheme) setThemeTarget(null)
     if (removesInstruction && proposalContext?.instruction) setInstructions((current) => current.filter((value) => value !== proposalContext.instruction))
+    if (proposalContext?.issueId) setQueuedIssueIds((current) => current.filter((id) => id !== proposalContext.issueId))
     if (changesDraft) invalidateStaging()
     void discardProposal(changesDraft ? 'La proposition et sa validation ont été retirées du plan.' : undefined, keepStaging ? 'staging' : 'source')
   }
 
-  async function buildStaging(nextInstructions = instructions): Promise<void> {
-    if (!project) return
-    if (!project.capabilities?.staging) { flash('Ce projet ne possède pas encore de rendu exploitable à corriger.'); return }
-    if (!api().buildStaging) { flash('Le moteur de staging sera disponible dans l’application desktop.'); return }
+  async function buildStaging(request: ChangePlanRequest = { issueIds: selectedIssueIds, themeTarget, instructions }): Promise<StagingSnapshot | null> {
+    if (!project) return null
+    if (!project.capabilities?.staging) { flash('Ce projet ne possède pas encore de rendu exploitable à corriger.'); return null }
+    if (!api().buildStaging) { flash('Le moteur de staging sera disponible dans l’application desktop.'); return null }
     const requestedRevision = draftRevision.current
     const requestedProjectId = project.id
     setBusy(true)
     try {
-      const result = await api().buildStaging!({ issueIds: selectedIssueIds, themeTarget, instructions: nextInstructions })
+      const result = await api().buildStaging!(request)
       if (requestedRevision !== draftRevision.current || requestedProjectId !== activeProjectId.current) {
         await api().clearStaging?.().catch(() => undefined)
         flash('Le plan a changé pendant la construction. Le staging obsolète a été écarté ; relancez la construction.')
-        return
+        return null
       }
       setStaging(result)
       setProposal(null)
@@ -1183,7 +1274,105 @@ export default function App(): ReactElement {
       setPreviewThemeTarget(null)
       setPreviewMode('staging')
       flash(`${result.changes.length} modification${result.changes.length > 1 ? 's' : ''} préparée${result.changes.length > 1 ? 's' : ''} sans toucher aux sources.`)
-    } catch { flash('Le staging n’a pas pu être construit. Aucun fichier source n’a été modifié.') } finally { setBusy(false) }
+      return result
+    } catch (error) {
+      flash(actionError(error, 'Le staging n’a pas pu être construit. Aucun fichier source n’a été modifié.'))
+      return null
+    } finally { setBusy(false) }
+  }
+
+  async function refreshProjectAfterSourceWrite(snapshotBeforeWrite: ProjectSnapshot & ProjectExtra, pathBeforeWrite: string): Promise<void> {
+    if (snapshotBeforeWrite.source.kind !== 'local-project') return
+    try {
+      const refreshed = await window.responsiver.reanalyzeCurrentProject()
+      applyProject(refreshed)
+      if (refreshed.routes.some((route) => route.path === pathBeforeWrite)) setActivePath(pathBeforeWrite)
+    } catch {
+      localRuntimeAudits.current.clear()
+      setRuntimeAudit(null)
+      flash('Les fichiers ont été modifiés, mais la réanalyse automatique a échoué. Rouvrez le projet pour actualiser les constats.')
+    }
+  }
+
+  async function applyPlanToSource(request: ChangePlanRequest, message: string): Promise<void> {
+    if (!project || project.source.kind !== 'local-project' || project.source.readOnly || !api().applyStagingToSource) {
+      flash('L’application directe exige un projet local modifiable. Le workflow de staging et d’export reste disponible.')
+      return
+    }
+    invalidateStaging()
+    retainPlan(request)
+    const projectBeforeWrite = project
+    const pathBeforeWrite = activePath
+    const prepared = await buildStaging(request)
+    const conflicts = prepared?.outcomes?.filter((outcome) => outcome.status === 'conflict') ?? []
+    if (conflicts.length) {
+      flash(`${conflicts.length} proposition${conflicts.length > 1 ? 's sont incompatibles' : ' est incompatible'} avec une autre. Retirez l’une des corrections signalées avant de les appliquer.`)
+      return
+    }
+    if (!prepared?.changes.length) return
+    setBusy(true)
+    fastApplyInFlight.current = true
+    try {
+      const result = await api().applyStagingToSource!()
+      setStaging(null)
+      setProposal(null)
+      setProposalContext(null)
+      setPreviewMode('source')
+      await refreshProjectAfterSourceWrite(projectBeforeWrite, pathBeforeWrite)
+      setUndoAvailable(Boolean((result as { undoAvailable?: boolean } | null)?.undoAvailable ?? true))
+      flash(message)
+    } catch (error) {
+      flash(actionError(error, 'L’application directe a échoué. Le staging reste réversible et les sources n’ont pas été modifiées partiellement.'))
+    } finally {
+      fastApplyInFlight.current = false
+      setBusy(false)
+    }
+  }
+
+  async function acceptAndApplyProposal(): Promise<void> {
+    if (!proposal || !proposalContext || !proposal.changes.length) return
+    const next: ChangePlanRequest = {
+      issueIds: proposalContext.kind === 'issue' && proposalContext.issueId ? [proposalContext.issueId] : [],
+      themeTarget: proposalContext.kind === 'theme' ? proposalContext.themeTarget ?? null : null,
+      instructions: proposalContext.kind === 'instruction' && proposalContext.instruction ? [proposalContext.instruction] : []
+    }
+    if (proposalContext?.issueId) setQueuedIssueIds((current) => current.filter((id) => id !== proposalContext.issueId))
+    await applyPlanToSource(next, 'Correctif appliqué au projet puis réanalysé. Vous pouvez encore annuler cette application.')
+  }
+
+  async function applyQueuedSafeIssues(issueIds: string[]): Promise<void> {
+    if (!project) return
+    const safeIds = issueIds.filter((id) => {
+      const issue = project.issues.find((candidate) => candidate.id === id)
+      return issue && classifyProjectIssue(issue, project.issues).action === 'auto-safe'
+    })
+    if (!safeIds.length) { flash('Aucune correction sûre sélectionnée.'); return }
+    const next = { issueIds: [...new Set(safeIds)], themeTarget: null, instructions: [] }
+    setQueuedIssueIds((current) => current.filter((id) => !safeIds.includes(id)))
+    await applyPlanToSource(next, `${safeIds.length} correction${safeIds.length > 1 ? 's' : ''} sûre${safeIds.length > 1 ? 's' : ''} appliquée${safeIds.length > 1 ? 's' : ''}, puis projet réanalysé.`)
+  }
+
+  async function undoLastApply(): Promise<void> {
+    if (!project || !undoAvailable || !api().undoLastStagingApply) return
+    const projectBeforeUndo = project
+    const pathBeforeUndo = activePath
+    setBusy(true)
+    fastApplyInFlight.current = true
+    try {
+      await api().undoLastStagingApply!()
+      setStaging(null)
+      setProposal(null)
+      setProposalContext(null)
+      setPreviewMode('source')
+      await refreshProjectAfterSourceWrite(projectBeforeUndo, pathBeforeUndo)
+      setUndoAvailable(false)
+      flash('La dernière application a été annulée et le projet a été réanalysé.')
+    } catch (error) {
+      flash(actionError(error, 'La dernière application n’a pas pu être annulée.'))
+    } finally {
+      fastApplyInFlight.current = false
+      setBusy(false)
+    }
   }
 
   async function clearStaging(): Promise<void> {
@@ -1205,7 +1394,17 @@ export default function App(): ReactElement {
       return
     }
     const result = await requestProposal({ issueIds: [], themeTarget: null, instructions: [value] }, { kind: 'instruction', instruction: value }, 'proposal')
-    const recognized = result?.changes.some((change) => change.kind === 'instruction') ?? false
+    if (!result) {
+      setMessages((current) => [...current, { id: `s-${Date.now()}`, author: 'system', text: 'La proposition n’a pas pu être préparée. Aucun changement n’a été ajouté au plan.' }])
+      return
+    }
+    const alreadyCovered = result.changes.length === 0 && Boolean(result.outcomes?.some((outcome) => outcome.status === 'skipped' && /déjà|existe|couverte/i.test(outcome.reason)))
+    if (alreadyCovered) {
+      discardNoopProposal(result)
+      setMessages((current) => [...current, { id: `s-${Date.now()}`, author: 'system', text: 'Ajustement reconnu, mais déjà couvert par la version actuelle. Aucun doublon n’a été créé.' }])
+      return
+    }
+    const recognized = result.changes.length > 0
     setMessages((current) => [...current, { id: `s-${Date.now()}`, author: 'system', text: recognized ? 'Ajustement interprété et affiché en proposition. Validez-le explicitement ci-dessous avant de construire le staging.' : 'Je n’ai pas reconnu de règle locale sûre. Reformulez avec une couleur, un espacement, un rayon ou une taille de texte précise.' }])
   }
 
@@ -1286,6 +1485,12 @@ export default function App(): ReactElement {
   function toggleAcceptedIssue(id: string): void {
     invalidateStaging()
     setSelectedIssueIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id])
+  }
+
+  function toggleQueuedIssue(id: string): void {
+    const issue = project?.issues.find((candidate) => candidate.id === id)
+    if (!issue || classifyProjectIssue(issue, project?.issues).action === 'advisory') return
+    setQueuedIssueIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id])
   }
 
   function removeInstruction(value: string): void {
@@ -1441,7 +1646,7 @@ export default function App(): ReactElement {
               </div> : labMode === 'device' ? <PreviewFrame project={project} origin={activeOrigin} device={currentDevice} path={activePath} focusSelector={focusedSelector} themeOverride={nativeThemeTarget} resizable allowUpscale={stageFullscreen} onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onPathChange={changePreviewPath} onThemeChange={activeOrigin === project.previewOrigin ? setRuntimeTheme : undefined} onAudit={activeOrigin === project.previewOrigin ? applyRuntimeAudit : undefined} onRenderStatus={setRuntimeRenderStatus} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} /> : <div className="comparison-grid">{compareDevices.map((device) => <PreviewFrame key={device.id} project={project} origin={activeOrigin} device={device} path={activePath} compact focusSelector={focusedSelector} themeOverride={nativeThemeTarget} label={device.family === 'smartphone' ? 'Smartphone' : device.family === 'tablet' ? 'Tablette' : 'Ordinateur'} onPathChange={changePreviewPath} onThemeChange={activeOrigin === project.previewOrigin ? setRuntimeTheme : undefined} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} />)}</div>}
             </div>
           </div>
-          {scopedProject && <Inspector project={scopedProject} activeIssueCount={routeIssues.length} totalIssueCount={project.issues.length} showAllIssues={showAllIssues} onShowAllIssues={setShowAllIssues} tab={inspectorTab} onTab={setInspectorTab} selectedIssue={selectedIssue} selectedIds={selectedIssueIds} onPreviewIssue={(issue) => void previewIssue(issue)} onToggleIssue={toggleAcceptedIssue} detectedTheme={detectedTheme} themeTarget={themeTarget} previewThemeTarget={previewThemeTarget} onPreviewTheme={(target) => void previewTheme(target)} onRemoveTheme={removeTheme} proposal={proposal} proposalContext={proposalContext} previewBusy={previewBusy} staging={staging} runtimeAudit={runtimeAudit} runtimeRenderStatus={runtimeRenderStatus} instructions={instructions} onRemoveInstruction={removeInstruction} messages={messages} draft={draft} onDraft={setDraft} onSubmit={submitInstruction} busy={busy} onAcceptProposal={acceptProposal} onRejectProposal={rejectProposal} onBuild={() => void buildStaging()} onClear={() => void clearStaging()} assistantRoute={remoteState?.path ?? activePath} assistantViewport={{ width: currentDevice.width, height: currentDevice.height, deviceScaleFactor: 1, mobile: currentDevice.family !== 'computer', touch: currentDevice.family !== 'computer' }} assistantScreenshot={remoteAudit?.screenshotDataUrl ?? null} workspaceEnabled={workspaceEnabled} onWorkspacePreviewOrigin={setWorkspaceOrigin} onNotice={flash} onOpenCode={() => go('code')} />}
+          {scopedProject && <Inspector project={scopedProject} allIssues={project.issues} activeIssueCount={routeIssues.length} totalIssueCount={project.issues.length} showAllIssues={showAllIssues} onShowAllIssues={setShowAllIssues} tab={inspectorTab} onTab={setInspectorTab} selectedIssue={selectedIssue} selectedIds={selectedIssueIds} queuedIds={queuedIssueIds} onPreviewIssue={(issue) => void previewIssue(issue)} onToggleIssue={toggleAcceptedIssue} onToggleQueued={toggleQueuedIssue} detectedTheme={detectedTheme} themeTarget={themeTarget} previewThemeTarget={previewThemeTarget} onPreviewTheme={(target) => void previewTheme(target)} onRemoveTheme={removeTheme} proposal={proposal} proposalContext={proposalContext} previewBusy={previewBusy} staging={staging} runtimeAudit={runtimeAudit} runtimeRenderStatus={runtimeRenderStatus} instructions={instructions} onRemoveInstruction={removeInstruction} messages={messages} draft={draft} onDraft={setDraft} onSubmit={submitInstruction} busy={busy} onAcceptProposal={acceptProposal} onAcceptAndApply={() => void acceptAndApplyProposal()} onRejectProposal={rejectProposal} onApplySafe={(ids) => void applyQueuedSafeIssues(ids)} undoAvailable={undoAvailable} onUndo={() => void undoLastApply()} directApplyAvailable={project.source.kind === 'local-project' && !project.source.readOnly && Boolean(api().applyStagingToSource) && Boolean(frameworkSupport?.durableAutomaticFixes)} onBuild={() => void buildStaging()} onClear={() => void clearStaging()} assistantRoute={remoteState?.path ?? activePath} assistantViewport={{ width: currentDevice.width, height: currentDevice.height, deviceScaleFactor: 1, mobile: currentDevice.family !== 'computer', touch: currentDevice.family !== 'computer' }} assistantScreenshot={remoteAudit?.screenshotDataUrl ?? null} workspaceEnabled={workspaceEnabled} onWorkspacePreviewOrigin={setWorkspaceOrigin} onNotice={flash} onOpenCode={() => go('code')} />}
         </div>
         {!isRemote && previewMode === 'source' && project.previewOrigin && (project.previewReadiness.status === 'ready' || project.previewReadiness.status === 'degraded') && <div className="runtime-audit-probes" aria-hidden="true" inert>
           {auditDevices.map((device) => <PreviewFrame key={`${project.id}:${device.id}`} compact project={project} origin={project.previewOrigin} device={device} path={activePath} label={`Sonde ${auditFamily(device.width)}`} onAudit={(audit) => applyRuntimeAudit(audit, false)} />)}
@@ -1450,7 +1655,7 @@ export default function App(): ReactElement {
       </div>}
 
       {destination === 'code' && project && <div className="code-page">
-        <header className="page-head page-head--code"><div><span className="overline">Espace de changements</span><h1>Code</h1><p>Éditez dans un overlay temporaire, observez le rendu à côté du fichier, puis appliquez uniquement les changements explicitement validés.</p></div><div className="code-head-actions">{project.source.network === 'localhost' && !workspaceEnabled && <button className="button button--secondary" type="button" onClick={() => void associateCurrentLocalhostRoot()} disabled={busy}><Icon name="folder" size={15} /> Associer les sources</button>}<span className={workspaceEnabled ? 'code-capability is-ready' : 'code-capability'}><i />{workspaceEnabled ? 'Sources locales liées' : 'Lecture seule'}</span></div></header>
+        <header className="page-head page-head--code"><div><span className="overline">Espace de changements</span><h1>Code</h1><p>Éditez dans un overlay temporaire, observez le rendu à côté du fichier, puis appliquez uniquement les changements explicitement validés.</p></div><div className="code-head-actions">{project.source.network === 'localhost' && !workspaceEnabled && <button className="button button--secondary" type="button" onClick={() => void associateCurrentLocalhostRoot()} disabled={busy}><Icon name="folder" size={15} /> Associer les sources</button>}<span className={workspaceEnabled ? 'code-capability is-ready' : 'code-capability'}><i />{workspaceEnabled ? 'Sources locales liées' : 'Lecture seule'}</span>{frameworkSupport && <details className="framework-support"><summary><Icon name="code" size={13} /><span>{frameworkSupport.stack}</span><b>{frameworkSupport.editingLabel}</b></summary><p>{frameworkSupport.detail}</p></details>}</div></header>
         {project.source.kind === 'linked-localhost' && <div className="code-runtime-note"><Icon name="info" size={16} /><div><strong>Aperçu instantané pour les feuilles CSS</strong><span>Pour HTML, Twig, PHP, JavaScript ou les fichiers de framework, prévisualisez le diff puis appliquez explicitement le fichier : Responsiver recharge ensuite le serveur local, sans exécuter lui-même Symfony, Docker ou votre build.</span></div></div>}
         <div className="code-studio">
           <React.Suspense fallback={<div className="code-workspace code-loading"><span /> Chargement de l’éditeur local…</div>}><CodeWorkspace projectId={project.id} enabled={workspaceEnabled} preferredPath={selectedIssue?.source?.file ?? null} onNotice={flash} onPreviewOrigin={setWorkspaceOrigin} /></React.Suspense>
@@ -1576,8 +1781,9 @@ function DeviceControls({ family, devices: choices, selectedId, width, height, o
   </div>
 }
 
-function Inspector({ project, activeIssueCount, totalIssueCount, showAllIssues, onShowAllIssues, tab, onTab, selectedIssue, selectedIds, onPreviewIssue, onToggleIssue, detectedTheme, themeTarget, previewThemeTarget, onPreviewTheme, onRemoveTheme, proposal, proposalContext, previewBusy, staging, runtimeAudit, runtimeRenderStatus, instructions, onRemoveInstruction, messages, draft, onDraft, onSubmit, busy, onAcceptProposal, onRejectProposal, onBuild, onClear, assistantRoute, assistantViewport, assistantScreenshot, workspaceEnabled, onWorkspacePreviewOrigin, onNotice, onOpenCode }: {
+function Inspector({ project, allIssues, activeIssueCount, totalIssueCount, showAllIssues, onShowAllIssues, tab, onTab, selectedIssue, selectedIds, queuedIds, onPreviewIssue, onToggleIssue, onToggleQueued, detectedTheme, themeTarget, previewThemeTarget, onPreviewTheme, onRemoveTheme, proposal, proposalContext, previewBusy, staging, runtimeAudit, runtimeRenderStatus, instructions, onRemoveInstruction, messages, draft, onDraft, onSubmit, busy, onAcceptProposal, onAcceptAndApply, onRejectProposal, onApplySafe, undoAvailable, onUndo, directApplyAvailable, onBuild, onClear, assistantRoute, assistantViewport, assistantScreenshot, workspaceEnabled, onWorkspacePreviewOrigin, onNotice, onOpenCode }: {
   project: ProjectSnapshot & ProjectExtra
+  allIssues: ProjectIssue[]
   activeIssueCount: number
   totalIssueCount: number
   showAllIssues: boolean
@@ -1586,8 +1792,10 @@ function Inspector({ project, activeIssueCount, totalIssueCount, showAllIssues, 
   onTab: (tab: InspectorTab) => void
   selectedIssue: ProjectIssue | null
   selectedIds: string[]
+  queuedIds: string[]
   onPreviewIssue: (issue: ProjectIssue) => void
   onToggleIssue: (id: string) => void
+  onToggleQueued: (id: string) => void
   detectedTheme: RuntimeTheme
   themeTarget: ThemeTarget | null
   previewThemeTarget: ThemeTarget | null
@@ -1607,7 +1815,12 @@ function Inspector({ project, activeIssueCount, totalIssueCount, showAllIssues, 
   onSubmit: (event: FormEvent) => void
   busy: boolean
   onAcceptProposal: () => void
+  onAcceptAndApply: () => void
   onRejectProposal: () => void
+  onApplySafe: (ids: string[]) => void
+  undoAvailable: boolean
+  onUndo: () => void
+  directApplyAvailable: boolean
   onBuild: () => void
   onClear: () => void
   assistantRoute: string
@@ -1618,54 +1831,92 @@ function Inspector({ project, activeIssueCount, totalIssueCount, showAllIssues, 
   onNotice: (message: string) => void
   onOpenCode: () => void
 }): ReactElement {
-  const issueExtra = selectedIssue as (ProjectIssue & IssueExtra) | null
+  const [findingGroup, setFindingGroup] = useState<FindingGroup>('visual')
+  const [showOtherVisualIssues, setShowOtherVisualIssues] = useState(false)
+  useEffect(() => {
+    setFindingGroup('visual')
+    setShowOtherVisualIssues(false)
+  }, [project.id])
+  const consolidatedIssues = useMemo(() => consolidateProjectIssues(project.issues, allIssues), [allIssues, project.issues])
+  const consolidatedAllIssues = useMemo(() => consolidateProjectIssues(allIssues), [allIssues])
+  const classifiedIssues = useMemo(() => consolidatedIssues
+    .map((issue) => ({ issue, policy: classifyProjectIssue(issue, allIssues) }))
+    .sort((left, right) => right.policy.priority - left.policy.priority), [allIssues, consolidatedIssues])
+  const allClassifiedIssues = useMemo(() => consolidatedAllIssues.map((issue) => ({ issue, policy: classifyProjectIssue(issue, allIssues) })), [allIssues, consolidatedAllIssues])
+  const groupedIssues = {
+    visual: classifiedIssues.filter(({ policy }) => policy.group === 'visual'),
+    code: classifiedIssues.filter(({ policy }) => policy.group === 'code')
+  }
+  const groupItems = groupedIssues[findingGroup]
+  const visibleItems = findingGroup === 'visual' && !showOtherVisualIssues ? groupItems.slice(0, 5) : groupItems
+  const hiddenVisualCount = Math.max(0, groupedIssues.visual.length - 5)
+  const activeSelectedIssue = classifiedIssues.find(({ issue }) => issue.id === selectedIssue?.id && classifyProjectIssue(issue, allIssues).group === findingGroup)?.issue ?? groupItems[0]?.issue ?? null
+  const selectedPolicy = activeSelectedIssue ? classifyProjectIssue(activeSelectedIssue, allIssues) : null
+  const issueExtra = activeSelectedIssue as (ProjectIssue & IssueExtra) | null
   const acceptedCount = selectedIds.length + instructions.length + (themeTarget ? 1 : 0)
-  const selectedInstruction = deterministicInstructionForIssue(selectedIssue)
-  const selectedProposal = proposalContext?.issueId === selectedIssue?.id ? proposal : null
-  const selectedAccepted = selectedIssue ? selectedIds.includes(selectedIssue.id) || Boolean(selectedInstruction && instructions.includes(selectedInstruction)) : false
+  const queuedSet = new Set(queuedIds)
+  const acceptedSet = new Set(selectedIds)
+  const selectedInstruction = deterministicInstructionForIssue(activeSelectedIssue)
+  const selectedProposal = proposalContext?.issueId === activeSelectedIssue?.id ? proposal : null
+  const selectedAccepted = activeSelectedIssue ? acceptedSet.has(activeSelectedIssue.id) || Boolean(selectedInstruction && instructions.includes(selectedInstruction)) : false
   const canStage = project.capabilities?.staging !== false
-  const selectedActionable = canStage && Boolean(issueExtra?.fix && issueExtra.fix.kind !== 'manual' || selectedInstruction)
+  const linkedWorkspace = project.source.kind === 'linked-localhost' && workspaceEnabled
+  const selectedActionable = canStage && selectedPolicy?.action !== 'advisory' && Boolean(issueExtra?.fix && issueExtra.fix.kind !== 'manual' || selectedInstruction)
   const instructionProposal = proposalContext?.kind === 'instruction' ? proposal : null
+  const queuedClassified = allClassifiedIssues.filter(({ issue, policy }) => queuedSet.has(issue.id) && policy.action !== 'advisory')
+  const queuedInGroup = groupItems.filter(({ issue }) => queuedSet.has(issue.id))
+  const safeQueuedIds = queuedClassified.filter(({ policy }) => policy.action === 'auto-safe').map(({ issue }) => issue.id)
+  const nextQueued = queuedInGroup[0]?.issue ?? queuedClassified[0]?.issue ?? null
+  const showPlanBar = tab === 'findings' || tab === 'fixes'
   return <aside className="inspector" aria-label="Inspecteur">
-    <div className="inspector-tabs" role="tablist" aria-label="Outils d’analyse">{inspectorTabs.map((item) => <button role="tab" aria-selected={tab === item.id} className={tab === item.id ? 'is-active' : ''} key={item.id} onClick={() => onTab(item.id)} title={item.label}><Icon name={item.icon} size={16} /><span>{item.label}</span>{item.id === 'findings' && <b>{project.issues.length}</b>}</button>)}</div>
+    <div className="inspector-tabs" role="tablist" aria-label="Outils d’analyse">{inspectorTabs.map((item) => <button role="tab" aria-selected={tab === item.id} className={tab === item.id ? 'is-active' : ''} key={item.id} onClick={() => onTab(item.id)} title={item.label}><Icon name={item.icon} size={16} /><span>{item.label}</span>{item.id === 'findings' && <b>{consolidatedIssues.length}</b>}</button>)}</div>
     <div className="inspector-content">
+      {showPlanBar && <section className="change-plan-bar" aria-label="Plan de changements"><div className="change-plan-title"><Icon name="changes" size={15} /><span><strong>Plan de changements</strong><small>Les sélections visuelles restent en attente de comparaison.</small></span></div><div className="change-plan-counts"><span><b>{acceptedCount}</b> validé{acceptedCount > 1 ? 's' : ''}</span><span className={queuedClassified.length ? 'is-pending' : ''}><b>{queuedClassified.length}</b> en attente</span>{staging && <span><b>{staging.changes.length}</b> changement{staging.changes.length > 1 ? 's' : ''}</span>}</div><div className="change-plan-actions">{undoAvailable && <button className="text-button" type="button" onClick={onUndo} disabled={busy}><Icon name="back" size={13} /> Annuler</button>}{findingGroup === 'code' && safeQueuedIds.length > 0 && directApplyAvailable && <button className="button button--primary button--compact" type="button" onClick={() => onApplySafe(safeQueuedIds)} disabled={busy || previewBusy}>Appliquer {safeQueuedIds.length} sûr{safeQueuedIds.length > 1 ? 's' : ''}</button>}{nextQueued && <button className="button button--secondary button--compact" type="button" onClick={() => onPreviewIssue(nextQueued)} disabled={busy || previewBusy}>Examiner</button>}<button className="text-button" type="button" onClick={() => onTab('fixes')}>Ouvrir le plan</button></div></section>}
       {tab === 'findings' && <><div className="inspector-heading"><div><span className="overline">Analyse déterministe</span><h2>Constats</h2></div>{runtimeAudit && <span className="live-chip"><i /> Direct</span>}</div>
-        <div className="issue-scope" role="group" aria-label="Portée des constats"><button className={!showAllIssues ? 'is-active' : ''} onClick={() => onShowAllIssues(false)}>Page active <b>{activeIssueCount}</b></button><button className={showAllIssues ? 'is-active' : ''} onClick={() => onShowAllIssues(true)}>Toutes les pages <b>{totalIssueCount}</b></button></div>
+        <div className="finding-groups" role="tablist" aria-label="Catégorie de constats"><button type="button" role="tab" aria-selected={findingGroup === 'visual'} aria-controls="finding-list" className={findingGroup === 'visual' ? 'is-active' : ''} onClick={() => setFindingGroup('visual')}><Icon name="compare" size={14} /><span><strong>Rendu & responsive</strong><small>Défauts réellement observés</small></span><b>{groupedIssues.visual.length}</b></button><button type="button" role="tab" aria-selected={findingGroup === 'code'} aria-controls="finding-list" className={findingGroup === 'code' ? 'is-active' : ''} onClick={() => setFindingGroup('code')}><Icon name="code" size={14} /><span><strong>Code & structure</strong><small>Diffs, sémantique et environnement</small></span><b>{groupedIssues.code.length}</b></button></div>
+        <div className="issue-scope" role="group" aria-label="Portée des constats"><button className={!showAllIssues ? 'is-active' : ''} onClick={() => onShowAllIssues(false)}>Page active <b>{consolidatedIssues.length}</b></button><button className={showAllIssues ? 'is-active' : ''} onClick={() => onShowAllIssues(true)}>Toutes les pages <b>{consolidatedAllIssues.length}</b></button></div>
         {project.analysis?.truncated && <div className="runtime-alert runtime-alert--errors" role="status"><Icon name="info" size={16} /><div><strong>Analyse partielle signalée</strong><span>Une limite de sécurité sur le nombre de fichiers, de nœuds ou de constats a été atteinte. Les résultats visibles restent valides, mais ne couvrent pas nécessairement toute la page.</span></div></div>}
         {project.previewReadiness?.status === 'degraded' && <div className="runtime-alert"><Icon name="info" size={16} /><div><strong>Prévisualisation disponible avec limites</strong><span>{project.previewReadiness.summary} Les points concernés figurent dans les constats ci-dessous.</span></div></div>}
+        {linkedWorkspace && !canStage && <div className="runtime-alert"><Icon name="code" size={16} /><div><strong>Rendu localhost et sources associées</strong><span>L’audit visuel utilise le serveur réel. Les adaptations de framework restent manuelles dans Code tant qu’un correctif ne peut pas être relié sûrement à son fichier auteur.</span></div></div>}
         {project.previewBasePath && <div className="runtime-alert runtime-alert--artifact"><Icon name="info" size={16} /><div><strong>Audit sur une sortie compilée</strong><span>Les corrections ciblent {project.previewBasePath}. Un prochain build peut les écraser : reportez ensuite les changements utiles dans les sources.</span></div></div>}
         {runtimeRenderStatus && runtimeRenderStatus.failureCount > 0 && <div className="runtime-alert runtime-alert--errors" aria-live="polite"><Icon name="finding" size={16} /><div><strong>{runtimeRenderStatus.failureCount} erreur{runtimeRenderStatus.failureCount > 1 ? 's' : ''} observée{runtimeRenderStatus.failureCount > 1 ? 's' : ''} pendant le rendu</strong><span>{runtimeRenderStatus.firstFailure ?? 'Le site reste navigable ; vérifiez les scripts et ressources signalés dans la console du projet.'}</span></div></div>}
         {runtimeAudit && runtimeAudit.overflowCount > 0 && <div className="runtime-alert"><Icon name="ruler" size={16} /><div><strong>{runtimeAudit.overflowCount} débordement{runtimeAudit.overflowCount > 1 ? 's' : ''} visible{runtimeAudit.overflowCount > 1 ? 's' : ''}</strong><span>Mesuré à {runtimeAudit.viewportWidth}px sur la page active.</span></div></div>}
-        <div className="issue-list">{project.issues.length ? project.issues.map((issue) => {
+        <div className="issue-list" id="finding-list" role="tabpanel">{visibleItems.length ? visibleItems.map(({ issue, policy }) => {
           const generatedInstruction = deterministicInstructionForIssue(issue)
-          const accepted = selectedIds.includes(issue.id) || Boolean(generatedInstruction && instructions.includes(generatedInstruction))
+          const accepted = acceptedSet.has(issue.id) || Boolean(generatedInstruction && instructions.includes(generatedInstruction))
+          const queued = queuedSet.has(issue.id)
           const fix = (issue as ProjectIssue & IssueExtra).fix
-          const previewable = Boolean(generatedInstruction || fix && fix.kind !== 'manual')
-          return <button key={issue.id} className={`${selectedIssue?.id === issue.id ? 'issue-item is-active' : 'issue-item'}${accepted ? ' is-accepted' : ''}`} onClick={() => onPreviewIssue(issue)} disabled={busy} aria-label={`${issue.title} — ouvrir la page et ${previewable ? 'prévisualiser l’avant et l’après' : 'localiser le constat'}`}><i className={`severity-dot severity-dot--${issue.severity}`} /><span><strong>{issue.title}</strong><small>{(issue as ProjectIssue & IssueExtra).routePath ?? issue.viewport}</small></span><em>{accepted ? 'Retenu' : severityLabel(issue)}</em></button>
-        }) : <div className="empty-panel"><Icon name="check" /><strong>Aucun motif connu détecté</strong><span>Continuez la vérification visuelle sur les trois familles d’appareils.</span></div>}</div>
-        {selectedIssue && <article className="issue-detail"><header><span className={`severity severity--${selectedIssue.severity}`}>{severityLabel(selectedIssue)}</span><code>{selectedIssue.rule}</code></header><h3>{selectedIssue.title}</h3><p>{selectedIssue.description}</p><dl><div><dt>Source</dt><dd>{selectedIssue.source ? <code>{selectedIssue.source.file}:{selectedIssue.source.line}</code> : selectedIssue.evidence?.selector ? <code>{selectedIssue.evidence.selector}</code> : 'Mesure à l’exécution'}</dd></div><div><dt>Proposition</dt><dd>{selectedIssue.proposal}</dd></div>{selectedIssue.confidence && <div><dt>Confiance</dt><dd>{selectedIssue.confidence === 'certain' ? 'Certaine' : selectedIssue.confidence === 'probable' ? 'Probable' : 'À vérifier'}</dd></div>}</dl>{selectedIssue.source && workspaceEnabled && <button className="text-button issue-code-link" onClick={onOpenCode}><Icon name="code" size={14} /> Ouvrir le fichier associé</button>}
-          {!selectedActionable ? <div className="manual-review"><Icon name="info" size={15} /><span>Ce point ne possède pas de transformation automatique sûre. Responsiver vous amène à la page concernée sans simuler un résultat.</span></div> : previewBusy && proposalContext?.issueId === selectedIssue.id ? <div className="proposal-pending" role="status"><span className="loading-mark" /> Préparation de l’avant / après…</div> : selectedProposal ? <ProposalDecision title="Correctif isolé" accepted={selectedAccepted} changeCount={selectedProposal.changes.length} disabled={busy} onAccept={onAcceptProposal} onReject={onRejectProposal} /> : <button className="button button--primary button--full" onClick={() => onPreviewIssue(selectedIssue)} disabled={busy}><Icon name="compare" /> Voir l’avant / après</button>}
+          const previewable = policy.action !== 'advisory' && Boolean(generatedInstruction || fix && fix.kind !== 'manual')
+          const badge = findingPolicyBadge(policy)
+          const selectionDisabled = accepted || !previewable || !canStage
+          return <div key={issue.id} className={`${queued ? 'issue-row is-pending' : 'issue-row'}${accepted ? ' is-accepted' : ''}`}><label className="issue-selector" title={policy.action === 'advisory' ? 'Ce constat demande une intervention manuelle' : accepted ? 'Déjà validé dans le plan' : 'Ajouter à la sélection'}><input type="checkbox" checked={accepted || queued} disabled={selectionDisabled || busy} onChange={() => onToggleQueued(issue.id)} aria-label={policy.action === 'advisory' ? `${issue.title} — sélection indisponible, intervention manuelle` : accepted ? `${issue.title} — déjà validé` : `${issue.title} — sélectionner pour examen`} /><span aria-hidden="true"><Icon name="check" size={11} /></span></label><button className={`${activeSelectedIssue?.id === issue.id ? 'issue-item is-active' : 'issue-item'}${accepted ? ' is-accepted' : ''}`} onClick={() => onPreviewIssue(issue)} disabled={busy} aria-label={`${issue.title} — ${previewable ? policy.verification === 'source-diff' ? 'relire le changement de code' : 'prévisualiser l’avant et l’après' : 'localiser le constat'}`}><i className={`severity-dot severity-dot--${issue.severity}`} /><span><strong>{issue.title}</strong><small>{(issue as ProjectIssue & IssueExtra).routePath ?? issue.viewport}</small><span className={`finding-badge finding-badge--${badge.tone}`}>{badge.label}</span></span><em>{accepted ? 'Validé' : queued ? 'En attente' : severityLabel(issue)}</em></button></div>
+        }) : <div className="empty-panel"><Icon name="check" /><strong>{findingGroup === 'visual' ? 'Aucun défaut visuel prioritaire' : 'Aucun constat de code'}</strong><span>{findingGroup === 'visual' ? 'Continuez la vérification sur les trois familles d’appareils.' : 'La structure connue ne présente aucun signal à relire.'}</span></div>}</div>
+        {findingGroup === 'visual' && hiddenVisualCount > 0 && <button className="show-more-findings" type="button" onClick={() => setShowOtherVisualIssues((current) => !current)} aria-expanded={showOtherVisualIssues}>{showOtherVisualIssues ? 'Revenir aux 5 priorités' : `Afficher les ${hiddenVisualCount} autres constats`}</button>}
+        {activeSelectedIssue && <article className="issue-detail"><header><span className={`severity severity--${activeSelectedIssue.severity}`}>{severityLabel(activeSelectedIssue)}</span><span className={`finding-badge finding-badge--${findingPolicyBadge(selectedPolicy!).tone}`}>{findingPolicyBadge(selectedPolicy!).label}</span><code>{activeSelectedIssue.rule}</code></header><h3>{activeSelectedIssue.title}</h3><p>{activeSelectedIssue.description}</p><dl><div><dt>Source</dt><dd>{activeSelectedIssue.source ? <code>{activeSelectedIssue.source.file}:{activeSelectedIssue.source.line}</code> : activeSelectedIssue.evidence?.selector ? <code>{activeSelectedIssue.evidence.selector}</code> : 'Mesure à l’exécution'}</dd></div><div><dt>Proposition</dt><dd>{activeSelectedIssue.proposal}</dd></div>{activeSelectedIssue.confidence && <div><dt>Confiance</dt><dd>{activeSelectedIssue.confidence === 'certain' ? 'Certaine' : activeSelectedIssue.confidence === 'probable' ? 'Probable' : 'À vérifier'}</dd></div>}</dl>{activeSelectedIssue.source && workspaceEnabled && <button className="text-button issue-code-link" onClick={onOpenCode}><Icon name="code" size={14} /> Ouvrir le fichier associé</button>}
+          {!selectedActionable ? <div className="manual-review"><Icon name="info" size={15} /><span>Ce point reste consultatif : Responsiver vous mène à sa source sans inventer de transformation automatique.</span></div> : previewBusy && proposalContext?.issueId === activeSelectedIssue.id ? <div className="proposal-pending" role="status"><span className="loading-mark" /> {selectedPolicy?.verification === 'source-diff' ? 'Préparation du diff…' : 'Préparation de l’avant / après…'}</div> : selectedProposal ? <ProposalDecision title={selectedPolicy?.verification === 'source-diff' ? 'Changement de code isolé' : 'Correctif visuel isolé'} accepted={selectedAccepted} changeCount={selectedProposal.changes.length} changes={selectedPolicy?.verification === 'source-diff' ? selectedProposal.changes : undefined} disabled={busy} onAccept={onAcceptProposal} onApply={directApplyAvailable ? onAcceptAndApply : undefined} onReject={onRejectProposal} /> : <button className="button button--primary button--full" onClick={() => onPreviewIssue(activeSelectedIssue)} disabled={busy}><Icon name={selectedPolicy?.verification === 'source-diff' ? 'code' : 'compare'} />{selectedPolicy?.verification === 'source-diff' ? 'Relire le changement' : 'Voir l’avant / après'}</button>}
         </article>}
       </>}
-      {tab === 'fixes' && <><div className="inspector-heading"><div><span className="overline">Choix explicitement validés</span><h2>Correctifs</h2></div><strong className="count-badge">{acceptedCount}</strong></div>{!canStage && <div className="manual-review"><Icon name="info" size={15} /><span>Rendez d’abord l’entrée exploitable, puis réanalysez le projet. Aucun correctif ne sera généré sur un layout absent.</span></div>}<div className="fix-list">{acceptedCount ? <>
-        {project.issues.filter((issue) => selectedIds.includes(issue.id)).map((issue) => <article key={issue.id}><span className={(issue as ProjectIssue & IssueExtra).fix?.confidence === 'safe' ? 'confidence confidence--safe' : 'confidence'}>{(issue as ProjectIssue & IssueExtra).fix?.confidence === 'safe' ? 'Automatique' : 'À réviser'}</span><strong>{issue.title}</strong><code>{issue.source?.file ?? issue.rule}</code><button onClick={() => onToggleIssue(issue.id)} disabled={busy} aria-label={`Retirer ${issue.title}`}><Icon name="close" size={14} /></button></article>)}
+      {tab === 'fixes' && <><div className="inspector-heading"><div><span className="overline">Choix explicitement validés</span><h2>Correctifs</h2></div><strong className="count-badge">{acceptedCount}</strong></div>{!canStage && <div className="manual-review"><Icon name="info" size={15} /><span>{linkedWorkspace ? 'Le rendu est bien auditable. Utilisez Code pour modifier les sources associées ; Responsiver ne génère pas de patch de framework sans correspondance source fiable.' : 'Rendez d’abord l’entrée exploitable, puis réanalysez le projet. Aucun correctif ne sera généré sur un layout absent.'}</span></div>}<div className="fix-list">{acceptedCount ? <>
+        {allIssues.filter((issue) => selectedIds.includes(issue.id)).map((issue) => { const badge = findingPolicyBadge(classifyProjectIssue(issue, allIssues)); return <article key={issue.id}><span className={`finding-badge finding-badge--${badge.tone}`}>{badge.label}</span><strong>{issue.title}</strong><code>{issue.source?.file ?? issue.rule}</code><button onClick={() => onToggleIssue(issue.id)} disabled={busy} aria-label={`Retirer ${issue.title}`}><Icon name="close" size={14} /></button></article> })}
         {themeTarget && <article><span className="confidence confidence--safe">Thème</span><strong>Variante {themeTarget === 'dark' ? 'sombre' : 'claire'}</strong><code>Palette complémentaire validée</code><button onClick={onRemoveTheme} disabled={busy} aria-label={`Retirer la variante ${themeTarget === 'dark' ? 'sombre' : 'claire'}`}><Icon name="close" size={14} /></button></article>}
         {instructions.map((instruction) => <article key={instruction}><span className="confidence">Instruction</span><strong>{instruction}</strong><code>Règle locale déterministe</code><button onClick={() => onRemoveInstruction(instruction)} disabled={busy} aria-label={`Retirer l’instruction ${instruction}`}><Icon name="close" size={14} /></button></article>)}
       </> : <div className="empty-panel"><Icon name="changes" /><strong>Aucun choix validé</strong><span>Prévisualisez un constat, un thème ou une instruction, puis validez sa proposition.</span></div>}</div>
+        {queuedClassified.length > 0 && <section className="pending-fixes"><header><span><i /> À examiner</span><strong>{queuedClassified.length}</strong></header><p>Ces constats sont sélectionnés, mais aucun correctif visuel n’est validé sans passage par l’avant/après.</p><div>{queuedClassified.slice(0, 4).map(({ issue, policy }) => <button type="button" key={issue.id} onClick={() => onPreviewIssue(issue)}><span>{issue.title}</span><em>{policy.group === 'visual' ? 'Avant/après' : policy.action === 'auto-safe' ? 'Sûr' : 'À relire'}</em></button>)}</div>{queuedClassified.length > 4 && <small>+ {queuedClassified.length - 4} autre{queuedClassified.length - 4 > 1 ? 's' : ''}</small>}</section>}
         {staging && <div className="staging-summary"><span><i /> Staging prêt</span><strong>{staging.changes.length} changements · {staging.changedFiles.length} fichiers</strong><button className="text-button" onClick={onClear} disabled={busy}>Écarter</button></div>}
         <button className="button button--primary button--full inspector-action" onClick={onBuild} disabled={busy || previewBusy || !acceptedCount || !canStage}>{busy ? 'Construction…' : staging ? 'Reconstruire le staging' : 'Construire le staging'} <Icon name="arrow" /></button>
       </>}
       {tab === 'theme' && <>{!canStage && <div className="manual-review"><Icon name="info" size={15} /><span>La variante de thème sera disponible après qu’un rendu exploitable aura été détecté.</span></div>}<ThemePanel project={project} detectedTheme={detectedTheme} acceptedTarget={themeTarget} previewTarget={previewThemeTarget} proposal={proposalContext?.kind === 'theme' ? proposal : null} busy={previewBusy} disabled={busy || !canStage} onPreview={onPreviewTheme} onAccept={onAcceptProposal} onReject={onRejectProposal} onRemoveAccepted={onRemoveTheme} /></>}
       {tab === 'conversation' && <div className="assistant-stack">
         <LocalAssistant key={project.id} project={project} route={assistantRoute} viewport={assistantViewport} screenshotDataUrl={assistantScreenshot} workspaceEnabled={workspaceEnabled} onNotice={onNotice} onPreviewOrigin={onWorkspacePreviewOrigin} />
-        <section className="deterministic-assistant"><header><div><span className="overline">Ajustements rapides</span><h3>Sans modèle</h3></div><span className="rule-chip">Hors ligne</span></header>{!canStage && <div className="manual-review"><Icon name="info" size={15} /><span>Les ajustements déterministes exigent un projet local avec un rendu exploitable.</span></div>}<div className="conversation">{messages.map((message) => <div className={`message message--${message.author}`} key={message.id}><span>{message.author === 'user' ? 'Vous' : 'Responsiver'}</span><p>{message.text}</p></div>)}</div>{previewBusy && proposalContext?.kind === 'instruction' && <div className="proposal-pending" role="status"><span className="loading-mark" /> Interprétation locale…</div>}{instructionProposal && proposalContext?.instruction && <ProposalDecision title="Ajustement prévisualisé" accepted={instructions.includes(proposalContext.instruction)} changeCount={instructionProposal.changes.filter((change) => change.kind === 'instruction').length} disabled={busy || !canStage} onAccept={onAcceptProposal} onReject={onRejectProposal} />}<form className="prompt-form" onSubmit={onSubmit}><label htmlFor="instruction">Nouvel ajustement</label><textarea id="instruction" value={draft} onChange={(event) => onDraft(event.target.value)} placeholder="Ex. Réduis les arrondis et utilise #b94d32 comme couleur d’accent." rows={4} disabled={!canStage} /><div><small>Couleur · espacement · rayon · texte · navigation</small><button className="button button--primary" disabled={busy || previewBusy || !draft.trim() || !canStage}>Prévisualiser</button></div></form></section>
+        <section className="deterministic-assistant"><header><div><span className="overline">Ajustements rapides</span><h3>Sans modèle</h3></div><span className="rule-chip">Hors ligne</span></header>{!canStage && <div className="manual-review"><Icon name="info" size={15} /><span>{linkedWorkspace ? 'Les ajustements automatiques ne ciblent pas encore les templates du framework. Le studio Code reste disponible avec aperçu CSS sur le localhost.' : 'Les ajustements déterministes exigent un projet local avec un rendu exploitable.'}</span></div>}<div className="conversation">{messages.map((message) => <div className={`message message--${message.author}`} key={message.id}><span>{message.author === 'user' ? 'Vous' : 'Responsiver'}</span><p>{message.text}</p></div>)}</div>{previewBusy && proposalContext?.kind === 'instruction' && <div className="proposal-pending" role="status"><span className="loading-mark" /> Interprétation locale…</div>}{instructionProposal && proposalContext?.instruction && <ProposalDecision title="Ajustement prévisualisé" accepted={instructions.includes(proposalContext.instruction)} changeCount={instructionProposal.changes.length} disabled={busy || !canStage} onAccept={onAcceptProposal} onReject={onRejectProposal} />}<form className="prompt-form" onSubmit={onSubmit}><label htmlFor="instruction">Nouvel ajustement</label><textarea id="instruction" value={draft} onChange={(event) => onDraft(event.target.value)} placeholder="Ex. Réduis les arrondis et utilise #b94d32 comme couleur d’accent." rows={4} disabled={!canStage} /><div><small>Couleur · espacement · rayon · texte · navigation</small><button className="button button--primary" disabled={busy || previewBusy || !draft.trim() || !canStage}>Prévisualiser</button></div></form></section>
       </div>}
     </div>
   </aside>
 }
 
-function ProposalDecision({ title, accepted, changeCount, disabled = false, onAccept, onReject }: { title: string; accepted: boolean; changeCount: number; disabled?: boolean; onAccept: () => void; onReject: () => void }): ReactElement {
-  return <div className={accepted ? 'proposal-decision is-accepted' : 'proposal-decision'}><header><span><i />{accepted ? 'Validé dans le plan' : 'Aperçu non validé'}</span><b>{changeCount} changement{changeCount > 1 ? 's' : ''}</b></header><strong>{title}</strong><p>{accepted ? 'Ce choix sera inclus lors de la prochaine construction du staging.' : 'La proposition reste temporaire et ne peut pas être exportée tant que vous ne la validez pas.'}</p><div><button className="button button--quiet" onClick={onReject} disabled={disabled}>Écarter</button><button className="button button--primary" onClick={onAccept} disabled={disabled || accepted || !changeCount}><Icon name={accepted ? 'check' : 'plus'} size={15} />{accepted ? 'Validé' : 'Valider'}</button></div></div>
+function ProposalDecision({ title, accepted, changeCount, changes, disabled = false, onAccept, onApply, onReject }: { title: string; accepted: boolean; changeCount: number; changes?: StagingChange[]; disabled?: boolean; onAccept: () => void; onApply?: () => void; onReject: () => void }): ReactElement {
+  const firstChange = changes?.[0]
+  return <div className={accepted ? 'proposal-decision is-accepted' : 'proposal-decision'}><header><span><i />{accepted ? 'Validé dans le plan' : 'Aperçu non validé'}</span><b>{changeCount} changement{changeCount > 1 ? 's' : ''}</b></header><strong>{title}</strong><p>{accepted ? 'Ce choix reste disponible dans le workflow avancé.' : 'Ajoutez-le au plan, ou appliquez uniquement cette proposition au projet local.'}</p>{firstChange && <div className="proposal-mini-diff" aria-label="Diff du changement proposé"><code>{firstChange.file}</code><del>{firstChange.before}</del><ins>{firstChange.after}</ins>{changes && changes.length > 1 && <small>+ {changes.length - 1} autre{changes.length > 2 ? 's' : ''} changement{changes.length > 2 ? 's' : ''} dans la proposition</small>}</div>}<div className={onApply ? 'proposal-actions proposal-actions--direct' : 'proposal-actions'}><button className="button button--quiet" onClick={onReject} disabled={disabled}>Écarter</button><button className="button button--secondary" onClick={onAccept} disabled={disabled || accepted || !changeCount}><Icon name={accepted ? 'check' : 'plus'} size={15} />{accepted ? 'Dans le plan' : 'Ajouter au plan'}</button>{onApply && <button className="button button--primary" onClick={onApply} disabled={disabled || !changeCount}><Icon name="check" size={15} /> Valider et appliquer</button>}</div></div>
 }
 
 function resolvableThemeRoles(variables: Array<{ name: string; value: string; role: string }>): Set<string> {

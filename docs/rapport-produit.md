@@ -4,7 +4,7 @@
 
 Responsiver 0.6 élargit le laboratoire local à trois usages cohérents : travailler sur un projet local, auditer une URL publique en lecture seule et inspecter un localhost éventuellement lié à ses sources.
 
-La version ajoute un rendu distant Chromium réellement navigable, un audit visuel sur cinq largeurs, un espace Monaco avec overlays et application explicite, un assistant facultatif connecté uniquement à Ollama ou llama.cpp en local, ainsi qu’un compagnon Chrome minimal. Les workflows déterministes de proposition, thème, avant/après, staging et export restent disponibles pour les projets locaux.
+La version ajoute un rendu distant Chromium réellement navigable, un audit visuel sur cinq largeurs, un espace Monaco avec overlays et application explicite, un assistant facultatif connecté uniquement à Ollama ou llama.cpp en local, ainsi qu’un compagnon Chrome minimal. Le laboratoire distingue désormais le rendu du code, consolide les preuves statiques/runtime et ajoute un parcours direct réversible pour les corrections locales simples.
 
 La direction UI conserve sa propre grammaire — rail graphite, papier minéral, accent vermillon, densité d’outil professionnel et panneaux maître/détail — en s’inspirant des principes opérationnels observés dans [Agency Agents](https://github.com/msitarzewski/agency-agents), sans reprendre son code, ses assets ou son identité.
 
@@ -23,11 +23,15 @@ La direction UI conserve sa propre grammaire — rail graphite, papier minéral,
 | Travailler sur Symfony/MySQL/Docker | Connexion au localhost déjà lancé | Responsiver ne démarre ni backend, DB, conteneur ou migration |
 | Associer le code au localhost | Dossier source facultatif, session `linked-localhost` | L’association est explicite |
 | Détecter des problèmes visuels | Balayage distant 360/390/768/1024/1440 et audit runtime local : overflow, navigation, collisions, densité, typographie, interaction, médias et contraste | Routes visitées cumulées, pas de crawler autonome |
+| Séparer code et visuel | Catégories **Rendu & responsive** / **Code & structure**, priorités bornées et badges d’action | Les constats sans transformateur restent consultatifs |
+| Éviter les doublons | Fusion cause CSS + preuve runtime sur route/sélecteur exacts, y compris viewport | L’identifiant du correctif source reste canonique |
 | Détecter les défauts objectifs | Overflow, clipping, texte, tactile, fixe, image, contraste, runtime | Ce n’est pas une note esthétique universelle |
 | Ouvrir un constat dans son contexte | Route exacte, viewport, sélecteur, scroll et contour temporaire | L’interface signale si le sélecteur n’existe plus |
 | Conserver l’audit URL | Agrégation de session, synthèse copiable et rapport JSON | Aucune persistance sans export explicite |
 | Voir l’avant/après | Source et Proposition séparées | Projets locaux déterministes |
 | Accepter ou refuser chaque correctif | Consultation sans effet puis décision explicite | Staging reconstruit uniquement avec les choix retenus |
+| Corriger une navbar rapidement | Avant/Après puis **Valider et appliquer** sur la proposition isolée | Sources locales durables uniquement, route conservée |
+| Annuler l’application | Sauvegarde de la dernière écriture, contrôle des hashes et restauration fichiers/dossiers | Refus si un fichier a changé depuis |
 | Prévisualiser clair/sombre | Activation native ou proposition complémentaire | Validation du thème séparée |
 | Modifier le code soi-même | Monaco, explorateur, overlay, diff, écarter/appliquer | Écriture seulement via **Appliquer au fichier** |
 | Voir immédiatement le résultat | Runner workspace local ; injection CSS sur localhost lié | HTML/JS distant dépendent du rechargement du serveur de dev |
@@ -54,15 +58,23 @@ La direction UI conserve sa propre grammaire — rail graphite, papier minéral,
 - **Playwright** : validation Electron et navigateur.
 - **electron-builder** : paquets desktop et ressources compagnon.
 
-## Deux cycles de modification
+## Trois niveaux de modification
 
-### Correctifs déterministes
+### Correctif isolé et rapide
+
+```text
+Constat → Avant/Après → Valider et appliquer → Réanalyse sur la même route → Annuler si besoin
+```
+
+Ce raccourci n’applique que la proposition observée. Il est limité aux sources HTML/CSS locales durables. Le moteur prévérifie tous les hashes, remplace chaque fichier par renommage atomique, restaure le lot en cas d’échec et garde une sauvegarde d’annulation en mémoire.
+
+### Plan de correctifs avancé
 
 ```text
 Source → Proposition éphémère → Accepter/Écarter → Staging → Export
 ```
 
-La source reste intacte. Les fichiers sont re-hachés avant l’export et une modification concurrente invalide le staging.
+La source reste intacte. Les fichiers sont re-hachés avant l’export et une modification concurrente invalide le staging. Les conflits entre correctifs, thèmes et instructions bloquent la construction au lieu de produire un lot partiel silencieux.
 
 ### Éditeur et assistant
 
@@ -72,7 +84,7 @@ Source → Overlay Monaco → Preview + Diff → Appliquer au fichier
 
 La frappe et les propositions IA restent en mémoire. Le clic **Appliquer au fichier** autorise une écriture atomique dans la source. Si son hash ou sa version a changé, Responsiver refuse l’opération.
 
-Cette distinction est volontaire : le staging sert à préparer une livraison non destructive ; Monaco sert à modifier réellement un fichier après confirmation.
+Cette distinction est volontaire : le parcours court optimise une correction unique déjà comparée, le staging prépare une livraison groupée non destructive et Monaco reste l’outil de modification manuelle fichier par fichier.
 
 ## Analyse visuelle
 
@@ -123,7 +135,8 @@ Les paquets restent non signés. Une diffusion sans avertissements système et u
 - L’audit distant cumule les routes visitées sur cinq largeurs, mais ne parcourt pas seul tout le site ni tous les breakpoints possibles.
 - Le rendu est Chromium/Electron ; Firefox et WebKit ne sont pas automatisés.
 - Une URL publique ne donne pas accès aux sources auteur et ne peut pas être corrigée sur le serveur.
-- Un localhost lié permet l’édition locale ; seule la CSS est injectée directement dans la session distante.
+- Un localhost lié permet l’édition locale ; seule la CSS est injectée directement dans la session distante. La stack Symfony/Laravel/Node/frontend est détectée depuis ses manifests, mais les templates de framework ne reçoivent pas encore de correctif automatique sans correspondance source fiable.
+- L’application directe est volontairement absente sur un artefact compilé ; le staging peut l’exporter, mais un prochain build l’écraserait.
 - Le moteur visuel applique des règles objectives mais ne remplace pas une revue UI/UX humaine.
 - L’assistant dépend d’un moteur et d’un modèle locaux installés séparément ; aucun modèle n’est embarqué.
 - Une sortie IA peut être incorrecte, vulnérable ou trop large malgré les filtres.
@@ -136,9 +149,11 @@ Les paquets restent non signés. Une diffusion sans avertissements système et u
 Contrôles reproductibles exécutés sur l’état consolidé :
 
 - `npm run typecheck` : réussi ;
-- `npm test` : 58 tests applicatifs réussis ;
+- `npm test` : 99 tests applicatifs réussis ;
 - `npm run test:native-host` : 17 tests du protocole Chrome réussis ;
 - `npm run test:e2e:remote` : redirection, historique multi-route, ciblage, rapport et formulaire localhost réussis ;
+- `npm run test:e2e` : parcours Electron complet, catégories, sélection, avant/après, application réelle, conservation de route et annulation réussis ;
+- `npm run test:e2e:localhost-link` : association à chaud, détection Symfony/React/Tailwind et écriture explicite réussies ;
 - `npm run build` : réussi ;
 - `npm run package:dir` : paquet macOS arm64 construit ;
 - `npm audit --audit-level=moderate` : aucune vulnérabilité signalée ;

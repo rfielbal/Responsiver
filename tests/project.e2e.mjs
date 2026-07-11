@@ -72,6 +72,7 @@ try {
     }
 
     await page.getByRole('tab', { name: /Constats/ }).click()
+    await page.getByRole('tab', { name: /Code & structure/ }).click()
     const externalNotice = page.locator('.issue-item').filter({ hasText: 'Ressource externe indisponible' })
     if (await externalNotice.count()) {
       await externalNotice.first().click()

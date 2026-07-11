@@ -2,7 +2,7 @@
 
 Responsiver est un laboratoire desktop open source pour inspecter la responsivité d’un projet local, d’un localhost ou d’un site public, puis préparer et valider des corrections sans service cloud imposé.
 
-La version 0.6 ajoute quatre capacités majeures : audit d’URL dans une session Chromium isolée, analyse visuelle multi-viewport, espace code Monaco avec prévisualisation en mémoire et assistant IA local facultatif via Ollama ou llama.cpp. Un compagnon Chrome permet également de transmettre l’onglet actif à l’application.
+La version 0.6 ajoute l’audit d’URL dans une session Chromium isolée, l’analyse visuelle multi-viewport, un espace code Monaco, un assistant IA local facultatif via Ollama ou llama.cpp et un compagnon Chrome. Le laboratoire sépare maintenant les défauts de rendu des diagnostics de code et propose un parcours court, réversible, pour appliquer un correctif responsive isolé sans traverser tout le workflow d’export.
 
 ## Trois sources, trois niveaux d’accès
 
@@ -34,6 +34,10 @@ Responsiver ne prétend pas retrouver le code auteur d’un site public à parti
 - Plein écran sans perdre la route, la taille, le focus ou la version observée.
 - Comparaison de plusieurs appareils distincte de la comparaison Source / Proposition.
 - Ouverture d’un constat sur sa route et son sélecteur lorsque celui-ci est disponible.
+- Deux catégories explicites : **Rendu & responsive** pour les défauts mesurés, **Code & structure** pour les diagnostics statiques, de build ou de réseau.
+- Cinq priorités visuelles affichées d’abord ; les autres restent accessibles sans saturer l’espace de travail.
+- Fusion d’une preuve runtime et de sa cause CSS exacte lorsqu’elles partagent route et sélecteur, notamment pour éviter les doublons de viewport ou de navigation.
+- Sélection multiple indépendante de l’ouverture du détail ; un constat sans transformation fiable reste consultatif et n’entre pas dans une fausse file d’application.
 - Avant / Après contextualisé avant validation d’un correctif.
 - Thème clair ou sombre prévisualisé immédiatement ; une variante existante est activée sans doublon. Une variante absente n’est générée que si les rôles fond/texte et leurs contrastes sont fiables ; images, filtres et accents de marque restent intacts, sinon le moteur refuse prudemment.
 
@@ -87,12 +91,15 @@ L’installation est encore manuelle. Le connecteur ne démarre pas Responsiver 
 
 ## Corrections et écritures
 
-Deux workflows coexistent :
+Trois niveaux coexistent afin qu’une correction simple reste rapide sans supprimer les garde-fous :
 
-1. les corrections déterministes et thèmes passent par Source → Proposition → décisions explicites → Staging → export ;
-2. l’espace Monaco et les propositions de l’assistant passent par Source → Overlay mémoire → Diff → **Appliquer au fichier**.
+1. **Parcours court** : constat visuel → Avant/Après → **Valider et appliquer**. Seule la proposition actuellement comparée est écrite, jamais le reste du plan ; la route et le viewport sont conservés après réanalyse.
+2. **Workflow avancé** : Source → Proposition → **Ajouter au plan** → Staging combiné → Révision → export. Il sert aux lots, thèmes et instructions.
+3. **Code et assistant** : Source → Overlay Monaco → Preview + Diff → **Appliquer au fichier**.
 
-Le premier workflow ne modifie jamais l’original et exporte un patch, les fichiers changés ou une copie corrigée. Le second peut modifier le fichier source, mais seulement après le clic explicite et après vérification qu’il n’a pas changé sur le disque.
+L’application directe est réservée aux sources HTML/CSS locales durables, pas aux URLs, localhost ou artefacts compilés. Tous les chemins et hashes sont validés avant la première substitution ; les fichiers sont remplacés atomiquement, les conflits bloquent le lot entier et la dernière application reste annulable tant que personne n’a remodifié les fichiers. L’annulation restaure aussi les nouveaux fichiers et dossiers créés. La feuille gérée `.responsiver/responsiver.generated.css` est réutilisée au lieu d’accumuler des variantes numérotées.
+
+Les changements de code à relire montrent leur mini-diff avant validation. Les transformations incompatibles sur la même déclaration, deux palettes ou deux instructions CSS sont refusées au lieu de laisser silencieusement gagner la dernière. Le staging avancé reste non destructif et exporte un patch, les fichiers changés ou une copie corrigée.
 
 ## Données et réseau
 
@@ -109,7 +116,9 @@ Consultez [PRIVACY.md](PRIVACY.md) et [SECURITY.md](SECURITY.md) pour le détail
 
 Le runner local ouvre les sites statiques et les sorties déjà compilées : HTML, CSS, JavaScript, médias, WebAssembly et routes SPA avec fallback local.
 
-Responsiver n’exécute jamais automatiquement `npm install`, un build, PHP, Symfony, un serveur backend, Docker Compose, MySQL, une migration ou une commande du projet. Un projet dynamique fonctionne dans le mode localhost lorsque son environnement est déjà lancé. Associer son dossier source active alors Monaco et les overlays sans donner à Responsiver l’accès à sa base de données.
+Responsiver n’exécute jamais automatiquement `npm install`, un build, PHP, Symfony, un serveur backend, Docker Compose, MySQL, une migration ou une commande du projet. Un projet dynamique fonctionne dans le mode localhost lorsque son environnement est déjà lancé. Associer son dossier source active alors Monaco et les overlays sans donner à Responsiver l’accès à sa base de données. Les manifests associés permettent d’annoncer notamment Symfony, Laravel, Next.js, React, Vue, Svelte, Vite, Express et Tailwind sans exécuter leur chaîne de build.
+
+Cette détection n’est pas un adaptateur de réécriture de framework. Sur un localhost Symfony/Next/Docker, l’audit utilise le rendu réel et le studio Code peut modifier les sources autorisées ; les correctifs automatiques restent désactivés tant qu’un nœud rendu ne peut pas être relié sans ambiguïté à son template auteur.
 
 Les modifications d’un artefact compilé peuvent être prévisualisées et exportées, mais un prochain build peut les écraser. Elles doivent être reportées dans les sources auteur.
 
@@ -130,6 +139,7 @@ npm test
 npm run test:native-host
 npm run test:e2e
 npm run test:e2e:remote
+npm run test:e2e:localhost-link
 npm run build
 npm audit
 ```
