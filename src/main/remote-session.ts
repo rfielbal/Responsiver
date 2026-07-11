@@ -8,11 +8,15 @@ import type {
   RemoteAuditMode,
   RemoteAuditResult as SharedRemoteAuditResult,
   RemoteFocusResult,
+  RemoteInspectorSelection,
+  RemoteInspectorState,
   RemoteOpenRequest,
   RemotePageState,
   RemoteViewBounds,
-  RemoteViewport
+  RemoteViewport,
+  RemoteVisualStyleResult
 } from '../shared/contracts'
+import { compileVisualEditCss, type VisualEditOperation } from '../shared/visual-editor'
 import {
   REMOTE_AUDIT_BOOTSTRAP_SCRIPT,
   buildRemoteAuditScript,
@@ -43,9 +47,163 @@ const maxAuditFindingsPerViewport = 60
 const maxAuditFindingsTotal = 20
 const defaultViewport: RemoteViewport = { width: 393, height: 852, deviceScaleFactor: 1, mobile: true, touch: true }
 
+export const REMOTE_INSPECTOR_LIMITS = Object.freeze({
+  maxCssBytes: 64 * 1024,
+  maxSelectorLength: 320,
+  maxRouteLength: 2_048,
+  maxTextLength: 180,
+  maxClasses: 16,
+  maxClassLength: 80,
+  maxStyleProperties: 64,
+  maxStyleValueLength: 240,
+  maxOccurrences: 10_000,
+  maxCoordinate: 100_000
+})
+
+const inspectorStyleProperties = Object.freeze([
+  'display', 'position', 'width', 'height', 'min-width', 'max-width', 'min-height', 'max-height',
+  'margin-top', 'margin-right', 'margin-bottom', 'margin-left',
+  'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
+  'gap', 'row-gap', 'column-gap', 'flex-direction', 'flex-wrap', 'justify-content', 'align-items', 'align-self',
+  'grid-template-columns', 'grid-template-rows', 'font-family', 'font-size', 'font-weight', 'line-height',
+  'letter-spacing', 'text-align', 'color', 'background-color', 'border-color', 'border-width', 'border-style',
+  'border-radius', 'box-shadow', 'opacity', 'overflow', 'object-fit', 'visibility'
+])
+
+const inspectorStylePropertySet = new Set<string>(inspectorStyleProperties)
+
+const remoteInspectorPayloadFunction = `function () {
+  const element = this;
+  if (!(element instanceof Element)) return null;
+  const clean = (value, maximum) => String(value || '').replace(/[\\u0000-\\u001f\\u007f]/g, ' ').replace(/\\s+/g, ' ').trim().slice(0, maximum);
+  const segmentFor = (target, positional) => {
+    const parts = [];
+    let current = target;
+    while (current instanceof Element && parts.length < 6) {
+      const parent = current.parentNode;
+      const siblings = parent && 'children' in parent ? Array.from(parent.children) : [];
+      const index = siblings.indexOf(current);
+      if (positional) {
+        parts.unshift(index >= 0 ? '*:nth-child(' + (index + 1) + ')' : '*');
+      } else {
+        if (current.id && current.id.length <= 120) {
+          parts.unshift('#' + CSS.escape(current.id));
+          break;
+        }
+        let part = current.tagName.toLowerCase();
+        const classes = Array.from(current.classList).filter((name) => name.length <= 80).slice(0, 2);
+        if (classes.length) part += '.' + classes.map((name) => CSS.escape(name)).join('.');
+        const sameTags = siblings.filter((sibling) => sibling.tagName === current.tagName);
+        if (sameTags.length > 1) part += ':nth-of-type(' + (sameTags.indexOf(current) + 1) + ')';
+        parts.unshift(part);
+      }
+      current = current.parentElement;
+    }
+    return parts.join(' > ') || '*';
+  };
+  const selectorFor = (positional) => {
+    const segments = [];
+    let current = element;
+    while (current instanceof Element && segments.length < 4) {
+      segments.unshift(segmentFor(current, positional));
+      const root = current.getRootNode();
+      if (!(root instanceof ShadowRoot)) break;
+      current = root.host;
+    }
+    return segments.join(' >>> ');
+  };
+  const preferred = selectorFor(false);
+  const positional = preferred.length <= ${REMOTE_INSPECTOR_LIMITS.maxSelectorLength} ? preferred : selectorFor(true);
+  const selector = clean(positional.length <= ${REMOTE_INSPECTOR_LIMITS.maxSelectorLength} ? positional : '*', ${REMOTE_INSPECTOR_LIMITS.maxSelectorLength});
+  const rectangle = element.getBoundingClientRect();
+  const style = getComputedStyle(element);
+  const styles = {};
+  for (const property of ${JSON.stringify(inspectorStyleProperties)}) styles[property] = clean(style.getPropertyValue(property), ${REMOTE_INSPECTOR_LIMITS.maxStyleValueLength});
+  const tag = clean(element.tagName, 32).toLowerCase();
+  const excludesEditableText = /^(?:input|option|select|textarea)$/.test(tag) || Boolean(element.closest('[contenteditable]'));
+  let occurrences = 1;
+  if (!selector.includes(' >>> ')) {
+    try { occurrences = Math.min(${REMOTE_INSPECTOR_LIMITS.maxOccurrences}, Math.max(1, document.querySelectorAll(selector).length)); } catch {}
+  }
+  return {
+    selector,
+    tag,
+    classes: Array.from(element.classList).slice(0, ${REMOTE_INSPECTOR_LIMITS.maxClasses}).map((name) => clean(name, ${REMOTE_INSPECTOR_LIMITS.maxClassLength})),
+    role: clean(element.getAttribute('role'), 80) || null,
+    ariaLabel: clean(element.getAttribute('aria-label'), 160) || null,
+    rect: { x: rectangle.x, y: rectangle.y, width: rectangle.width, height: rectangle.height },
+    styles,
+    occurrences,
+    insideFrame: window.top !== window,
+    text: excludesEditableText ? '' : clean(element.innerText || element.textContent, ${REMOTE_INSPECTOR_LIMITS.maxTextLength})
+  };
+}`
+
+function cleanInspectorText(value: unknown, maximum: number): string {
+  return typeof value === 'string'
+    ? value.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, maximum)
+    : ''
+}
+
+function boundedInspectorNumber(value: unknown, minimum: number, maximum: number): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null
+  return Math.round(Math.min(maximum, Math.max(minimum, value)) * 100) / 100
+}
+
+export function sanitizeRemoteInspectorSelection(
+  value: unknown,
+  options: { route: string; editable: boolean }
+): Omit<RemoteInspectorSelection, 'projectId'> | null {
+  if (!value || typeof value !== 'object') return null
+  const candidate = value as Record<string, unknown>
+  const selector = cleanInspectorText(candidate.selector, REMOTE_INSPECTOR_LIMITS.maxSelectorLength)
+  const tag = cleanInspectorText(candidate.tag, 32).toLowerCase()
+  if (!selector || !/^[a-z][a-z\d-]*$/i.test(tag)) return null
+  const rawRectangle = candidate.rect && typeof candidate.rect === 'object' ? candidate.rect as Record<string, unknown> : null
+  if (!rawRectangle) return null
+  const x = boundedInspectorNumber(rawRectangle.x, -REMOTE_INSPECTOR_LIMITS.maxCoordinate, REMOTE_INSPECTOR_LIMITS.maxCoordinate)
+  const y = boundedInspectorNumber(rawRectangle.y, -REMOTE_INSPECTOR_LIMITS.maxCoordinate, REMOTE_INSPECTOR_LIMITS.maxCoordinate)
+  const width = boundedInspectorNumber(rawRectangle.width, 0, REMOTE_INSPECTOR_LIMITS.maxCoordinate)
+  const height = boundedInspectorNumber(rawRectangle.height, 0, REMOTE_INSPECTOR_LIMITS.maxCoordinate)
+  if (x === null || y === null || width === null || height === null) return null
+  const styles: Record<string, string> = {}
+  if (candidate.styles && typeof candidate.styles === 'object') {
+    for (const [property, rawValue] of Object.entries(candidate.styles as Record<string, unknown>).slice(0, REMOTE_INSPECTOR_LIMITS.maxStyleProperties)) {
+      if (!inspectorStylePropertySet.has(property) || typeof rawValue !== 'string') continue
+      styles[property] = cleanInspectorText(rawValue, REMOTE_INSPECTOR_LIMITS.maxStyleValueLength)
+    }
+  }
+  const classes = Array.isArray(candidate.classes)
+    ? candidate.classes
+      .map((entry) => cleanInspectorText(entry, REMOTE_INSPECTOR_LIMITS.maxClassLength))
+      .filter(Boolean)
+      .slice(0, REMOTE_INSPECTOR_LIMITS.maxClasses)
+    : []
+  const rawOccurrences = typeof candidate.occurrences === 'number' && Number.isSafeInteger(candidate.occurrences)
+    ? candidate.occurrences
+    : 1
+  const insideFrame = candidate.insideFrame === true
+  return {
+    selector,
+    tag,
+    classes,
+    role: cleanInspectorText(candidate.role, 80) || null,
+    ariaLabel: cleanInspectorText(candidate.ariaLabel, 160) || null,
+    rect: { x, y, width, height },
+    styles,
+    occurrences: Math.min(REMOTE_INSPECTOR_LIMITS.maxOccurrences, Math.max(1, rawOccurrences)),
+    route: cleanInspectorText(options.route, REMOTE_INSPECTOR_LIMITS.maxRouteLength) || '/',
+    text: cleanInspectorText(candidate.text, REMOTE_INSPECTOR_LIMITS.maxTextLength),
+    insideFrame,
+    editable: options.editable && !insideFrame && !selector.includes(' >>> ')
+  }
+}
+
 export interface RemoteSessionCallbacks {
   onState?: (state: RemotePageState) => void
   onBlockedNavigation?: (url: string, detail: string) => void
+  onInspectorSelection?: (selection: Omit<RemoteInspectorSelection, 'projectId'>) => void
+  onInspectorShortcut?: () => void
 }
 
 export interface RemoteSessionCreateOptions extends RemoteSessionCallbacks {
@@ -246,12 +404,26 @@ export class RemoteBrowserSession {
   private closed = false
   private auditRunning = false
   private workspaceCssKey: string | null = null
+  private workspaceCss: string | null = null
+  private visualPreviewCssKey: string | null = null
+  private visualPreviewCss: string | null = null
+  private inspectorActive = false
+  private inspectorRequested = false
+  private inspectorSelectionSequence = 0
+  private navigationVisualToolsReset: Promise<void> = Promise.resolve()
   private readonly allowedHostnames = new Set<string>()
   private readonly resourceHostCache = new Map<string, { allowed: boolean; expiresAt: number }>()
   private readonly resourceHostnames = new Set<string>()
   private readonly resourceHostInflight = new Map<string, Promise<boolean>>()
   private pendingViewSettings: { viewport: RemoteViewport; scale: number } | null = null
   private viewportQueue: Promise<void> = Promise.resolve()
+  private readonly debuggerMessageHandler = (_event: unknown, method: string, params: unknown): void => {
+    if (method !== 'Overlay.inspectNodeRequested' || !this.inspectorActive || this.auditRunning || this.closed) return
+    const backendNodeId = params && typeof params === 'object' ? (params as { backendNodeId?: unknown }).backendNodeId : null
+    if (typeof backendNodeId !== 'number' || !Number.isSafeInteger(backendNodeId) || backendNodeId <= 0) return
+    const sequence = ++this.inspectorSelectionSequence
+    void this.resolveInspectorSelection(backendNodeId, sequence)
+  }
 
   private constructor(options: RemoteSessionCreateOptions, initial: NormalizedAuditUrl) {
     this.owner = options.owner
@@ -281,6 +453,7 @@ export class RemoteBrowserSession {
     this.view.setBorderRadius(7)
     this.view.setVisible(false)
     this.owner.contentView.addChildView(this.view)
+    this.view.webContents.debugger.on('message', this.debuggerMessageHandler)
     this.configureSecurity()
   }
 
@@ -357,8 +530,14 @@ export class RemoteBrowserSession {
       details.preventDefault()
       void this.requestRedirect(details.url)
     })
+    contents.on('did-start-navigation', (details) => {
+      if (details.isMainFrame && !details.isSameDocument) this.navigationVisualToolsReset = this.resetVisualToolsForNavigation()
+    })
     contents.on('did-start-loading', () => this.emitState())
-    contents.on('did-stop-loading', () => this.emitState())
+    contents.on('did-stop-loading', () => {
+      this.emitState()
+      void this.navigationVisualToolsReset.then(() => this.restoreVisualToolsAfterNavigation()).catch(() => undefined)
+    })
     contents.on('did-navigate', (_event, url) => {
       this.adoptNavigatedUrl(url)
       this.emitState()
@@ -370,6 +549,14 @@ export class RemoteBrowserSession {
       }
     })
     contents.on('page-title-updated', () => this.emitState())
+    contents.on('before-input-event', (event, input) => {
+      if (input.type !== 'keyDown') return
+      const key = input.key.toLowerCase()
+      const shortcut = input.key === 'F12' || ((input.meta || input.control) && input.alt && key === 'i') || ((input.meta || input.control) && input.shift && key === 'c')
+      if (!shortcut) return
+      event.preventDefault()
+      this.callbacks.onInspectorShortcut?.()
+    })
     contents.on('will-prevent-unload', (event) => event.preventDefault())
     contents.on('login', (event, _details, _authInfo, callback) => {
       event.preventDefault()
@@ -468,6 +655,118 @@ export class RemoteBrowserSession {
     )
   }
 
+  private get canPreviewVisualStyle(): boolean {
+    return this.mode === 'localhost' && Boolean(this.linkedSourceRoot)
+  }
+
+  private inspectorState(): RemoteInspectorState {
+    return {
+      active: this.inspectorActive,
+      editable: this.canPreviewVisualStyle,
+      path: this.state().path
+    }
+  }
+
+  private async setInspectorMode(active: boolean): Promise<void> {
+    if (!this.view.webContents.debugger.isAttached()) {
+      if (!active) return
+      throw new Error('Le moteur d’inspection Chromium n’est plus attaché à la session.')
+    }
+    await this.sendDebuggerCommand('DOM.enable')
+    await this.sendDebuggerCommand('Overlay.enable')
+    const highlightConfig = {
+      showInfo: true,
+      showStyles: true,
+      showAccessibilityInfo: true,
+      contentColor: { r: 59, g: 130, b: 160, a: 0.09 },
+      paddingColor: { r: 185, g: 77, b: 50, a: 0.12 },
+      borderColor: { r: 185, g: 77, b: 50, a: 0.92 },
+      marginColor: { r: 185, g: 77, b: 50, a: 0.08 }
+    }
+    await this.sendDebuggerCommand('Overlay.setInspectMode', {
+      mode: active ? 'searchForNode' : 'none',
+      highlightConfig
+    })
+    if (!active) await this.sendDebuggerCommand('Overlay.hideHighlight').catch(() => undefined)
+  }
+
+  private async resolveInspectorSelection(backendNodeId: number, sequence: number): Promise<void> {
+    let objectId: string | null = null
+    try {
+      const resolved = await this.sendDebuggerCommand('DOM.resolveNode', { backendNodeId, objectGroup: 'responsiver-inspector' }) as {
+        object?: { objectId?: unknown }
+      }
+      objectId = typeof resolved.object?.objectId === 'string' ? resolved.object.objectId : null
+      if (!objectId) return
+      const evaluated = await this.sendDebuggerCommand('Runtime.callFunctionOn', {
+        objectId,
+        functionDeclaration: remoteInspectorPayloadFunction,
+        returnByValue: true,
+        silent: true
+      }) as { result?: { value?: unknown }; exceptionDetails?: unknown }
+      if (evaluated.exceptionDetails || sequence !== this.inspectorSelectionSequence || !this.inspectorActive || this.auditRunning || this.closed) return
+      const selection = sanitizeRemoteInspectorSelection(evaluated.result?.value, {
+        route: this.state().path,
+        editable: this.canPreviewVisualStyle
+      })
+      if (selection) this.callbacks.onInspectorSelection?.(selection)
+    } catch {
+      // Une page hostile ou en navigation peut invalider le nœud entre le clic
+      // et sa résolution. Aucune donnée partielle n’est alors remontée.
+    } finally {
+      if (objectId && this.view.webContents.debugger.isAttached()) {
+        await this.sendDebuggerCommand('Runtime.releaseObject', { objectId }).catch(() => undefined)
+      }
+    }
+  }
+
+  private async resetVisualToolsForNavigation(): Promise<void> {
+    const inspectorWasActive = this.inspectorActive
+    this.inspectorActive = false
+    this.inspectorSelectionSequence += 1
+    await this.removeWorkspaceCss()
+    await this.removeVisualPreviewCss()
+    if (inspectorWasActive) await this.setInspectorMode(false).catch(() => undefined)
+  }
+
+  private async removeVisualPreviewCss(): Promise<void> {
+    const cssKey = this.visualPreviewCssKey
+    this.visualPreviewCssKey = null
+    if (cssKey && !this.view.webContents.isDestroyed()) {
+      await this.view.webContents.removeInsertedCSS(cssKey).catch(() => undefined)
+    }
+  }
+
+  private async removeWorkspaceCss(): Promise<void> {
+    const cssKey = this.workspaceCssKey
+    this.workspaceCssKey = null
+    if (cssKey && !this.view.webContents.isDestroyed()) {
+      await this.view.webContents.removeInsertedCSS(cssKey).catch(() => undefined)
+    }
+  }
+
+  private async restoreVisualToolsAfterNavigation(): Promise<void> {
+    if (this.closed || this.auditRunning || this.view.webContents.isDestroyed() || this.view.webContents.isLoading()) return
+    const css = this.visualPreviewCss
+    const workspaceCss = this.workspaceCss
+    if (workspaceCss) {
+      await this.removeWorkspaceCss()
+      if (!this.closed && this.workspaceCss === workspaceCss) {
+        this.workspaceCssKey = await this.view.webContents.insertCSS(workspaceCss, { cssOrigin: 'author' })
+      }
+    }
+    if (css && this.canPreviewVisualStyle) {
+      await this.removeVisualPreviewCss()
+      if (!this.closed && this.visualPreviewCss === css) {
+        this.visualPreviewCssKey = await this.view.webContents.insertCSS(css, { cssOrigin: 'author' })
+      }
+    }
+    if (this.inspectorRequested && !this.closed && !this.auditRunning) {
+      await this.setInspectorMode(true)
+      this.inspectorActive = true
+    }
+  }
+
   private sameAuditScope(target: NormalizedAuditUrl): boolean {
     return this.allowedHostnames.has(target.hostname)
   }
@@ -530,6 +829,7 @@ export class RemoteBrowserSession {
 
   private async load(target: NormalizedAuditUrl): Promise<void> {
     if (this.closed) throw new Error('La session distante est fermée.')
+    await this.resetVisualToolsForNavigation()
     const previous = this.currentApproved
     this.currentApproved = target
     const contents = this.view.webContents
@@ -595,6 +895,57 @@ export class RemoteBrowserSession {
     this.linkedSourceRoot = root
   }
 
+  async startInspector(): Promise<RemoteInspectorState> {
+    if (this.closed) throw new Error('La session distante est fermée.')
+    if (this.auditRunning) throw new Error('L’inspecteur est indisponible pendant l’audit multi-viewport.')
+    this.inspectorRequested = true
+    try {
+      await this.setInspectorMode(true)
+      this.inspectorActive = true
+    } catch (error) {
+      this.inspectorRequested = false
+      throw error
+    }
+    return this.inspectorState()
+  }
+
+  async stopInspector(): Promise<RemoteInspectorState> {
+    if (this.closed) throw new Error('La session distante est fermée.')
+    this.inspectorRequested = false
+    this.inspectorActive = false
+    this.inspectorSelectionSequence += 1
+    await this.setInspectorMode(false)
+    return this.inspectorState()
+  }
+
+  async previewVisualStyle(visualEdits: VisualEditOperation[], route: string): Promise<RemoteVisualStyleResult> {
+    if (this.closed) throw new Error('La session distante est fermée.')
+    if (this.auditRunning) throw new Error('La prévisualisation visuelle est suspendue pendant l’audit multi-viewport.')
+    if (!this.canPreviewVisualStyle) {
+      throw new Error('La prévisualisation CSS est réservée à un localhost associé à ses sources locales.')
+    }
+    const compiled = compileVisualEditCss(visualEdits, route)
+    if (compiled.invalid.length || compiled.conflicts.length) {
+      throw new Error(compiled.invalid[0]?.reason ?? compiled.conflicts[0]?.reason ?? 'Le plan visuel est invalide.')
+    }
+    const css = compiled.css
+    const bytes = Buffer.byteLength(css, 'utf8')
+    if (bytes > REMOTE_INSPECTOR_LIMITS.maxCssBytes) {
+      throw new Error(`La feuille de prévisualisation dépasse ${REMOTE_INSPECTOR_LIMITS.maxCssBytes} octets.`)
+    }
+    this.visualPreviewCss = css.trim() ? css : null
+    await this.removeVisualPreviewCss()
+    if (css.trim()) this.visualPreviewCssKey = await this.view.webContents.insertCSS(css, { cssOrigin: 'author' })
+    return { applied: Boolean(this.visualPreviewCssKey), bytes, path: this.state().path }
+  }
+
+  async clearVisualStyle(): Promise<RemoteVisualStyleResult> {
+    if (this.closed) throw new Error('La session distante est fermée.')
+    this.visualPreviewCss = null
+    await this.removeVisualPreviewCss()
+    return { applied: false, bytes: 0, path: this.state().path }
+  }
+
   projectSnapshot(issues: ProjectIssue[] = []): ProjectSnapshot {
     const state = this.state()
     const current = new URL(state.url)
@@ -621,7 +972,7 @@ export class RemoteBrowserSession {
       entryPath: `${current.pathname}${current.search}${current.hash}`,
       routes: [{ path: `${current.pathname}${current.search}${current.hash}`, label: routeLabel(current), title: state.title, theme: 'unknown' }],
       theme: themeProfile(),
-      capabilities: { interactive: true, staging: false, framework: linked ? 'Serveur local associé' : null, packageManager: null, buildRequired: false, previewStrategy: 'source' },
+      capabilities: { interactive: true, staging: linked, framework: linked ? 'Serveur local associé' : null, packageManager: null, buildRequired: false, previewStrategy: 'source' },
       analysis: { truncated: false, scannedFiles: 0, scannedStyles: 0 }
     }
   }
@@ -673,6 +1024,7 @@ export class RemoteBrowserSession {
   async navigate(action: 'back' | 'forward' | 'reload' | 'url', value?: string): Promise<RemotePageState> {
     if (this.closed) throw new Error('La session distante est fermée.')
     if (this.auditRunning) throw new Error('La navigation est indisponible pendant l’audit multi-viewport.')
+    if (action !== 'url') await this.resetVisualToolsForNavigation()
     const history = this.view.webContents.navigationHistory
     if (action === 'back' && history.canGoBack()) history.goBack()
     else if (action === 'forward' && history.canGoForward()) history.goForward()
@@ -714,17 +1066,17 @@ export class RemoteBrowserSession {
   async setWorkspaceCss(css: string): Promise<void> {
     if (this.closed) throw new Error('La session distante est fermée.')
     if (this.auditRunning) throw new Error('La prévisualisation du code est suspendue pendant l’audit multi-viewport.')
-    if (this.workspaceCssKey) {
-      await this.view.webContents.removeInsertedCSS(this.workspaceCssKey).catch(() => undefined)
-      this.workspaceCssKey = null
-    }
+    this.workspaceCss = css.trim() ? css : null
+    await this.removeWorkspaceCss()
     if (css.trim()) this.workspaceCssKey = await this.view.webContents.insertCSS(css, { cssOrigin: 'author' })
   }
 
   async audit(viewportValues: RemoteViewport[]): Promise<SharedRemoteAuditResult> {
     if (this.closed) throw new Error('La session distante est fermée.')
     if (this.auditRunning) throw new Error('Un audit distant est déjà en cours.')
+    const restoreInspector = this.inspectorActive
     this.auditRunning = true
+    this.inspectorSelectionSequence += 1
     const originalViewport = this.currentViewport
     const originalScale = this.currentScale
     const requested = (viewportValues.length ? viewportValues : [originalViewport]).slice(0, 8).map(normalizeViewport)
@@ -734,6 +1086,7 @@ export class RemoteBrowserSession {
     let truncated = false
     let screenshotDataUrl: string | null = null
     try {
+      if (restoreInspector) await this.setInspectorMode(false)
       for (const viewport of requested) {
         await this.applyViewport(viewport, Math.min(1, originalScale))
         await new Promise((resolve) => setTimeout(resolve, auditSettlingMs))
@@ -781,6 +1134,7 @@ export class RemoteBrowserSession {
       this.auditRunning = false
       const lateSettings = this.takePendingViewSettings()
       if (lateSettings) await this.applyViewport(lateSettings.viewport, lateSettings.scale).catch(() => undefined)
+      if (restoreInspector && this.inspectorActive && !this.closed) await this.setInspectorMode(true).catch(() => undefined)
     }
     const state = this.state()
     const groupedFindings = consolidateRemoteAuditFindings(rawFindings)
@@ -803,6 +1157,9 @@ export class RemoteBrowserSession {
   async close(): Promise<void> {
     if (this.closed) return
     this.closed = true
+    this.inspectorRequested = false
+    this.inspectorActive = false
+    this.inspectorSelectionSequence += 1
     this.pendingViewSettings = null
     this.resourceHostCache.clear()
     this.resourceHostnames.clear()
@@ -810,9 +1167,16 @@ export class RemoteBrowserSession {
     try { this.view.setVisible(false) } catch { /* la fenêtre propriétaire peut déjà être détruite */ }
     try { this.owner.contentView.removeChildView(this.view) } catch { /* idem */ }
     const contents = this.view.webContents
+    contents.debugger.removeListener('message', this.debuggerMessageHandler)
     if (contents.isDestroyed()) return
     contents.session.webRequest.onBeforeRequest(null)
+    if (contents.debugger.isAttached()) await this.setInspectorMode(false).catch(() => undefined)
     if (this.workspaceCssKey) await contents.removeInsertedCSS(this.workspaceCssKey).catch(() => undefined)
+    if (this.visualPreviewCssKey) await contents.removeInsertedCSS(this.visualPreviewCssKey).catch(() => undefined)
+    this.workspaceCssKey = null
+    this.workspaceCss = null
+    this.visualPreviewCssKey = null
+    this.visualPreviewCss = null
     try { if (contents.debugger.isAttached()) contents.debugger.detach() } catch { /* détachement concurrent */ }
     await withTimeout(Promise.all([
       contents.session.clearStorageData(),

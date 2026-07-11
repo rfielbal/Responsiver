@@ -92,6 +92,20 @@ export const LOCAL_RUNTIME_AUDIT_LIMITS = Object.freeze({
   maxContrastChecks: 600
 })
 
+/** Bornes du mode inspecteur et des surcharges visuelles éphémères. */
+export const LOCAL_VISUAL_BRIDGE_LIMITS = Object.freeze({
+  maxCssBytes: 64 * 1024,
+  maxSelectorLength: 640,
+  maxRouteLength: 1_024,
+  maxTextLength: 180,
+  maxClasses: 12,
+  maxClassLength: 80,
+  maxStyleValueLength: 240,
+  maxOccurrenceScan: 2_500
+})
+
+const managedStylesheetPath = '.responsiver/responsiver.generated.css'
+
 const bridge = `<style data-responsiver-bridge-style>
 [data-responsiver-reveal-target] {
   outline: 3px solid #b94d32 !important;
@@ -111,6 +125,14 @@ const bridge = `<style data-responsiver-bridge-style>
   const AUDIT_MAX_CONTRAST_CHECKS = ${LOCAL_RUNTIME_AUDIT_LIMITS.maxContrastChecks};
   const AUDIT_MOBILE_MAX_WIDTH = 768;
   const AUDIT_MIN_TARGET_SIZE = 44;
+  const VISUAL_MAX_CSS_BYTES = ${LOCAL_VISUAL_BRIDGE_LIMITS.maxCssBytes};
+  const VISUAL_MAX_SELECTOR_LENGTH = ${LOCAL_VISUAL_BRIDGE_LIMITS.maxSelectorLength};
+  const VISUAL_MAX_ROUTE_LENGTH = ${LOCAL_VISUAL_BRIDGE_LIMITS.maxRouteLength};
+  const VISUAL_MAX_TEXT_LENGTH = ${LOCAL_VISUAL_BRIDGE_LIMITS.maxTextLength};
+  const VISUAL_MAX_CLASSES = ${LOCAL_VISUAL_BRIDGE_LIMITS.maxClasses};
+  const VISUAL_MAX_CLASS_LENGTH = ${LOCAL_VISUAL_BRIDGE_LIMITS.maxClassLength};
+  const VISUAL_MAX_STYLE_VALUE_LENGTH = ${LOCAL_VISUAL_BRIDGE_LIMITS.maxStyleValueLength};
+  const VISUAL_MAX_OCCURRENCE_SCAN = ${LOCAL_VISUAL_BRIDGE_LIMITS.maxOccurrenceScan};
   let originalThemeState = null;
   let mutationObserver = null;
   const nativeAttachShadow = Element.prototype.attachShadow;
@@ -729,6 +751,7 @@ const bridge = `<style data-responsiver-bridge-style>
     clearTimeout(stableRenderTimer);
     timer = setTimeout(() => { state(); audit(); renderStatus(false); }, 120);
     stableRenderTimer = setTimeout(() => renderStatus(true), 1200);
+    scheduleInspectorHighlights();
   };
   const go = (value) => {
     try {
@@ -869,6 +892,262 @@ const bridge = `<style data-responsiver-bridge-style>
     message('reveal-result', result);
     message('focus-result', result);
   };
+  const inspectorStyleProperties = Object.freeze([
+    'display', 'position', 'box-sizing', 'width', 'height', 'min-width', 'min-height', 'max-width', 'max-height',
+    'margin-top', 'margin-right', 'margin-bottom', 'margin-left', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
+    'gap', 'row-gap', 'column-gap', 'flex-direction', 'flex-wrap', 'justify-content', 'align-items', 'align-self',
+    'grid-template-columns', 'grid-template-rows', 'font-family', 'font-size', 'font-weight', 'line-height', 'letter-spacing',
+    'text-align', 'white-space', 'color', 'background-color', 'border-top-width', 'border-top-style', 'border-top-color',
+    'border-radius', 'overflow-x', 'overflow-y', 'opacity', 'visibility', 'z-index', 'transform'
+  ]);
+  let inspectorActive = false;
+  let inspectorHovered = null;
+  let inspectorSelected = null;
+  let inspectorHoverOverlay = null;
+  let inspectorSelectedOverlay = null;
+  let inspectorFrame = 0;
+  const inspectorClean = (value, limit) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, limit);
+  const inspectorRound = (value) => {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return 0;
+    return Math.round(Math.max(-10000000, Math.min(10000000, numeric)) * 100) / 100;
+  };
+  const selectorForScope = (element) => {
+    if (element.id) return '#' + CSS.escape(element.id);
+    const parts = [];
+    let current = element;
+    while (current instanceof Element && parts.length < 5) {
+      if (current.id) {
+        parts.unshift('#' + CSS.escape(current.id));
+        break;
+      }
+      let part = current.tagName.toLowerCase();
+      const classes = [...current.classList].slice(0, 2);
+      if (classes.length) part += '.' + classes.map((name) => CSS.escape(name)).join('.');
+      if (current.parentElement) {
+        const siblings = [...current.parentElement.children].filter((sibling) => sibling.tagName === current.tagName);
+        if (siblings.length > 1) part += ':nth-of-type(' + (siblings.indexOf(current) + 1) + ')';
+      }
+      parts.unshift(part);
+      current = current.parentElement;
+    }
+    return parts.join(' > ') || element.tagName.toLowerCase();
+  };
+  const positionalSelectorForScope = (element) => {
+    const parts = [];
+    let current = element;
+    while (current instanceof Element && parts.length < 6) {
+      const parent = current.parentNode;
+      const siblings = parent && 'children' in parent ? [...parent.children] : [];
+      const index = siblings.indexOf(current);
+      parts.unshift(index >= 0 ? '*:nth-child(' + (index + 1) + ')' : '*');
+      current = current.parentElement;
+    }
+    return parts.join(' > ') || '*';
+  };
+  const selectorForInspector = (element) => {
+    const build = (positional) => {
+      const segments = [];
+      let current = element;
+      while (current instanceof Element && segments.length < 4) {
+        segments.unshift(positional ? positionalSelectorForScope(current) : selectorForScope(current));
+        const root = current.getRootNode();
+        if (!(root instanceof ShadowRoot)) break;
+        current = root.host;
+      }
+      return segments.join(' >>> ');
+    };
+    const preferred = build(false);
+    if (preferred.length <= VISUAL_MAX_SELECTOR_LENGTH) return preferred;
+    const positional = build(true);
+    return positional.length <= VISUAL_MAX_SELECTOR_LENGTH ? positional : '*';
+  };
+  const isInspectorInternal = (element) => element.hasAttribute('data-responsiver-inspector-overlay') ||
+    element.hasAttribute('data-responsiver-bridge') || element.hasAttribute('data-responsiver-bridge-style') ||
+    element.hasAttribute('data-responsiver-visual-preview');
+  const isInspectable = (element) => element instanceof Element && element.isConnected && !isInspectorInternal(element) &&
+    !/^(?:base|head|link|meta|script|style|template|title)$/.test(element.tagName.toLowerCase());
+  const inspectorTargetFromEvent = (event) => {
+    const path = typeof event.composedPath === 'function' ? event.composedPath() : [event.target];
+    return path.find((candidate) => candidate instanceof Element && isInspectable(candidate)) || null;
+  };
+  const inspectorOccurrences = (selector) => {
+    let count = 0;
+    const elements = composedElements(document.documentElement, VISUAL_MAX_OCCURRENCE_SCAN);
+    for (const element of elements) {
+      if (!isInspectable(element)) continue;
+      if (selectorForInspector(element) === selector) count += 1;
+    }
+    return Math.max(1, count);
+  };
+  const inspectorPayload = (element) => {
+    if (!isInspectable(element)) return null;
+    const selector = selectorForInspector(element);
+    const rectangle = element.getBoundingClientRect();
+    const computed = getComputedStyle(element);
+    const styles = {};
+    for (const property of inspectorStyleProperties) {
+      styles[property] = inspectorClean(computed.getPropertyValue(property), VISUAL_MAX_STYLE_VALUE_LENGTH);
+    }
+    const tag = element.tagName.toLowerCase().slice(0, 32);
+    const excludesEditableText = /^(?:input|option|select|textarea)$/.test(tag) || Boolean(element.closest('[contenteditable]'));
+    const text = excludesEditableText ? '' : inspectorClean(element.innerText || element.textContent, VISUAL_MAX_TEXT_LENGTH);
+    return {
+      selector,
+      tag,
+      classes: [...element.classList].slice(0, VISUAL_MAX_CLASSES).map((name) => inspectorClean(name, VISUAL_MAX_CLASS_LENGTH)),
+      role: inspectorClean(element.getAttribute('role'), 80),
+      ariaLabel: inspectorClean(element.getAttribute('aria-label'), 160),
+      rect: {
+        x: inspectorRound(rectangle.x),
+        y: inspectorRound(rectangle.y),
+        width: inspectorRound(rectangle.width),
+        height: inspectorRound(rectangle.height)
+      },
+      styles,
+      occurrences: inspectorOccurrences(selector),
+      route: inspectorClean(location.pathname + location.search + location.hash, VISUAL_MAX_ROUTE_LENGTH),
+      text
+    };
+  };
+  const createInspectorOverlay = (kind) => {
+    const overlay = document.createElement('div');
+    overlay.setAttribute('data-responsiver-inspector-overlay', kind);
+    const color = kind === 'selected' ? '#b94d32' : '#3b82a0';
+    const properties = {
+      all: 'initial', position: 'fixed', display: 'none', 'box-sizing': 'border-box', margin: '0', padding: '0',
+      border: '2px solid ' + color, 'border-radius': '3px', background: kind === 'selected' ? 'rgba(185, 77, 50, .08)' : 'rgba(59, 130, 160, .07)',
+      'box-shadow': '0 0 0 1px rgba(255, 255, 255, .8)', 'pointer-events': 'none', 'user-select': 'none',
+      'z-index': '2147483647', contain: 'strict'
+    };
+    for (const [name, value] of Object.entries(properties)) overlay.style.setProperty(name, value, 'important');
+    document.documentElement.append(overlay);
+    return overlay;
+  };
+  const paintInspectorOverlay = (overlay, element) => {
+    if (!overlay || !inspectorActive || !isInspectable(element)) {
+      overlay?.style.setProperty('display', 'none', 'important');
+      return;
+    }
+    const rectangle = element.getBoundingClientRect();
+    if (rectangle.width <= 0 || rectangle.height <= 0) {
+      overlay.style.setProperty('display', 'none', 'important');
+      return;
+    }
+    overlay.style.setProperty('display', 'block', 'important');
+    overlay.style.setProperty('left', inspectorRound(rectangle.left) + 'px', 'important');
+    overlay.style.setProperty('top', inspectorRound(rectangle.top) + 'px', 'important');
+    overlay.style.setProperty('width', inspectorRound(rectangle.width) + 'px', 'important');
+    overlay.style.setProperty('height', inspectorRound(rectangle.height) + 'px', 'important');
+  };
+  const refreshInspectorHighlights = () => {
+    inspectorFrame = 0;
+    paintInspectorOverlay(inspectorHoverOverlay, inspectorHovered);
+    paintInspectorOverlay(inspectorSelectedOverlay, inspectorSelected);
+  };
+  const scheduleInspectorHighlights = () => {
+    if (!inspectorActive || inspectorFrame) return;
+    inspectorFrame = requestAnimationFrame(refreshInspectorHighlights);
+  };
+  const stopInspector = (reason = 'request') => {
+    if (inspectorFrame) cancelAnimationFrame(inspectorFrame);
+    inspectorFrame = 0;
+    inspectorActive = false;
+    inspectorHovered = null;
+    inspectorSelected = null;
+    inspectorHoverOverlay?.remove();
+    inspectorSelectedOverlay?.remove();
+    inspectorHoverOverlay = null;
+    inspectorSelectedOverlay = null;
+    message('inspector-stopped', { reason, route: inspectorClean(location.pathname + location.search + location.hash, VISUAL_MAX_ROUTE_LENGTH) });
+  };
+  const startInspector = () => {
+    if (!inspectorActive) {
+      inspectorActive = true;
+      inspectorHovered = null;
+      inspectorSelected = null;
+      inspectorHoverOverlay = createInspectorOverlay('hover');
+      inspectorSelectedOverlay = createInspectorOverlay('selected');
+    }
+    scheduleInspectorHighlights();
+    message('inspector-started', { route: inspectorClean(location.pathname + location.search + location.hash, VISUAL_MAX_ROUTE_LENGTH) });
+  };
+  const selectInspectorTarget = (value) => {
+    if (!inspectorActive || typeof value !== 'string' || !value.trim() || value.includes('>>>')) return;
+    let target = null;
+    try { target = document.querySelector(value.trim().slice(0, VISUAL_MAX_SELECTOR_LENGTH)); } catch { return; }
+    if (!isInspectable(target)) return;
+    inspectorSelected = target;
+    inspectorHovered = target;
+    scheduleInspectorHighlights();
+    const payload = inspectorPayload(target);
+    if (payload) message('inspector-selected', payload);
+  };
+  const applyVisualStylePreview = (value) => {
+    if (typeof value !== 'string') {
+      message('visual-style-preview-result', { applied: false, reason: 'invalid-css' });
+      return;
+    }
+    let byteLength = VISUAL_MAX_CSS_BYTES + 1;
+    if (value.length <= VISUAL_MAX_CSS_BYTES) byteLength = new TextEncoder().encode(value).byteLength;
+    if (byteLength > VISUAL_MAX_CSS_BYTES) {
+      message('visual-style-preview-result', { applied: false, reason: 'css-too-large', maxBytes: VISUAL_MAX_CSS_BYTES });
+      return;
+    }
+    let style = document.querySelector('style[data-responsiver-visual-preview]');
+    if (!style) {
+      style = document.createElement('style');
+      style.setAttribute('data-responsiver-visual-preview', '');
+      (document.head || document.documentElement).append(style);
+    }
+    style.textContent = value;
+    requestAnimationFrame(() => { schedule(); scheduleInspectorHighlights(); });
+    message('visual-style-preview-result', { applied: true, bytes: byteLength });
+  };
+  const clearVisualStylePreview = () => {
+    document.querySelector('style[data-responsiver-visual-preview]')?.remove();
+    requestAnimationFrame(() => { schedule(); scheduleInspectorHighlights(); });
+    message('visual-style-clear-result', { cleared: true });
+  };
+  document.addEventListener('pointermove', (event) => {
+    if (!inspectorActive) return;
+    const target = inspectorTargetFromEvent(event);
+    if (target === inspectorHovered) {
+      scheduleInspectorHighlights();
+      return;
+    }
+    inspectorHovered = target;
+    scheduleInspectorHighlights();
+    const payload = target ? inspectorPayload(target) : null;
+    if (payload) message('inspector-hover', payload);
+  }, true);
+  for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup']) {
+    document.addEventListener(type, (event) => {
+      if (!inspectorActive) return;
+      const target = inspectorTargetFromEvent(event);
+      if (!target) return;
+      if (type === 'pointerdown') {
+        inspectorSelected = target;
+        scheduleInspectorHighlights();
+        const payload = inspectorPayload(target);
+        if (payload) message('inspector-selected', payload);
+      }
+      if (type === 'mousedown') event.preventDefault();
+      event.stopImmediatePropagation();
+    }, true);
+  }
+  document.addEventListener('click', (event) => {
+    if (!inspectorActive) return;
+    const target = inspectorTargetFromEvent(event);
+    if (!target) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    inspectorSelected = target;
+    scheduleInspectorHighlights();
+    const payload = inspectorPayload(target);
+    if (payload) message('inspector-selected', payload);
+  }, true);
+  addEventListener('scroll', scheduleInspectorHighlights, true);
   addEventListener('message', (event) => {
     if (event.source !== parent) return;
     const data = event.data;
@@ -880,7 +1159,14 @@ const bridge = `<style data-responsiver-bridge-style>
     if (data.type === 'audit') audit();
     if (data.type === 'set-theme-preview') applyThemePreview(data.theme);
     if (data.type === 'clear-theme-preview') clearThemePreview();
-    if (data.type === 'reveal' || data.type === 'focus-selector') reveal(data.selector);
+    if (data.type === 'inspector-start') startInspector();
+    if (data.type === 'inspector-stop') stopInspector();
+    if (data.type === 'visual-style-preview') applyVisualStylePreview(data.css);
+    if (data.type === 'visual-style-clear') clearVisualStylePreview();
+    if (data.type === 'reveal' || data.type === 'focus-selector') {
+      reveal(data.selector);
+      if (data.type === 'focus-selector') selectInspectorTarget(data.selector);
+    }
     if (data.type === 'clear-focus') {
       clearReveal();
       const result = { requestedSelector: null, resolvedSelector: null, found: false, cleared: true, path: location.pathname + location.search + location.hash };
@@ -895,7 +1181,23 @@ const bridge = `<style data-responsiver-bridge-style>
   addEventListener('popstate', schedule);
   addEventListener('hashchange', schedule);
   addEventListener('resize', schedule);
-  addEventListener('keydown', (event) => { if (event.key === 'Escape') message('escape'); }, true);
+  addEventListener('keydown', (event) => {
+    const key = event.key.toLowerCase();
+    const inspectorShortcut = event.key === 'F12' || ((event.metaKey || event.ctrlKey) && event.altKey && key === 'i') || ((event.metaKey || event.ctrlKey) && event.shiftKey && key === 'c');
+    if (inspectorShortcut) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      message('inspector-shortcut');
+      return;
+    }
+    if (event.key !== 'Escape') return;
+    if (inspectorActive) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      stopInspector('escape');
+    }
+    message('escape');
+  }, true);
   document.addEventListener('click', (event) => {
     const target = event.target instanceof Element ? event.target.closest('a[href]') : null;
     if (!target || event.defaultPrevented) return;
@@ -910,7 +1212,9 @@ const bridge = `<style data-responsiver-bridge-style>
   window.open = (url) => { if (typeof url === 'string' || url instanceof URL) go(String(url)); return null; };
   const start = () => {
     const mutationOptions = { attributes: true, attributeFilter: ['class', 'style', 'content', 'data-theme', 'data-color-scheme'], childList: true, subtree: true };
-    mutationObserver = new MutationObserver(schedule);
+    mutationObserver = new MutationObserver((records) => {
+      if (records.some((record) => !(record.target instanceof Element && isInspectorInternal(record.target)))) schedule();
+    });
     mutationObserver.observe(document.documentElement, mutationOptions);
     for (const element of composedElements(document.documentElement, 5000)) {
       if (element.shadowRoot) mutationObserver.observe(element.shadowRoot, mutationOptions);
@@ -1072,6 +1376,7 @@ async function resolveResource(
   const normalizedRequest = posix.normalize(decodedPathname.replaceAll('\\', '/').replace(/^\/+/, ''))
   const requestSegments = normalizedRequest.split('/').filter(Boolean)
   const responsiverSegment = requestSegments.indexOf('.responsiver')
+  const managedPhysicalStylesheet = normalizedRequest === managedStylesheetPath
   const rootOverlay = responsiverSegment === 0
   const mountedOverlayKey = rootOverlay && previewBasePath
     ? posix.join(previewBasePath, normalizedRequest)
@@ -1081,10 +1386,11 @@ async function resolveResource(
     : mountedOverlayKey && overrides.has(mountedOverlayKey)
       ? mountedOverlayKey
       : null
-  // Tout dossier .responsiver physique reste invisible, y compris dans un
-  // artefact. Seuls les fichiers virtuels exacts du staging sont accessibles.
+  // Le dossier .responsiver physique reste invisible, à l’exception de la
+  // feuille gérée explicitement liée après application. Les fichiers virtuels
+  // exacts du staging restent autorisés séparément.
   if (responsiverSegment >= 0 && (
-    responsiverSegment === requestSegments.length - 1 || !effectiveOverlayKey
+    responsiverSegment === requestSegments.length - 1 || !effectiveOverlayKey && !managedPhysicalStylesheet
   )) return null
   const safe = safeRelativePath(root, pathname, previewBasePath)
   if (!safe) return null

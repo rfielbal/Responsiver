@@ -6,6 +6,7 @@ import test from 'node:test'
 import { analyzeProject } from '../src/main/project-analyzer.ts'
 import { applyProjectStagingToSource } from '../src/main/staging-source-apply.ts'
 import type { ProjectPreparationProgress } from '../src/shared/contracts.ts'
+import { createVisualEditOperation } from '../src/shared/visual-editor.ts'
 import {
   assessComplementaryTheme,
   buildProjectStaging,
@@ -426,6 +427,41 @@ test('deux applications successives réutilisent la feuille Responsiver gérée'
   const generated = second.overrides.get('.responsiver/responsiver.generated.css')?.toString('utf8') ?? ''
   assert.match(generated, /--responsiver-accent: #315f8c/)
   assert.match(generated, /border-radius: 0/)
+})
+
+test('l’Atelier visuel prépare une surcharge responsive liée uniquement à la route choisie', async (context) => {
+  const fixture = await createFixture()
+  context.after(() => rm(fixture.root, { recursive: true, force: true }))
+  const project = await analyzeProject(fixture.root)
+  const visualEdit = createVisualEditOperation({
+    target: { selector: 'html > body > nav.navigation', metadata: { matchCount: 1, selectionMode: 'single', stable: true, editable: true } },
+    property: 'flex-wrap',
+    before: 'nowrap',
+    after: 'wrap',
+    scope: { kind: 'mobile' },
+    route: { kind: 'current', path: '/index.html' }
+  })
+  const staging = await buildProjectStaging(fixture.root, project, {
+    issueIds: [], themeTarget: null, instructions: [], visualEdits: [visualEdit]
+  })
+  assert.match(staging.snapshot.generatedCss, /Atelier visuel/)
+  assert.match(staging.snapshot.generatedCss, /@media \(max-width: 767px\)/)
+  assert.match(staging.snapshot.generatedCss, /flex-wrap: wrap !important/)
+  assert.match(staging.snapshot.generatedCss, /html\[data-responsiver-route="route-[a-f\d]{10}"\] > body > nav\.navigation/)
+  assert.doesNotMatch(staging.snapshot.generatedCss, /data-responsiver-route="[^"]+"\] html/)
+  assert.equal(staging.snapshot.visualEdits?.length, 1)
+  assert.equal(staging.snapshot.changes.some((change) => change.kind === 'visual'), true)
+  assert.match(staging.overrides.get('index.html')?.toString('utf8') ?? '', /data-responsiver-route="route-[a-f\d]{10}"/)
+  assert.match(staging.overrides.get('index.html')?.toString('utf8') ?? '', /data-responsiver-generated/)
+  assert.equal(staging.overrides.has('journal.html'), false)
+
+  await applyProjectStagingToSource(fixture.root, staging)
+  const refreshed = await analyzeProject(fixture.root)
+  const repeated = await buildProjectStaging(fixture.root, refreshed, {
+    issueIds: [], themeTarget: null, instructions: [], visualEdits: [visualEdit]
+  })
+  assert.equal(repeated.snapshot.outcomes?.find((outcome) => outcome.kind === 'visual')?.status, 'skipped')
+  assert.equal(repeated.snapshot.changedFiles.length, 0)
 })
 
 test('un correctif déjà couvert par la feuille gérée devient un no-op explicite', async (context) => {

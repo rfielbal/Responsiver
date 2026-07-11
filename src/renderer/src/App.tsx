@@ -1,14 +1,15 @@
 import React, { useEffect, useMemo, useRef, useState, type FormEvent, type ReactElement } from 'react'
 
-import type { ProjectPreparationProgress, RecentProjectSummary, RemoteAuditResult, RemotePageState, RemoteViewport, RuntimeAudit } from '../../shared/contracts'
+import type { ProjectPreparationProgress, RecentProjectSummary, RemoteAuditResult, RemoteInspectorSelection, RemotePageState, RemoteViewport, RuntimeAudit, VisualElementSnapshot } from '../../shared/contracts'
 import { classifyProjectIssue, consolidateProjectIssues, deterministicVisualTarget, type FindingGroup, type FindingPolicy } from '../../shared/finding-policy'
 import { frameworkSupportFor } from '../../shared/framework-support'
+import { authorizeVisualEditor, compileVisualEditCss, createVisualEditOperation, visualEditOperationKey, type VisualEditOperation, type VisualEditProperty, type VisualEditScope } from '../../shared/visual-editor'
 import LocalAssistant from './LocalAssistant'
 import RemotePreview from './RemotePreview'
 
 const CodeWorkspace = React.lazy(() => import('./CodeWorkspace'))
 
-type Destination = 'projects' | 'lab' | 'code' | 'review' | 'export'
+type Destination = 'projects' | 'lab' | 'visual' | 'code' | 'review' | 'export'
 type InspectorTab = 'findings' | 'fixes' | 'theme' | 'conversation'
 type DeviceFamily = 'smartphone' | 'tablet' | 'computer'
 type LabMode = 'device' | 'compare'
@@ -16,6 +17,8 @@ type PreviewMode = 'source' | 'proposal' | 'before-after' | 'staging'
 type RuntimeTheme = 'dark' | 'light' | 'unknown'
 type ThemeTarget = 'dark' | 'light'
 type ResizeEdge = 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w' | 'nw'
+type VisualEditorMode = 'select' | 'interact' | 'compare'
+type InspectorLocation = 'lab' | 'code' | null
 
 interface ProposalContext {
   kind: 'issue' | 'theme' | 'instruction'
@@ -35,6 +38,7 @@ interface Device {
 interface RouteInfo {
   path: string
   label: string
+  sourcePath?: string
   title?: string
 }
 
@@ -62,7 +66,7 @@ interface StagingChange {
   id: string
   title: string
   file: string
-  kind: 'html' | 'css' | 'theme' | 'instruction'
+  kind: 'html' | 'css' | 'theme' | 'instruction' | 'visual'
   before: string
   after: string
   confidence: 'safe' | 'review'
@@ -75,6 +79,7 @@ interface StagingSnapshot {
   generatedCss: string
   themeTarget: ThemeTarget | null
   instructions: string[]
+  visualEdits?: VisualEditOperation[]
   changedFiles: string[]
   outcomes?: Array<{
     proposalId: string
@@ -93,9 +98,9 @@ interface RuntimeRenderState {
 
 interface ResponsiverApiExtension {
   chooseProjectFile?: () => Promise<ProjectSnapshot | null>
-  previewStaging?: (request: { issueIds: string[]; themeTarget: ThemeTarget | null; instructions: string[] }) => Promise<StagingSnapshot>
+  previewStaging?: (request: { issueIds: string[]; themeTarget: ThemeTarget | null; instructions: string[]; visualEdits?: VisualEditOperation[] }) => Promise<StagingSnapshot>
   clearPreviewStaging?: (expectedOrigin: string) => Promise<void>
-  buildStaging?: (request: { issueIds: string[]; themeTarget: ThemeTarget | null; instructions: string[] }) => Promise<StagingSnapshot>
+  buildStaging?: (request: { issueIds: string[]; themeTarget: ThemeTarget | null; instructions: string[]; visualEdits?: VisualEditOperation[] }) => Promise<StagingSnapshot>
   clearStaging?: () => Promise<void>
   exportPatch?: () => Promise<string | { path: string; files?: string[] } | null>
   exportChangedFiles?: () => Promise<string | { path: string; files?: string[] } | null>
@@ -114,6 +119,13 @@ interface ChangePlanRequest {
   issueIds: string[]
   themeTarget: ThemeTarget | null
   instructions: string[]
+  visualEdits?: VisualEditOperation[]
+}
+
+interface VisualEditHistory {
+  past: VisualEditOperation[][]
+  present: VisualEditOperation[]
+  future: VisualEditOperation[][]
 }
 
 interface ConversationMessage {
@@ -152,6 +164,7 @@ const auditDevices: Device[] = [
 const destinations: Array<{ id: Destination; label: string; icon: string }> = [
   { id: 'projects', label: 'Projets', icon: 'projects' },
   { id: 'lab', label: 'Laboratoire', icon: 'ruler' },
+  { id: 'visual', label: 'Atelier visuel', icon: 'cursor' },
   { id: 'code', label: 'Code', icon: 'code' },
   { id: 'review', label: 'Révision', icon: 'changes' },
   { id: 'export', label: 'Exporter', icon: 'export' }
@@ -196,7 +209,11 @@ function Icon({ name, size = 18 }: { name: string; size?: number }): ReactElemen
     external: <><path d="M14 4h6v6M20 4l-9 9" /><path d="M19 14v5H5V5h5" /></>,
     fullscreen: <><path d="M8 3H3v5M16 3h5v5M21 16v5h-5M3 16v5h5" /></>,
     fullscreenExit: <><path d="M3 8h5V3M21 8h-5V3M16 21v-5h5M8 21v-5H3" /></>,
-    info: <><circle cx="12" cy="12" r="9" /><path d="M12 11v5M12 8h.01" /></>
+    info: <><circle cx="12" cy="12" r="9" /><path d="M12 11v5M12 8h.01" /></>,
+    cursor: <><path d="m5 3 14 8-6 2-3 6Z" /><path d="m13 13 5 5" /></>,
+    undo: <><path d="M9 7 4 12l5 5" /><path d="M4 12h9a6 6 0 0 1 6 6" /></>,
+    redo: <><path d="m15 7 5 5-5 5" /><path d="M20 12h-9a6 6 0 0 0-6 6" /></>,
+    play: <path d="m8 5 11 7-11 7Z" />
   }
   return <svg {...props}>{paths[name] ?? paths.info}</svg>
 }
@@ -489,7 +506,65 @@ export function consolidatedRuntimeIssues(audits: RuntimeAudit[]): ProjectIssue[
   })
 }
 
-function PreviewFrame({ project, origin, device, path, compact = false, label, focusSelector, themeOverride, resizable = false, allowUpscale = false, onResize, onPathChange, onThemeChange, onExternal, onAudit, onRenderStatus, onEscape }: {
+const inspectableStyleProperties = new Set([
+  'display', 'position', 'width', 'height', 'min-width', 'max-width', 'min-height', 'max-height',
+  'margin-top', 'margin-right', 'margin-bottom', 'margin-left', 'margin-inline', 'margin-block',
+  'padding-top', 'padding-right', 'padding-bottom', 'padding-left', 'padding-inline', 'padding-block',
+  'gap', 'row-gap', 'column-gap', 'flex-direction', 'flex-wrap', 'justify-content', 'align-items', 'align-self',
+  'grid-template-columns', 'grid-template-rows', 'font-family', 'font-size', 'font-weight', 'line-height',
+  'letter-spacing', 'text-align', 'color', 'background-color', 'border-color', 'border-width', 'border-style',
+  'border-radius', 'box-shadow', 'opacity', 'overflow', 'object-fit', 'visibility'
+])
+
+function cleanInspectionText(value: unknown, maximum: number): string {
+  return typeof value === 'string'
+    ? value.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, maximum)
+    : ''
+}
+
+function sanitizeVisualElement(value: unknown): VisualElementSnapshot | null {
+  if (!value || typeof value !== 'object') return null
+  const candidate = value as Record<string, unknown>
+  const selector = cleanInspectionText(candidate.selector, 320)
+  const tag = cleanInspectionText(candidate.tag, 32).toLowerCase()
+  const route = cleanInspectionText(candidate.route, 2_048)
+  if (!selector || !/^[a-z][a-z\d-]*$/i.test(tag) || !route) return null
+  const rawRect = candidate.rect && typeof candidate.rect === 'object' ? candidate.rect as Record<string, unknown> : null
+  if (!rawRect) return null
+  const finite = (entry: unknown): number | null => typeof entry === 'number' && Number.isFinite(entry) && Math.abs(entry) <= 100_000 ? Math.round(entry * 100) / 100 : null
+  const x = finite(rawRect.x)
+  const y = finite(rawRect.y)
+  const width = finite(rawRect.width)
+  const height = finite(rawRect.height)
+  if (x === null || y === null || width === null || height === null || width < 0 || height < 0) return null
+  const styles: Record<string, string> = {}
+  if (candidate.styles && typeof candidate.styles === 'object') {
+    for (const [property, raw] of Object.entries(candidate.styles as Record<string, unknown>).slice(0, 80)) {
+      if (!inspectableStyleProperties.has(property) || typeof raw !== 'string') continue
+      styles[property] = cleanInspectionText(raw, 240)
+    }
+  }
+  const classes = Array.isArray(candidate.classes)
+    ? candidate.classes.map((entry) => cleanInspectionText(entry, 80)).filter(Boolean).slice(0, 16)
+    : []
+  const occurrences = typeof candidate.occurrences === 'number' && Number.isSafeInteger(candidate.occurrences)
+    ? Math.min(10_000, Math.max(0, candidate.occurrences))
+    : 0
+  return {
+    selector,
+    tag,
+    classes,
+    rect: { x, y, width, height },
+    styles,
+    occurrences,
+    route,
+    text: cleanInspectionText(candidate.text, 160),
+    role: cleanInspectionText(candidate.role, 80) || null,
+    ariaLabel: cleanInspectionText(candidate.ariaLabel, 160) || null
+  }
+}
+
+function PreviewFrame({ project, origin, device, path, compact = false, label, focusSelector, themeOverride, resizable = false, allowUpscale = false, inspectorEnabled = false, visualCss = '', onResize, onPathChange, onThemeChange, onExternal, onAudit, onRenderStatus, onEscape, onInspectElement, onInspectorStop, onInspectorShortcut }: {
   project: ProjectSnapshot & ProjectExtra
   origin: string | null
   device: Device
@@ -500,6 +575,8 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
   themeOverride?: ThemeTarget | null
   resizable?: boolean
   allowUpscale?: boolean
+  inspectorEnabled?: boolean
+  visualCss?: string
   onResize?: (width: number, height: number) => void
   onPathChange?: (path: string) => void
   onThemeChange?: (theme: RuntimeTheme) => void
@@ -507,15 +584,27 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
   onAudit?: (audit: RuntimeAudit) => void
   onRenderStatus?: (status: RuntimeRenderState | null) => void
   onEscape?: () => void
+  onInspectElement?: (element: VisualElementSnapshot, phase: 'hover' | 'selected') => void
+  onInspectorStop?: () => void
+  onInspectorShortcut?: () => void
 }): ReactElement {
   const stageRef = useRef<HTMLDivElement>(null)
   const frameRef = useRef<HTMLIFrameElement>(null)
+  const frameLoadTimerRef = useRef<number | null>(null)
   const resizeCleanupRef = useRef<(() => void) | null>(null)
   const previousDeviceId = useRef(device.id)
   const [scale, setScale] = useState(compact ? 0.22 : 0.7)
   const [isResizing, setIsResizing] = useState(false)
   const [autoFit, setAutoFit] = useState(true)
   const [showBlockedSource, setShowBlockedSource] = useState(false)
+  const focusSelectorRef = useRef(focusSelector)
+  const themeOverrideRef = useRef(themeOverride)
+  const inspectorEnabledRef = useRef(inspectorEnabled)
+  const visualCssRef = useRef(visualCss)
+  focusSelectorRef.current = focusSelector
+  themeOverrideRef.current = themeOverride
+  inspectorEnabledRef.current = inspectorEnabled
+  visualCssRef.current = visualCss
   const [runtimeRender, setRuntimeRender] = useState<RuntimeRenderState | null>(null)
   const safeRoutes = project.routes.length ? project.routes : [{ path: project.entryPath ?? '/', label: 'Page principale' }]
   const matchedRoute = safeRoutes.find((route) => route.path === path) ?? safeRoutes.find((route) => documentPath(route.path) === documentPath(path))
@@ -556,6 +645,9 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
   }, [onRenderStatus, origin, path, project.id])
 
   useEffect(() => () => resizeCleanupRef.current?.(), [])
+  useEffect(() => () => {
+    if (frameLoadTimerRef.current) window.clearTimeout(frameLoadTimerRef.current)
+  }, [])
 
   useEffect(() => {
     const listener = (event: MessageEvent): void => {
@@ -585,10 +677,16 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
       }
       if (data.type === 'external-link' && data.url) onExternal?.(data.url)
       if (data.type === 'escape') onEscape?.()
+      if (data.type === 'inspector-hover' || data.type === 'inspector-selected') {
+        const element = sanitizeVisualElement(data)
+        if (element) onInspectElement?.(element, data.type === 'inspector-hover' ? 'hover' : 'selected')
+      }
+      if (data.type === 'inspector-stopped') onInspectorStop?.()
+      if (data.type === 'inspector-shortcut') onInspectorShortcut?.()
     }
     window.addEventListener('message', listener)
     return () => window.removeEventListener('message', listener)
-  }, [device, onAudit, onEscape, onExternal, onPathChange, onRenderStatus, onThemeChange, origin])
+  }, [device, onAudit, onEscape, onExternal, onInspectElement, onInspectorShortcut, onInspectorStop, onPathChange, onRenderStatus, onThemeChange, origin])
 
   const post = (type: string, payload: Record<string, string> = {}): void => frameRef.current?.contentWindow?.postMessage({ channel: 'responsiver-preview', type, ...payload }, origin ?? '*')
   const source = origin ? `${origin}${path}` : undefined
@@ -596,15 +694,38 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
   const outerWidth = Math.round((device.width + 14) * scale)
   const outerHeight = Math.round((device.height + 14) * scale)
 
+  function synchronizeLoadedFrame(): void {
+    if (frameLoadTimerRef.current) window.clearTimeout(frameLoadTimerRef.current)
+    frameLoadTimerRef.current = window.setTimeout(() => {
+      const currentFocus = focusSelectorRef.current
+      const currentTheme = themeOverrideRef.current
+      const currentCss = visualCssRef.current
+      post(currentFocus ? 'focus-selector' : 'clear-focus', currentFocus ? { selector: currentFocus } : {})
+      post(currentTheme ? 'set-theme-preview' : 'clear-theme-preview', currentTheme ? { theme: currentTheme } : {})
+      post(inspectorEnabledRef.current ? 'inspector-start' : 'inspector-stop')
+      post(currentCss ? 'visual-style-preview' : 'visual-style-clear', currentCss ? { css: currentCss } : {})
+    }, 90)
+  }
+
   useEffect(() => {
     const timer = window.setTimeout(() => post(focusSelector ? 'focus-selector' : 'clear-focus', focusSelector ? { selector: focusSelector } : {}), 220)
     return () => window.clearTimeout(timer)
-  }, [focusSelector, source])
+  }, [device.height, device.width, focusSelector, source])
 
   useEffect(() => {
     const timer = window.setTimeout(() => post(themeOverride ? 'set-theme-preview' : 'clear-theme-preview', themeOverride ? { theme: themeOverride } : {}), 240)
     return () => window.clearTimeout(timer)
   }, [source, themeOverride])
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => post(inspectorEnabled ? 'inspector-start' : 'inspector-stop'), 20)
+    return () => window.clearTimeout(timer)
+  }, [inspectorEnabled, source])
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => post(visualCss ? 'visual-style-preview' : 'visual-style-clear', visualCss ? { css: visualCss } : {}), 80)
+    return () => window.clearTimeout(timer)
+  }, [source, visualCss])
 
   function beginResize(edge: ResizeEdge, event: React.PointerEvent<HTMLButtonElement>): void {
     if (!resizable || !onResize) return
@@ -689,10 +810,7 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
     <div ref={stageRef} className="preview-stage">
       {readinessBlocked && !showBlockedSource ? diagnosticCard() : <><div className="device-space" style={{ width: outerWidth, height: outerHeight }}>
         <div className="device-shell" style={{ width: device.width, height: device.height, transform: `scale(${scale})` }}>
-          <iframe key={origin ?? 'inline-preview'} ref={frameRef} title={`${project.name} — ${device.name}`} width={device.width} height={device.height} sandbox={origin ? 'allow-scripts allow-forms allow-same-origin' : ''} src={source} srcDoc={source ? undefined : project.previewHtml ?? undefined} onLoad={() => window.setTimeout(() => {
-            post(focusSelector ? 'focus-selector' : 'clear-focus', focusSelector ? { selector: focusSelector } : {})
-            post(themeOverride ? 'set-theme-preview' : 'clear-theme-preview', themeOverride ? { theme: themeOverride } : {})
-          }, 90)} />
+          <iframe key={origin ?? 'inline-preview'} ref={frameRef} title={`${project.name} — ${device.name}`} width={device.width} height={device.height} sandbox={origin ? 'allow-scripts allow-forms allow-same-origin' : ''} src={source} srcDoc={source ? undefined : project.previewHtml ?? undefined} onLoad={synchronizeLoadedFrame} />
           {resizable && (Object.keys(resizeLabels) as ResizeEdge[]).map((edge) => <button type="button" key={edge} className={`resize-handle resize-handle--${edge}`} aria-label={resizeLabels[edge]} title={`${resizeLabels[edge]} · flèches, Maj pour 20 px`} onPointerDown={(event) => beginResize(edge, event)} onKeyDown={(event) => resizeWithKeyboard(edge, event)} />)}
         </div>
       </div>{runtimeBlocked && !showBlockedSource && diagnosticCard(true)}</>}
@@ -714,6 +832,13 @@ export default function App(): ReactElement {
   const [previewMode, setPreviewMode] = useState<PreviewMode>('source')
   const [labMode, setLabMode] = useState<LabMode>('device')
   const [stageFullscreen, setStageFullscreen] = useState(false)
+  const [visualMode, setVisualMode] = useState<VisualEditorMode>('select')
+  const [inspectorLocation, setInspectorLocation] = useState<InspectorLocation>(null)
+  const [inspectedElement, setInspectedElement] = useState<VisualElementSnapshot | null>(null)
+  const [visualScope, setVisualScope] = useState<VisualEditScope>({ kind: 'mobile' })
+  const [visualRouteScope, setVisualRouteScope] = useState<'current' | 'all'>('current')
+  const [visualMultipleConfirmed, setVisualMultipleConfirmed] = useState(false)
+  const [visualHistory, setVisualHistory] = useState<VisualEditHistory>({ past: [], present: [], future: [] })
   const [family, setFamily] = useState<DeviceFamily>('smartphone')
   const [deviceId, setDeviceId] = useState('iphone-15')
   const [width, setWidth] = useState('393')
@@ -780,6 +905,19 @@ export default function App(): ReactElement {
     return devices.find((device) => device.id === deviceId) ?? devices[1]
   }, [deviceId, family, height, width])
   const familyDevices = devices.filter((device) => device.family === family)
+  const visualAuthorization = useMemo(() => project ? authorizeVisualEditor({
+    sourceKind: project.source.kind,
+    readOnly: project.source.readOnly,
+    localRoot: project.source.localRoot,
+    artifact: Boolean(project.previewBasePath || project.capabilities.previewStrategy === 'artifact')
+  }) : null, [project])
+  const compiledVisualEdits = useMemo(() => compileVisualEditCss(visualHistory.present), [visualHistory.present])
+  const visualCss = useMemo(() => compileVisualEditCss(visualHistory.present, activePath).css, [activePath, visualHistory.present])
+  const currentVisualRoutePersistent = useMemo(() => {
+    if (!project) return false
+    const route = project.routes.find((candidate) => candidate.path === activePath) ?? project.routes.find((candidate) => documentPath(candidate.path) === documentPath(activePath))
+    return /\.html?$/i.test(route?.sourcePath ?? route?.path ?? '')
+  }, [activePath, project])
   const routeIssues = useMemo(() => {
     if (!project) return []
     const remoteProject = project.source.kind === 'remote-url' || project.source.kind === 'linked-localhost'
@@ -844,6 +982,11 @@ export default function App(): ReactElement {
       flash('Page reçue depuis l’extension Chrome et ouverte dans une session isolée.')
     })
     const unsubscribeBlocked = window.responsiver.onRemoteBlockedNavigation((payload) => flash(`${payload.detail} ${payload.url}`))
+    const unsubscribeRemoteInspector = window.responsiver.onRemoteInspectorSelection((selection: RemoteInspectorSelection) => {
+      if (selection.projectId !== activeProjectId.current) return
+      setInspectedElement(selection)
+      setVisualMultipleConfirmed(false)
+    })
     const unsubscribeWorkspace = window.responsiver.onWorkspacePreviewOrigin(setWorkspaceOrigin)
     const unsubscribeApplied = window.responsiver.onWorkspaceApplied(() => {
       previewSequence.current += 1
@@ -866,7 +1009,7 @@ export default function App(): ReactElement {
         })
       }
     })
-    return () => { unsubscribe?.(); unsubscribeExtension(); unsubscribeBlocked(); unsubscribeWorkspace(); unsubscribeApplied() }
+    return () => { unsubscribe?.(); unsubscribeExtension(); unsubscribeBlocked(); unsubscribeRemoteInspector(); unsubscribeWorkspace(); unsubscribeApplied() }
   }, [])
 
   useEffect(() => {
@@ -915,6 +1058,49 @@ export default function App(): ReactElement {
     if (destination !== 'lab') setStageFullscreen(false)
   }, [destination])
 
+  useEffect(() => {
+    const shortcut = (event: KeyboardEvent): void => {
+      const togglesInspector = event.key === 'F12' || ((event.metaKey || event.ctrlKey) && event.altKey && event.key.toLowerCase() === 'i') || ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === 'c')
+      if (!togglesInspector || (destination !== 'lab' && destination !== 'code')) return
+      event.preventDefault()
+      toggleInspector(destination)
+    }
+    window.addEventListener('keydown', shortcut)
+    return () => window.removeEventListener('keydown', shortcut)
+  }, [destination])
+
+  useEffect(() => window.responsiver.onRemoteInspectorShortcut((projectId) => {
+    if (projectId !== activeProjectId.current || (destination !== 'lab' && destination !== 'code')) return
+    toggleInspector(destination)
+  }), [destination])
+
+  useEffect(() => {
+    if (!project || !isRemote) return
+    const active = (destination === 'lab' && inspectorLocation === 'lab') || (destination === 'code' && inspectorLocation === 'code') || (destination === 'visual' && visualMode === 'select')
+    const request = { projectId: project.id }
+    if (active) {
+      void window.responsiver.startRemoteInspector(request).catch((error) => flash(error instanceof Error ? error.message : 'L’inspecteur distant n’a pas pu démarrer.'))
+    } else {
+      void window.responsiver.stopRemoteInspector(request).catch(() => undefined)
+    }
+    return () => { if (active) void window.responsiver.stopRemoteInspector(request).catch(() => undefined) }
+  }, [destination, inspectorLocation, isRemote, project?.id, visualMode])
+
+  useEffect(() => {
+    if (!project || project.source.kind !== 'linked-localhost') return
+    const request = { projectId: project.id }
+    if (destination === 'visual' && visualCss) {
+      void window.responsiver.previewRemoteVisualStyle({ ...request, visualEdits: visualHistory.present, route: activePath }).catch((error) => flash(error instanceof Error ? error.message : 'La preview CSS du localhost a échoué.'))
+    } else {
+      void window.responsiver.clearRemoteVisualStyle(request).catch(() => undefined)
+    }
+    return () => { void window.responsiver.clearRemoteVisualStyle(request).catch(() => undefined) }
+  }, [activePath, destination, project?.id, project?.source.kind, visualCss, visualHistory.present])
+
+  useEffect(() => {
+    if (destination === 'visual' && !currentVisualRoutePersistent) setVisualRouteScope('all')
+  }, [currentVisualRoutePersistent, destination])
+
   function flash(message: string): void {
     setNotice(message)
     if (noticeTimer.current) window.clearTimeout(noticeTimer.current)
@@ -953,6 +1139,13 @@ export default function App(): ReactElement {
     setWorkspaceOrigin(null)
     setInspectorTab('findings')
     setLabMode('device')
+    setVisualMode('select')
+    setVisualScope({ kind: 'mobile' })
+    setVisualRouteScope('current')
+    setVisualMultipleConfirmed(false)
+    setVisualHistory({ past: [], present: [], future: [] })
+    setInspectorLocation(null)
+    setInspectedElement(null)
     setStageFullscreen(false)
     setPreviewBusy(false)
     setUndoAvailable(false)
@@ -1060,7 +1253,99 @@ export default function App(): ReactElement {
     void api().clearStaging?.().catch(() => undefined)
   }
 
-  async function requestProposal(request: { issueIds: string[]; themeTarget: ThemeTarget | null; instructions: string[] }, context: ProposalContext, mode: PreviewMode): Promise<StagingSnapshot | null> {
+  function commitVisualOperations(next: VisualEditOperation[]): void {
+    invalidateStaging()
+    setVisualHistory((current) => ({
+      past: [...current.past.slice(-49), current.present],
+      present: next,
+      future: []
+    }))
+  }
+
+  function updateVisualProperty(property: VisualEditProperty, after: string): void {
+    if (!inspectedElement || !visualAuthorization?.allowed) return
+    try {
+      const operation = createVisualEditOperation({
+        target: {
+          selector: inspectedElement.selector,
+          metadata: {
+            matchCount: inspectedElement.occurrences,
+            selectionMode: inspectedElement.occurrences > 1 ? 'matching' : 'single',
+            stable: !inspectedElement.selector.includes('>>>'),
+            editable: inspectedElement.editable !== false,
+            multipleConfirmed: visualMultipleConfirmed,
+            insideShadowRoot: inspectedElement.selector.includes('>>>'),
+            crossOrigin: Boolean(inspectedElement.insideFrame)
+          }
+        },
+        property,
+        before: inspectedElement.styles[property] ?? null,
+        after,
+        scope: visualScope,
+        route: visualRouteScope === 'current' ? { kind: 'current', path: documentPath(activePath) } : { kind: 'all' }
+      })
+      const key = visualEditOperationKey(operation)
+      const current = visualHistory.present.filter((entry) => visualEditOperationKey(entry) !== key)
+      if (operation.before !== operation.after) current.push(operation)
+      commitVisualOperations(current)
+    } catch (error) {
+      flash(error instanceof Error ? error.message : 'Cette valeur ne peut pas être transformée en CSS sûr.')
+    }
+  }
+
+  function removeVisualOperation(id: string): void {
+    const next = visualHistory.present.filter((operation) => operation.id !== id)
+    if (next.length !== visualHistory.present.length) commitVisualOperations(next)
+  }
+
+  function undoVisualEdit(): void {
+    if (!visualHistory.past.length) return
+    invalidateStaging()
+    setVisualHistory((current) => {
+      const previous = current.past.at(-1)
+      if (!previous) return current
+      return { past: current.past.slice(0, -1), present: previous, future: [current.present, ...current.future].slice(0, 50) }
+    })
+  }
+
+  function redoVisualEdit(): void {
+    if (!visualHistory.future.length) return
+    invalidateStaging()
+    setVisualHistory((current) => {
+      const next = current.future[0]
+      if (!next) return current
+      return { past: [...current.past.slice(-49), current.present], present: next, future: current.future.slice(1) }
+    })
+  }
+
+  function clearVisualEdits(): void {
+    if (!visualHistory.present.length) return
+    commitVisualOperations([])
+  }
+
+  async function prepareVisualChanges(openReview = false): Promise<void> {
+    if (!visualHistory.present.length) { flash('Sélectionnez un élément puis effectuez au moins un ajustement.'); return }
+    if (compiledVisualEdits.invalid.length || compiledVisualEdits.conflicts.length) {
+      flash('Le plan visuel contient une valeur invalide ou deux changements incompatibles. Corrigez les lignes signalées avant de continuer.')
+      return
+    }
+    const result = await buildStaging({ issueIds: selectedIssueIds, themeTarget, instructions, visualEdits: visualHistory.present })
+    if (result && openReview && project?.source.kind === 'local-project') setDestination('review')
+  }
+
+  async function applyVisualChanges(): Promise<void> {
+    if (!visualAuthorization?.persistable) {
+      await prepareVisualChanges(false)
+      flash('La feuille visuelle est prête à être exportée. Son import dans le framework reste à valider dans Code.')
+      return
+    }
+    await applyPlanToSource(
+      { issueIds: [], themeTarget: null, instructions: [], visualEdits: visualHistory.present },
+      `${visualHistory.present.length} ajustement${visualHistory.present.length > 1 ? 's visuels appliqués' : ' visuel appliqué'} au projet puis réanalysé.`
+    )
+  }
+
+  async function requestProposal(request: { issueIds: string[]; themeTarget: ThemeTarget | null; instructions: string[]; visualEdits?: VisualEditOperation[] }, context: ProposalContext, mode: PreviewMode): Promise<StagingSnapshot | null> {
     if (!project) return null
     if (!api().previewStaging) { flash('La prévisualisation temporaire est disponible dans l’application desktop.'); return null }
     const sequence = ++previewSequence.current
@@ -1210,7 +1495,8 @@ export default function App(): ReactElement {
     const next: ChangePlanRequest = {
       issueIds: [...selectedIssueIds],
       themeTarget,
-      instructions: [...instructions]
+      instructions: [...instructions],
+      visualEdits: [...visualHistory.present]
     }
     if (proposalContext.kind === 'issue' && proposalContext.issueId && !next.issueIds.includes(proposalContext.issueId)) next.issueIds.push(proposalContext.issueId)
     if (proposalContext.kind === 'theme' && proposalContext.themeTarget) next.themeTarget = proposalContext.themeTarget
@@ -1254,7 +1540,7 @@ export default function App(): ReactElement {
     void discardProposal(changesDraft ? 'La proposition et sa validation ont été retirées du plan.' : undefined, keepStaging ? 'staging' : 'source')
   }
 
-  async function buildStaging(request: ChangePlanRequest = { issueIds: selectedIssueIds, themeTarget, instructions }): Promise<StagingSnapshot | null> {
+  async function buildStaging(request: ChangePlanRequest = { issueIds: selectedIssueIds, themeTarget, instructions, visualEdits: visualHistory.present }): Promise<StagingSnapshot | null> {
     if (!project) return null
     if (!project.capabilities?.staging) { flash('Ce projet ne possède pas encore de rendu exploitable à corriger.'); return null }
     if (!api().buildStaging) { flash('Le moteur de staging sera disponible dans l’application desktop.'); return null }
@@ -1334,7 +1620,8 @@ export default function App(): ReactElement {
     const next: ChangePlanRequest = {
       issueIds: proposalContext.kind === 'issue' && proposalContext.issueId ? [proposalContext.issueId] : [],
       themeTarget: proposalContext.kind === 'theme' ? proposalContext.themeTarget ?? null : null,
-      instructions: proposalContext.kind === 'instruction' && proposalContext.instruction ? [proposalContext.instruction] : []
+      instructions: proposalContext.kind === 'instruction' && proposalContext.instruction ? [proposalContext.instruction] : [],
+      visualEdits: []
     }
     if (proposalContext?.issueId) setQueuedIssueIds((current) => current.filter((id) => id !== proposalContext.issueId))
     await applyPlanToSource(next, 'Correctif appliqué au projet puis réanalysé. Vous pouvez encore annuler cette application.')
@@ -1347,7 +1634,7 @@ export default function App(): ReactElement {
       return issue && classifyProjectIssue(issue, project.issues).action === 'auto-safe'
     })
     if (!safeIds.length) { flash('Aucune correction sûre sélectionnée.'); return }
-    const next = { issueIds: [...new Set(safeIds)], themeTarget: null, instructions: [] }
+    const next = { issueIds: [...new Set(safeIds)], themeTarget: null, instructions: [], visualEdits: [] }
     setQueuedIssueIds((current) => current.filter((id) => !safeIds.includes(id)))
     await applyPlanToSource(next, `${safeIds.length} correction${safeIds.length > 1 ? 's' : ''} sûre${safeIds.length > 1 ? 's' : ''} appliquée${safeIds.length > 1 ? 's' : ''}, puis projet réanalysé.`)
   }
@@ -1461,11 +1748,24 @@ export default function App(): ReactElement {
 
   function go(next: Destination): void {
     if (next !== 'projects' && !project) { setDestination('projects'); flash('Ouvrez d’abord un projet.'); return }
+    if (next === 'visual' && (!project?.source.localRoot || project.source.readOnly || project.source.kind === 'remote-url')) {
+      flash('L’Atelier visuel exige les sources du projet. Une URL sans code associé reste strictement en lecture seule.')
+      return
+    }
     if (next === 'review' && project?.source.kind !== 'local-project') {
       flash('La comparaison de staging exige un projet local. Le rapport URL reste disponible dans Exporter.')
       return
     }
+    if (next === 'visual') alignVisualDeviceWithScope(visualScope)
+    if (next !== 'lab' && next !== 'code') setInspectorLocation(null)
     setDestination(next)
+  }
+
+  function toggleInspector(location: Exclude<InspectorLocation, null>): void {
+    if (!project) return
+    if (location === 'lab') setLabMode('device')
+    setInspectedElement(null)
+    setInspectorLocation((current) => current === location ? null : location)
   }
 
   function selectFamily(next: DeviceFamily): void {
@@ -1480,6 +1780,16 @@ export default function App(): ReactElement {
     setDeviceId(id)
     const device = devices.find((candidate) => candidate.id === id)
     if (device) { setWidth(String(device.width)); setHeight(String(device.height)) }
+  }
+
+  function alignVisualDeviceWithScope(scope: VisualEditScope): void {
+    if (scope.kind === 'mobile' && currentDevice.width > 767) selectFamily('smartphone')
+    if (scope.kind === 'tablet' && (currentDevice.width < 768 || currentDevice.width > 1024)) selectFamily('tablet')
+  }
+
+  function selectVisualScope(scope: VisualEditScope): void {
+    setVisualScope(scope)
+    alignVisualDeviceWithScope(scope)
   }
 
   function toggleAcceptedIssue(id: string): void {
@@ -1505,6 +1815,10 @@ export default function App(): ReactElement {
 
   function changePreviewPath(path: string): void {
     if (path !== activePath && previewMode === 'source') setRuntimeTheme('unknown')
+    if (path !== activePath) {
+      setInspectedElement(null)
+      setVisualMultipleConfirmed(false)
+    }
     setActivePath(path)
   }
 
@@ -1595,14 +1909,18 @@ export default function App(): ReactElement {
   const counts = project ? {
     blockers: project.issues.filter((issue) => issue.severity === 'bloquant').length,
     issues: project.issues.length,
-    selected: selectedIssueIds.length + instructions.length + (themeTarget ? 1 : 0),
+    selected: selectedIssueIds.length + instructions.length + visualHistory.present.length + (themeTarget ? 1 : 0),
     changes: staging?.changes.length ?? 0
   } : { blockers: 0, issues: 0, selected: 0, changes: 0 }
 
   return <div className={railCollapsed ? 'app-shell is-rail-collapsed' : 'app-shell'}>
     <aside className="nav-rail" aria-label="Navigation principale">
       <div className="rail-head"><button className="brand" onClick={() => go('projects')} aria-label="Responsiver — Projets"><Mark /><span><strong>Responsiver</strong><small>Responsive workbench</small></span></button><button className="rail-toggle" type="button" onClick={() => setRailCollapsed((current) => !current)} aria-label={railCollapsed ? 'Déployer le menu latéral' : 'Replier le menu latéral'} aria-expanded={!railCollapsed} title={railCollapsed ? 'Déployer le menu' : 'Replier le menu'}><Icon name={railCollapsed ? 'panelExpand' : 'panelCollapse'} size={17} /></button></div>
-      <nav>{destinations.map((item) => <button key={item.id} className={`${destination === item.id ? 'nav-link is-active' : 'nav-link'}${isRemote && item.id === 'review' ? ' is-limited' : ''}`} onClick={() => go(item.id)} aria-label={item.label} aria-current={destination === item.id ? 'page' : undefined} title={item.label}><Icon name={item.icon} /><span>{item.label}</span>{item.id === 'review' && counts.changes > 0 && <b>{counts.changes}</b>}</button>)}</nav>
+      <nav>{destinations.map((item) => {
+        const visualUnavailable = item.id === 'visual' && Boolean(project && (!project.source.localRoot || project.source.readOnly || project.source.kind === 'remote-url'))
+        const limited = (isRemote && item.id === 'review') || visualUnavailable
+        return <button key={item.id} className={`${destination === item.id ? 'nav-link is-active' : 'nav-link'}${limited ? ' is-limited' : ''}`} onClick={() => go(item.id)} aria-label={item.label} aria-current={destination === item.id ? 'page' : undefined} aria-disabled={visualUnavailable || undefined} title={visualUnavailable ? 'Sources locales requises' : item.label}><Icon name={item.icon} /><span>{item.label}</span>{item.id === 'review' && counts.changes > 0 && <b>{counts.changes}</b>}</button>
+      })}</nav>
       <div className="rail-foot"><span><Icon name="shield" size={15} /> Local strict par défaut</span><small>v0.6 · open source</small></div>
     </aside>
 
@@ -1632,19 +1950,21 @@ export default function App(): ReactElement {
         </div>
 
         <div className="lab-grid">
-          <div className={stageFullscreen ? 'stage-column is-fullscreen' : 'stage-column'} role={stageFullscreen ? 'dialog' : undefined} aria-modal={stageFullscreen || undefined} aria-label={stageFullscreen ? 'Prévisualisation en plein écran' : undefined}>
+          <div className={`${stageFullscreen ? 'stage-column is-fullscreen' : 'stage-column'}${inspectorLocation === 'lab' ? ' is-inspecting' : ''}`} role={stageFullscreen ? 'dialog' : undefined} aria-modal={stageFullscreen || undefined} aria-label={stageFullscreen ? 'Prévisualisation en plein écran' : undefined}>
             <div className="stage-toolbar">
               <span><i className={proposal && previewMode !== 'source' && previewMode !== 'staging' ? 'status-dot status-dot--proposal' : 'status-dot status-dot--ok'} />{isRemote ? project.source.kind === 'linked-localhost' ? 'Localhost connecté' : 'URL publique isolée' : previewMode === 'before-after' ? 'Comparaison du correctif' : previewMode === 'proposal' ? 'Proposition temporaire' : previewMode === 'staging' ? 'Staging exportable' : workspaceOrigin ? 'Overlay code temporaire' : 'Source du projet'}</span>
               <small>{isRemote ? 'Navigation réelle · audit multi-viewport' : previewMode === 'before-after' ? 'Deux rendus synchronisés' : labMode === 'device' ? 'Bords redimensionnables' : 'Trois familles d’appareils'}</small>
+              <button className={`stage-inspect${inspectorLocation === 'lab' ? ' is-active' : ''}`} type="button" onClick={() => toggleInspector('lab')} aria-pressed={inspectorLocation === 'lab'} title="Inspecter un élément · F12"><Icon name="cursor" size={15} /><span>Inspecter</span></button>
               <button ref={fullscreenButtonRef} className="stage-fullscreen" onClick={() => setStageFullscreen((current) => !current)} aria-label={stageFullscreen ? 'Quitter le plein écran de la prévisualisation' : 'Afficher la prévisualisation en plein écran'} aria-pressed={stageFullscreen}><Icon name={stageFullscreen ? 'fullscreenExit' : 'fullscreen'} size={15} /><span>{stageFullscreen ? 'Réduire' : 'Plein écran'}</span></button>
             </div>
             <div className="stage-canvas">
               {previewBusy && <div className="preview-loading" role="status"><span className="loading-mark" /><strong>Préparation de la proposition…</strong></div>}
-              {isRemote ? <RemotePreview projectId={project.id} device={currentDevice} visible={destination === 'lab'} allowUpscale={stageFullscreen} onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onAudit={applyRemoteAudit} onState={(state) => { setRemoteState(state); setActivePath(state.path) }} onNotice={flash} /> : labMode === 'device' && previewMode === 'before-after' && proposal ? <div className="before-after-grid" aria-label="Comparaison avant et après le correctif">
+              {isRemote ? <RemotePreview projectId={project.id} device={currentDevice} visible={destination === 'lab'} allowUpscale={stageFullscreen} onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onAudit={applyRemoteAudit} onState={(state) => { setRemoteState(state); changePreviewPath(state.path) }} onNotice={flash} /> : labMode === 'device' && previewMode === 'before-after' && proposal ? <div className="before-after-grid" aria-label="Comparaison avant et après le correctif">
                 <div className="comparison-pane"><header><span>Avant</span><strong>Source</strong></header><PreviewFrame compact project={project} origin={project.previewOrigin} device={currentDevice} path={activePath} label="Avant — Source" focusSelector={focusedSelector} onPathChange={changePreviewPath} onThemeChange={setRuntimeTheme} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} /></div>
                 <div className="comparison-pane comparison-pane--after"><header><span>Après</span><strong>Proposition non validée</strong></header><PreviewFrame compact project={project} origin={proposal.previewOrigin} device={currentDevice} path={activePath} label="Après — Proposition" focusSelector={focusedSelector} onPathChange={changePreviewPath} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} /></div>
-              </div> : labMode === 'device' ? <PreviewFrame project={project} origin={activeOrigin} device={currentDevice} path={activePath} focusSelector={focusedSelector} themeOverride={nativeThemeTarget} resizable allowUpscale={stageFullscreen} onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onPathChange={changePreviewPath} onThemeChange={activeOrigin === project.previewOrigin ? setRuntimeTheme : undefined} onAudit={activeOrigin === project.previewOrigin ? applyRuntimeAudit : undefined} onRenderStatus={setRuntimeRenderStatus} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} /> : <div className="comparison-grid">{compareDevices.map((device) => <PreviewFrame key={device.id} project={project} origin={activeOrigin} device={device} path={activePath} compact focusSelector={focusedSelector} themeOverride={nativeThemeTarget} label={device.family === 'smartphone' ? 'Smartphone' : device.family === 'tablet' ? 'Tablette' : 'Ordinateur'} onPathChange={changePreviewPath} onThemeChange={activeOrigin === project.previewOrigin ? setRuntimeTheme : undefined} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} />)}</div>}
+              </div> : labMode === 'device' ? <PreviewFrame project={project} origin={activeOrigin} device={currentDevice} path={activePath} focusSelector={focusedSelector} themeOverride={nativeThemeTarget} resizable allowUpscale={stageFullscreen} inspectorEnabled={!isRemote && inspectorLocation === 'lab'} onInspectElement={(element, phase) => { if (phase === 'selected' || !inspectedElement) setInspectedElement(element) }} onInspectorStop={() => setInspectorLocation(null)} onInspectorShortcut={() => toggleInspector('lab')} onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onPathChange={changePreviewPath} onThemeChange={activeOrigin === project.previewOrigin ? setRuntimeTheme : undefined} onAudit={activeOrigin === project.previewOrigin ? applyRuntimeAudit : undefined} onRenderStatus={setRuntimeRenderStatus} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} /> : <div className="comparison-grid">{compareDevices.map((device) => <PreviewFrame key={device.id} project={project} origin={activeOrigin} device={device} path={activePath} compact focusSelector={focusedSelector} themeOverride={nativeThemeTarget} label={device.family === 'smartphone' ? 'Smartphone' : device.family === 'tablet' ? 'Tablette' : 'Ordinateur'} onPathChange={changePreviewPath} onThemeChange={activeOrigin === project.previewOrigin ? setRuntimeTheme : undefined} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} />)}</div>}
             </div>
+            {inspectorLocation === 'lab' && <QuickInspectorPanel element={inspectedElement} readOnly={project.source.kind === 'remote-url'} onClose={() => setInspectorLocation(null)} onEdit={() => go('visual')} />}
           </div>
           {scopedProject && <Inspector project={scopedProject} allIssues={project.issues} activeIssueCount={routeIssues.length} totalIssueCount={project.issues.length} showAllIssues={showAllIssues} onShowAllIssues={setShowAllIssues} tab={inspectorTab} onTab={setInspectorTab} selectedIssue={selectedIssue} selectedIds={selectedIssueIds} queuedIds={queuedIssueIds} onPreviewIssue={(issue) => void previewIssue(issue)} onToggleIssue={toggleAcceptedIssue} onToggleQueued={toggleQueuedIssue} detectedTheme={detectedTheme} themeTarget={themeTarget} previewThemeTarget={previewThemeTarget} onPreviewTheme={(target) => void previewTheme(target)} onRemoveTheme={removeTheme} proposal={proposal} proposalContext={proposalContext} previewBusy={previewBusy} staging={staging} runtimeAudit={runtimeAudit} runtimeRenderStatus={runtimeRenderStatus} instructions={instructions} onRemoveInstruction={removeInstruction} messages={messages} draft={draft} onDraft={setDraft} onSubmit={submitInstruction} busy={busy} onAcceptProposal={acceptProposal} onAcceptAndApply={() => void acceptAndApplyProposal()} onRejectProposal={rejectProposal} onApplySafe={(ids) => void applyQueuedSafeIssues(ids)} undoAvailable={undoAvailable} onUndo={() => void undoLastApply()} directApplyAvailable={project.source.kind === 'local-project' && !project.source.readOnly && Boolean(api().applyStagingToSource) && Boolean(frameworkSupport?.durableAutomaticFixes)} onBuild={() => void buildStaging()} onClear={() => void clearStaging()} assistantRoute={remoteState?.path ?? activePath} assistantViewport={{ width: currentDevice.width, height: currentDevice.height, deviceScaleFactor: 1, mobile: currentDevice.family !== 'computer', touch: currentDevice.family !== 'computer' }} assistantScreenshot={remoteAudit?.screenshotDataUrl ?? null} workspaceEnabled={workspaceEnabled} onWorkspacePreviewOrigin={setWorkspaceOrigin} onNotice={flash} onOpenCode={() => go('code')} />}
         </div>
@@ -1654,30 +1974,276 @@ export default function App(): ReactElement {
         <footer className="activity-bar"><span><i className="status-dot status-dot--ok" /> {isRemote ? `${remoteAudits.current.size} route${remoteAudits.current.size > 1 ? 's' : ''} auditée${remoteAudits.current.size > 1 ? 's' : ''}` : `${project.routes.length} page${project.routes.length > 1 ? 's' : ''}`}</span>{project.capabilities?.buildRequired ? <span className="activity-alert" title="Responsiver n’exécute jamais les scripts arbitraires d’un projet sans consentement. Ouvrez plutôt le fichier HTML généré dans dist ou out.">Sources à compiler · choisir dist/out</span> : <span className={counts.blockers ? 'activity-alert' : ''}>{counts.blockers} bloquant{counts.blockers > 1 ? 's' : ''}</span>}<span>{isRemote ? remoteAudit ? `${project.issues.length} constats cumulés · ${remoteAudit.viewports.length} largeurs` : 'Audit visuel en préparation' : localAuditProfileCount ? `${routeIssues.length} constat${routeIssues.length > 1 ? 's' : ''} consolidé${routeIssues.length > 1 ? 's' : ''} · ${localAuditProfileCount}/${auditDevices.length} formats` : 'Audit visuel en attente'}</span><span className="activity-end"><Icon name="shield" size={13} /> {project.source.network === 'local-only' ? 'Hors ligne' : project.source.network === 'localhost' ? 'Serveur local · dépendances web autorisées' : 'Session réseau éphémère'}</span></footer>
       </div>}
 
+      {destination === 'visual' && project && visualAuthorization?.allowed && <VisualEditorView
+        project={project}
+        device={currentDevice}
+        family={family}
+        familyDevices={familyDevices}
+        selectedDeviceId={deviceId}
+        width={width}
+        height={height}
+        path={activePath}
+        mode={visualMode}
+        scope={visualScope}
+        routeScope={visualRouteScope}
+        currentRoutePersistent={currentVisualRoutePersistent}
+        target={inspectedElement}
+        multipleConfirmed={visualMultipleConfirmed}
+        operations={visualHistory.present}
+        visualCss={visualCss}
+        authorization={visualAuthorization}
+        canUndo={visualHistory.past.length > 0}
+        canRedo={visualHistory.future.length > 0}
+        busy={busy}
+        onMode={setVisualMode}
+        onScope={selectVisualScope}
+        onRouteScope={setVisualRouteScope}
+        onMultipleConfirmed={setVisualMultipleConfirmed}
+        onInspect={(element, phase) => { if (phase === 'selected') { setInspectedElement(element); setVisualMultipleConfirmed(false) } }}
+        onInspectorStop={() => setVisualMode('interact')}
+        onProperty={updateVisualProperty}
+        onRemoveOperation={removeVisualOperation}
+        onUndo={undoVisualEdit}
+        onRedo={redoVisualEdit}
+        onClear={clearVisualEdits}
+        onPrepare={() => void prepareVisualChanges(true)}
+        onApply={() => void applyVisualChanges()}
+        onFamily={selectFamily}
+        onDevice={selectDevice}
+        onWidth={(value) => { setWidth(value); setDeviceId('custom') }}
+        onHeight={(value) => { setHeight(value); setDeviceId('custom') }}
+        onRotate={() => { setWidth(height); setHeight(width); setDeviceId('custom') }}
+        onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }}
+        onPathChange={changePreviewPath}
+        onOpenLab={() => go('lab')}
+        onOpenCode={() => go('code')}
+        onNotice={flash}
+      />}
+
       {destination === 'code' && project && <div className="code-page">
         <header className="page-head page-head--code"><div><span className="overline">Espace de changements</span><h1>Code</h1><p>Éditez dans un overlay temporaire, observez le rendu à côté du fichier, puis appliquez uniquement les changements explicitement validés.</p></div><div className="code-head-actions">{project.source.network === 'localhost' && !workspaceEnabled && <button className="button button--secondary" type="button" onClick={() => void associateCurrentLocalhostRoot()} disabled={busy}><Icon name="folder" size={15} /> Associer les sources</button>}<span className={workspaceEnabled ? 'code-capability is-ready' : 'code-capability'}><i />{workspaceEnabled ? 'Sources locales liées' : 'Lecture seule'}</span>{frameworkSupport && <details className="framework-support"><summary><Icon name="code" size={13} /><span>{frameworkSupport.stack}</span><b>{frameworkSupport.editingLabel}</b></summary><p>{frameworkSupport.detail}</p></details>}</div></header>
         {project.source.kind === 'linked-localhost' && <div className="code-runtime-note"><Icon name="info" size={16} /><div><strong>Aperçu instantané pour les feuilles CSS</strong><span>Pour HTML, Twig, PHP, JavaScript ou les fichiers de framework, prévisualisez le diff puis appliquez explicitement le fichier : Responsiver recharge ensuite le serveur local, sans exécuter lui-même Symfony, Docker ou votre build.</span></div></div>}
         <div className="code-studio">
           <React.Suspense fallback={<div className="code-workspace code-loading"><span /> Chargement de l’éditeur local…</div>}><CodeWorkspace projectId={project.id} enabled={workspaceEnabled} preferredPath={selectedIssue?.source?.file ?? null} onNotice={flash} onPreviewOrigin={setWorkspaceOrigin} /></React.Suspense>
           <aside className="code-live-preview">
-            <header><div><span className="overline">Aperçu direct</span><strong>{currentDevice.name}</strong></div><button className="text-button" onClick={() => go('lab')}><Icon name="fullscreen" size={14} /> Ouvrir en grand</button></header>
+            <header><div><span className="overline">Aperçu direct</span><strong>{currentDevice.name}</strong></div><div className="code-preview-actions"><button className={inspectorLocation === 'code' ? 'text-button is-active' : 'text-button'} onClick={() => toggleInspector('code')} aria-pressed={inspectorLocation === 'code'} title="Inspecter un élément · F12"><Icon name="cursor" size={14} /> Inspecter</button><button className="text-button" onClick={() => go('lab')}><Icon name="fullscreen" size={14} /> Ouvrir en grand</button></div></header>
             <div className="code-preview-body">
               {isRemote
-                ? <RemotePreview projectId={project.id} device={currentDevice} visible={destination === 'code'} embedded automaticAudit={false} onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onAudit={applyRemoteAudit} onState={(state) => { setRemoteState(state); setActivePath(state.path) }} onNotice={flash} />
-                : <PreviewFrame compact project={project} origin={workspaceOrigin ?? project.previewOrigin} device={currentDevice} path={activePath} resizable onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onPathChange={changePreviewPath} onThemeChange={setRuntimeTheme} onAudit={!workspaceOrigin ? applyRuntimeAudit : undefined} onRenderStatus={setRuntimeRenderStatus} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} />}
+                ? <RemotePreview projectId={project.id} device={currentDevice} visible={destination === 'code'} embedded automaticAudit={false} onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onAudit={applyRemoteAudit} onState={(state) => { setRemoteState(state); changePreviewPath(state.path) }} onNotice={flash} />
+                : <PreviewFrame compact project={project} origin={workspaceOrigin ?? project.previewOrigin} device={currentDevice} path={activePath} resizable inspectorEnabled={inspectorLocation === 'code'} onInspectElement={(element, phase) => { if (phase === 'selected' || !inspectedElement) setInspectedElement(element) }} onInspectorStop={() => setInspectorLocation(null)} onInspectorShortcut={() => toggleInspector('code')} onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onPathChange={changePreviewPath} onThemeChange={setRuntimeTheme} onAudit={!workspaceOrigin ? applyRuntimeAudit : undefined} onRenderStatus={setRuntimeRenderStatus} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} />}
             </div>
+            {inspectorLocation === 'code' && <QuickInspectorPanel element={inspectedElement} readOnly={project.source.kind === 'remote-url'} onClose={() => setInspectorLocation(null)} onEdit={() => go('visual')} />}
             <footer><span><i /> Overlay en mémoire</span><code>{currentDevice.width} × {currentDevice.height}</code></footer>
           </aside>
         </div>
       </div>}
 
       {destination === 'review' && project && <ReviewView project={project} staging={staging} sourceOrigin={project.previewOrigin} path={activePath} device={currentDevice} acceptedCount={counts.selected} onBuild={() => void buildStaging()} onClear={() => void clearStaging()} onCopy={() => void copyPatch()} busy={busy} />}
-      {destination === 'export' && project && (isRemote
+      {destination === 'export' && project && (project.source.kind === 'remote-url'
         ? <RemoteReportView project={project} auditedRouteCount={remoteAudits.current.size} busy={busy} onCopy={() => void copyRemoteSummary()} onExport={() => void exportAction('report')} onLab={() => go('lab')} />
-        : <ExportView project={project} staging={staging} selectedCount={counts.selected} busy={busy} onCopy={() => void copyPatch()} onExport={exportAction} onReview={() => go('review')} />)}
+        : <ExportView project={project} staging={staging} selectedCount={counts.selected} busy={busy} onCopy={() => void copyPatch()} onExport={exportAction} onReview={() => project.source.kind === 'linked-localhost' ? go('visual') : go('review')} reviewLabel={project.source.kind === 'linked-localhost' ? 'Revenir à l’Atelier' : 'Réviser le staging'} />)}
     </main>
     {showPreparation && preparation && <PreparationOverlay progress={preparation} />}
-    {notice && <div className="toast" role="status"><Icon name="info" size={16} /> <span>{notice}</span><button aria-label="Fermer" onClick={() => setNotice(null)}><Icon name="close" size={14} /></button></div>}
+    {notice && <div className={destination === 'visual' ? 'toast toast--above-visual-tray' : 'toast'} role="status"><Icon name="info" size={16} /> <span>{notice}</span><button aria-label="Fermer" onClick={() => setNotice(null)}><Icon name="close" size={14} /></button></div>}
+  </div>
+}
+
+function QuickInspectorPanel({ element, readOnly, onClose, onEdit }: { element: VisualElementSnapshot | null; readOnly: boolean; onClose: () => void; onEdit: () => void }): ReactElement {
+  const essentialStyles = element ? [
+    ['display', element.styles.display],
+    ['width', element.styles.width],
+    ['height', element.styles.height],
+    ['font-size', element.styles['font-size']],
+    ['line-height', element.styles['line-height']],
+    ['color', element.styles.color],
+    ['background', element.styles['background-color']],
+    ['gap', element.styles.gap]
+  ].filter((entry): entry is [string, string] => Boolean(entry[1])) : []
+  const effectiveReadOnly = readOnly || element?.editable === false
+  return <aside className="quick-inspector" aria-label="Inspecteur de la prévisualisation">
+    <header><div><span className="overline">Inspecteur</span><strong>{element ? `<${element.tag}>` : 'Sélection DOM'}</strong></div><button className="icon-button" type="button" onClick={onClose} aria-label="Fermer l’inspecteur"><Icon name="close" size={14} /></button></header>
+    {!element ? <div className="quick-inspector-empty"><span className="inspector-cursor"><Icon name="cursor" size={22} /></span><strong>Pointez un élément</strong><p>Survolez la preview puis cliquez sur un texte, un bouton, une image ou un conteneur.</p><small>Échap quitte le mode sélection.</small></div> : <div className="quick-inspector-content">
+      <section className="dom-summary"><div><code>{element.selector}</code><span>{element.occurrences} correspondance{element.occurrences > 1 ? 's' : ''}</span></div>{element.text && <p>{element.text}</p>}<dl><div><dt>Route</dt><dd>{element.route}</dd></div><div><dt>Dimensions</dt><dd>{Math.round(element.rect.width)} × {Math.round(element.rect.height)} px</dd></div>{element.role && <div><dt>Rôle</dt><dd>{element.role}</dd></div>}{element.ariaLabel && <div><dt>Nom accessible</dt><dd>{element.ariaLabel}</dd></div>}</dl></section>
+      <section className="box-model-card"><span className="overline">Modèle de boîte</span><div className="box-model-visual"><span>margin<em>{element.styles['margin-top'] ?? '0'}</em><i>border<em>{element.styles['border-width'] ?? '0'}</em><b>padding<em>{element.styles['padding-top'] ?? '0'}</em><strong>{Math.round(element.rect.width)} × {Math.round(element.rect.height)}</strong></b></i></span></div></section>
+      <section className="computed-style-list"><span className="overline">Styles calculés</span>{essentialStyles.map(([property, value]) => <div key={property}><code>{property}</code><span>{value}</span></div>)}</section>
+      <footer><span className={effectiveReadOnly ? 'source-badge is-readonly' : 'source-badge'}><i />{element.insideFrame ? 'Sous-frame · inspection seule' : effectiveReadOnly ? 'Lecture seule' : 'Surcharge CSS sûre'}</span>{!effectiveReadOnly && <button className="button button--primary button--compact" type="button" onClick={onEdit}><Icon name="cursor" size={14} /> Modifier dans l’Atelier</button>}</footer>
+    </div>}
+  </aside>
+}
+
+const visualControlGroups: Array<{ title: string; description: string; controls: Array<{ property: VisualEditProperty; label: string; placeholder?: string; options?: Array<{ value: string; label: string }> }> }> = [
+  {
+    title: 'Mise en page',
+    description: 'Contraintes de flux, jamais de coordonnées absolues.',
+    controls: [
+      { property: 'display', label: 'Affichage', options: [{ value: 'block', label: 'Bloc' }, { value: 'flex', label: 'Flex' }, { value: 'grid', label: 'Grille' }, { value: 'inline-flex', label: 'Flex en ligne' }, { value: 'none', label: 'Masqué' }] },
+      { property: 'flex-direction', label: 'Direction', options: [{ value: 'row', label: 'Ligne' }, { value: 'column', label: 'Colonne' }, { value: 'row-reverse', label: 'Ligne inversée' }, { value: 'column-reverse', label: 'Colonne inversée' }] },
+      { property: 'justify-content', label: 'Répartition', options: [{ value: 'flex-start', label: 'Début' }, { value: 'center', label: 'Centre' }, { value: 'space-between', label: 'Espacé' }, { value: 'space-around', label: 'Réparti' }, { value: 'flex-end', label: 'Fin' }] },
+      { property: 'align-items', label: 'Alignement', options: [{ value: 'stretch', label: 'Étiré' }, { value: 'flex-start', label: 'Début' }, { value: 'center', label: 'Centre' }, { value: 'flex-end', label: 'Fin' }, { value: 'baseline', label: 'Ligne de base' }] },
+      { property: 'gap', label: 'Espacement', placeholder: '16px' }
+    ]
+  },
+  {
+    title: 'Dimensions',
+    description: 'Valeurs fluides acceptées : %, rem, clamp(), min() ou max().',
+    controls: [
+      { property: 'width', label: 'Largeur', placeholder: '100%' },
+      { property: 'max-width', label: 'Largeur max.', placeholder: '72rem' },
+      { property: 'min-height', label: 'Hauteur min.', placeholder: '44px' },
+      { property: 'object-fit', label: 'Image', options: [{ value: 'cover', label: 'Couvrir' }, { value: 'contain', label: 'Contenir' }, { value: 'fill', label: 'Étirer' }, { value: 'none', label: 'Taille native' }] }
+    ]
+  },
+  {
+    title: 'Espacements',
+    description: 'Ajustez la respiration du composant dans le flux.',
+    controls: [
+      { property: 'padding', label: 'Padding', placeholder: '12px 18px' },
+      { property: 'margin', label: 'Marge', placeholder: '0 auto' },
+      { property: 'padding-inline', label: 'Padding horizontal', placeholder: '1rem' },
+      { property: 'padding-block', label: 'Padding vertical', placeholder: '.75rem' }
+    ]
+  },
+  {
+    title: 'Typographie',
+    description: 'Conservez une hiérarchie lisible sur le viewport sélectionné.',
+    controls: [
+      { property: 'font-size', label: 'Taille', placeholder: 'clamp(1rem, 2vw, 1.5rem)' },
+      { property: 'line-height', label: 'Interligne', placeholder: '1.45' },
+      { property: 'font-weight', label: 'Graisse', placeholder: '600' },
+      { property: 'text-align', label: 'Alignement', options: [{ value: 'left', label: 'Gauche' }, { value: 'center', label: 'Centre' }, { value: 'right', label: 'Droite' }, { value: 'justify', label: 'Justifié' }] },
+      { property: 'color', label: 'Couleur', placeholder: '#1f211e' }
+    ]
+  },
+  {
+    title: 'Aspect',
+    description: 'Surfaces et contours sans altérer les images de marque.',
+    controls: [
+      { property: 'background-color', label: 'Fond', placeholder: '#f5f2ea' },
+      { property: 'border-radius', label: 'Rayon', placeholder: '12px' },
+      { property: 'border-color', label: 'Bordure', placeholder: '#c7c2b8' },
+      { property: 'box-shadow', label: 'Ombre', placeholder: '0 12px 32px rgba(0,0,0,.12)' },
+      { property: 'opacity', label: 'Opacité', placeholder: '1' }
+    ]
+  }
+]
+
+function sameVisualScope(left: VisualEditScope, right: VisualEditScope): boolean {
+  return JSON.stringify(left) === JSON.stringify(right)
+}
+
+function VisualValueField({ value, placeholder, onCommit }: { value: string; placeholder?: string; onCommit: (value: string) => void }): ReactElement {
+  const [draft, setDraft] = useState(value)
+  useEffect(() => setDraft(value), [value])
+  return <input value={draft} placeholder={placeholder} onChange={(event) => setDraft(event.target.value)} onBlur={() => { if (draft.trim() && draft.trim() !== value) onCommit(draft.trim()) }} onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur() }} />
+}
+
+function VisualPropertiesPanel({ target, scope, routeScope, multipleConfirmed, operations, authorization, onMultipleConfirmed, onProperty, onRemoveOperation, onOpenCode }: {
+  target: VisualElementSnapshot | null
+  scope: VisualEditScope
+  routeScope: 'current' | 'all'
+  multipleConfirmed: boolean
+  operations: VisualEditOperation[]
+  authorization: ReturnType<typeof authorizeVisualEditor>
+  onMultipleConfirmed: (confirmed: boolean) => void
+  onProperty: (property: VisualEditProperty, value: string) => void
+  onRemoveOperation: (id: string) => void
+  onOpenCode: () => void
+}): ReactElement {
+  const currentRoute = target?.route ?? ''
+  const operationFor = (property: VisualEditProperty): VisualEditOperation | undefined => operations.find((operation) =>
+    operation.target.selector === target?.selector && operation.property === property && sameVisualScope(operation.scope, scope) &&
+    (routeScope === 'all' ? operation.route.kind === 'all' : operation.route.kind === 'current' && operation.route.path === currentRoute))
+  const editable = Boolean(target && target.editable !== false && !target.selector.includes('>>>') && (target.occurrences <= 1 || multipleConfirmed))
+  return <aside className="visual-properties">
+    <header><div><span className="overline">Propriétés</span><strong>{target ? `<${target.tag}>` : 'Aucun élément'}</strong></div>{target && <span className={authorization.persistable ? 'source-badge' : 'source-badge is-review'}><i />{authorization.persistable ? 'Surcharge sûre' : 'Export contrôlé'}</span>}</header>
+    {!target ? <div className="visual-empty-selection"><span><Icon name="cursor" size={28} /></span><h2>Sélectionnez dans la page</h2><p>Survolez la preview, puis cliquez sur le bouton, le texte, l’image ou le conteneur à ajuster.</p><small>Le site ne reçoit aucun accès aux fichiers.</small></div> : <>
+      <section className="visual-target-card"><code title={target.selector}>{target.selector}</code><div><span>{Math.round(target.rect.width)} × {Math.round(target.rect.height)} px</span><span>{target.occurrences} occurrence{target.occurrences > 1 ? 's' : ''}</span></div>{target.text && <p>{target.text}</p>}</section>
+      {target.selector.includes('>>>') && <div className="visual-warning"><Icon name="info" size={15} /><span>Ce nœud appartient à un Shadow DOM. Il reste inspectable, mais une feuille CSS externe ne peut pas le cibler sûrement.</span></div>}
+      {target.insideFrame && <div className="visual-warning"><Icon name="info" size={15} /><span>Ce nœud appartient à une sous-frame. Il reste inspectable, mais la feuille du document principal ne peut pas le modifier.</span></div>}
+      {target.occurrences > 1 && <label className="matching-confirmation"><input type="checkbox" checked={multipleConfirmed} onChange={(event) => onMultipleConfirmed(event.target.checked)} /><span><strong>Modifier les {target.occurrences} éléments similaires</strong><small>Le sélecteur est partagé. La preview permet de vérifier l’ensemble avant application.</small></span></label>}
+      <fieldset className={editable ? 'visual-control-scroll' : 'visual-control-scroll is-locked'} disabled={!editable}>{visualControlGroups.map((group) => <details key={group.title} open={group.title === 'Mise en page' || group.title === 'Dimensions'}><summary><span><strong>{group.title}</strong><small>{group.description}</small></span><Icon name="plus" size={14} /></summary><div className="visual-control-grid">{group.controls.map((control) => {
+        const operation = operationFor(control.property)
+        const value = operation?.after ?? target.styles[control.property] ?? ''
+        return <label key={control.property}><span>{control.label}{operation && <i>modifié</i>}</span>{control.options ? <select value={value} onChange={(event) => event.target.value && onProperty(control.property, event.target.value)}><option value="">Valeur calculée</option>{control.options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select> : <VisualValueField key={`${target.selector}:${control.property}:${JSON.stringify(scope)}:${routeScope}`} value={value} placeholder={control.placeholder} onCommit={(next) => onProperty(control.property, next)} />}{operation && <button type="button" onClick={() => onRemoveOperation(operation.id)} aria-label={`Rétablir ${control.label}`} title="Rétablir la valeur source"><Icon name="undo" size={12} /></button>}</label>
+      })}</div></details>)}</fieldset>
+      <footer><button className="text-button" type="button" onClick={onOpenCode}><Icon name="code" size={14} /> Ouvrir le code</button><span>{operations.filter((operation) => operation.target.selector === target.selector).length} réglage{operations.filter((operation) => operation.target.selector === target.selector).length > 1 ? 's' : ''} sur cette cible</span></footer>
+    </>}
+  </aside>
+}
+
+function VisualEditorView({ project, device, family, familyDevices, selectedDeviceId, width, height, path, mode, scope, routeScope, currentRoutePersistent, target, multipleConfirmed, operations, visualCss, authorization, canUndo, canRedo, busy, onMode, onScope, onRouteScope, onMultipleConfirmed, onInspect, onInspectorStop, onProperty, onRemoveOperation, onUndo, onRedo, onClear, onPrepare, onApply, onFamily, onDevice, onWidth, onHeight, onRotate, onResize, onPathChange, onOpenLab, onOpenCode, onNotice }: {
+  project: ProjectSnapshot & ProjectExtra
+  device: Device
+  family: DeviceFamily
+  familyDevices: Device[]
+  selectedDeviceId: string
+  width: string
+  height: string
+  path: string
+  mode: VisualEditorMode
+  scope: VisualEditScope
+  routeScope: 'current' | 'all'
+  currentRoutePersistent: boolean
+  target: VisualElementSnapshot | null
+  multipleConfirmed: boolean
+  operations: VisualEditOperation[]
+  visualCss: string
+  authorization: ReturnType<typeof authorizeVisualEditor>
+  canUndo: boolean
+  canRedo: boolean
+  busy: boolean
+  onMode: (mode: VisualEditorMode) => void
+  onScope: (scope: VisualEditScope) => void
+  onRouteScope: (scope: 'current' | 'all') => void
+  onMultipleConfirmed: (confirmed: boolean) => void
+  onInspect: (element: VisualElementSnapshot, phase: 'hover' | 'selected') => void
+  onInspectorStop: () => void
+  onProperty: (property: VisualEditProperty, value: string) => void
+  onRemoveOperation: (id: string) => void
+  onUndo: () => void
+  onRedo: () => void
+  onClear: () => void
+  onPrepare: () => void
+  onApply: () => void
+  onFamily: (family: DeviceFamily) => void
+  onDevice: (id: string) => void
+  onWidth: (value: string) => void
+  onHeight: (value: string) => void
+  onRotate: () => void
+  onResize: (width: number, height: number) => void
+  onPathChange: (path: string) => void
+  onOpenLab: () => void
+  onOpenCode: () => void
+  onNotice: (message: string) => void
+}): ReactElement {
+  const remote = project.source.kind === 'linked-localhost'
+  const scopeLabel = scope.kind === 'all' ? 'Toutes tailles' : scope.kind === 'mobile' ? 'Mobile ≤ 767 px' : scope.kind === 'tablet' ? 'Tablette 768–1024 px' : `${scope.minWidth ?? '…'}–${scope.maxWidth ?? '…'} px`
+  const selectedScope = scope.kind
+  const operationScopes = new Set(operations.map((operation) => {
+    const operationScope = operation.scope.kind === 'all' ? 'Toutes tailles' : operation.scope.kind === 'mobile' ? 'Mobile ≤ 767 px' : operation.scope.kind === 'tablet' ? 'Tablette 768–1024 px' : `${operation.scope.minWidth ?? '…'}–${operation.scope.maxWidth ?? '…'} px`
+    return `${operation.route.kind === 'all' ? 'Site' : operation.route.path} · ${operationScope}`
+  }))
+  const operationScopeSummary = operationScopes.size === 1 ? [...operationScopes][0] : `${operationScopes.size} portées distinctes`
+  return <div className="visual-editor-page">
+    <header className="visual-page-head"><div><span className="overline">Conception responsive pilotée</span><h1>Atelier visuel</h1><p>Sélectionnez dans le vrai rendu. Responsiver transforme vos gestes en contraintes CSS lisibles et réversibles.</p></div><div className="visual-head-actions"><span className={authorization.persistable ? 'code-capability is-ready' : 'code-capability'}><i />{authorization.persistable ? 'Application directe disponible' : 'Export CSS · intégration à relire'}</span><button className="button button--quiet" type="button" onClick={onOpenLab}><Icon name="ruler" size={15} /> Laboratoire</button></div></header>
+    <div className="visual-toolbar">
+      <div className="visual-mode-switch" role="group" aria-label="Mode de l’Atelier"><button className={mode === 'select' ? 'is-active' : ''} onClick={() => onMode('select')} aria-pressed={mode === 'select'}><Icon name="cursor" size={15} /> Sélectionner</button><button className={mode === 'interact' ? 'is-active' : ''} onClick={() => onMode('interact')} aria-pressed={mode === 'interact'}><Icon name="play" size={15} /> Interagir</button><button className={mode === 'compare' ? 'is-active' : ''} onClick={() => onMode('compare')} aria-pressed={mode === 'compare'} disabled={remote} title={remote ? 'La comparaison du localhost utilise une seule session réelle.' : undefined}><Icon name="compare" size={15} /> Avant / après</button></div>
+      <div className="visual-history-actions"><button className="icon-button" type="button" onClick={onUndo} disabled={!canUndo} aria-label="Annuler la dernière modification" title="Annuler"><Icon name="undo" size={15} /></button><button className="icon-button" type="button" onClick={onRedo} disabled={!canRedo} aria-label="Rétablir la modification" title="Rétablir"><Icon name="redo" size={15} /></button></div>
+      <div className="visual-toolbar-divider" />
+      <label className="visual-scope-select"><span>Écran</span><select value={selectedScope} onChange={(event) => { const next = event.target.value; onScope(next === 'all' || next === 'mobile' || next === 'tablet' ? { kind: next } : { kind: 'custom', minWidth: device.width, maxWidth: device.width }) }}><option value="all">Toutes tailles</option><option value="mobile">Mobile ≤ 767 px</option><option value="tablet">Tablette 768–1024 px</option><option value="custom">Plage personnalisée</option></select></label>
+      {scope.kind === 'custom' && <div className="custom-scope-fields"><label>Min <input type="number" min="240" max="3840" value={scope.minWidth ?? ''} onChange={(event) => onScope({ ...scope, minWidth: event.target.value ? Number(event.target.value) : null })} /></label><label>Max <input type="number" min="240" max="3840" value={scope.maxWidth ?? ''} onChange={(event) => onScope({ ...scope, maxWidth: event.target.value ? Number(event.target.value) : null })} /></label></div>}
+      <div className="route-scope-switch" role="group" aria-label="Portée de page"><button className={routeScope === 'current' ? 'is-active' : ''} onClick={() => onRouteScope('current')} disabled={!currentRoutePersistent} title={!currentRoutePersistent ? 'Cette route dynamique partage son fichier HTML avec l’application. Utilisez une portée globale ou modifiez le composant dans Code.' : undefined}>Cette page</button><button className={routeScope === 'all' ? 'is-active' : ''} onClick={() => onRouteScope('all')}>Toutes les pages</button></div>
+      <span className="visual-scope-summary">{routeScope === 'current' ? 'Page actuelle' : 'Site'} · {scopeLabel}</span>
+    </div>
+    <div className="visual-device-bar"><DeviceControls family={family} devices={familyDevices} selectedId={selectedDeviceId} width={width} height={height} onFamily={onFamily} onDevice={onDevice} onWidth={onWidth} onHeight={onHeight} onRotate={onRotate} /></div>
+    <div className="visual-workspace">
+      <section className="visual-canvas"><header><span><i />{mode === 'select' ? 'Cliquez pour sélectionner' : mode === 'interact' ? 'Interactions du site actives' : 'Source et proposition synchronisées'}</span><code>{path}</code></header><div className="visual-canvas-body">{remote
+        ? <RemotePreview projectId={project.id} device={device} visible embedded automaticAudit={false} onResize={onResize} onAudit={() => undefined} onState={(state) => onPathChange(state.path)} onNotice={onNotice} />
+        : mode === 'compare' ? <div className="before-after-grid visual-before-after"><div className="comparison-pane"><header><span>Avant</span><strong>Source</strong></header><PreviewFrame compact project={project} origin={project.previewOrigin} device={device} path={path} label="Avant — Source" onPathChange={onPathChange} /></div><div className="comparison-pane comparison-pane--after"><header><span>Après</span><strong>{operations.length} ajustement{operations.length > 1 ? 's' : ''}</strong></header><PreviewFrame compact project={project} origin={project.previewOrigin} device={device} path={path} label="Après — Atelier" visualCss={visualCss} onPathChange={onPathChange} /></div></div>
+          : <PreviewFrame project={project} origin={project.previewOrigin} device={device} path={path} resizable inspectorEnabled={mode === 'select'} focusSelector={target?.selector} visualCss={visualCss} onInspectElement={onInspect} onInspectorStop={onInspectorStop} onResize={onResize} onPathChange={onPathChange} />}</div><footer><span className="source-badge"><i />Preview temporaire</span><small>{mode === 'select' ? 'Les clics sont capturés ; passez en mode Interagir pour naviguer.' : 'Aucun fichier n’est modifié pendant cette étape.'}</small></footer></section>
+      <VisualPropertiesPanel target={target} scope={scope} routeScope={routeScope} multipleConfirmed={multipleConfirmed} operations={operations} authorization={authorization} onMultipleConfirmed={onMultipleConfirmed} onProperty={onProperty} onRemoveOperation={onRemoveOperation} onOpenCode={onOpenCode} />
+    </div>
+    <footer className="visual-change-tray"><div className="visual-change-summary"><span className="visual-change-count">{operations.length}</span><span><strong>Changement{operations.length > 1 ? 's' : ''} dans l’Atelier</strong><small>{operations.length ? `${new Set(operations.map((operation) => operation.target.selector)).size} cible${new Set(operations.map((operation) => operation.target.selector)).size > 1 ? 's' : ''} · ${operationScopeSummary}` : 'Sélectionnez un élément pour commencer.'}</small></span></div><div className="visual-change-list">{operations.slice(-3).map((operation) => <span key={operation.id}><code>{operation.property}</code><b>{operation.after}</b><button onClick={() => onRemoveOperation(operation.id)} aria-label={`Retirer ${operation.property}`}><Icon name="close" size={11} /></button></span>)}{operations.length > 3 && <em>+{operations.length - 3}</em>}</div><div className="visual-tray-actions">{operations.length > 0 && <button className="text-button" type="button" onClick={onClear} disabled={busy}>Tout effacer</button>}<button className="button button--secondary" type="button" onClick={onPrepare} disabled={!operations.length || busy}><Icon name="changes" size={15} /> Préparer le code</button><button className="button button--primary" type="button" onClick={onApply} disabled={!operations.length || busy}><Icon name={authorization.persistable ? 'check' : 'export'} size={15} />{authorization.persistable ? 'Appliquer au projet' : 'Préparer l’export'}</button></div></footer>
   </div>
 }
 
@@ -2004,7 +2570,7 @@ function RemoteReportView({ project, auditedRouteCount, busy, onCopy, onExport, 
   </div>
 }
 
-function ExportView({ project, staging, selectedCount, busy, onCopy, onExport, onReview }: {
+function ExportView({ project, staging, selectedCount, busy, onCopy, onExport, onReview, reviewLabel = 'Réviser le staging' }: {
   project: ProjectSnapshot & ProjectExtra
   staging: StagingSnapshot | null
   selectedCount: number
@@ -2012,10 +2578,11 @@ function ExportView({ project, staging, selectedCount, busy, onCopy, onExport, o
   onCopy: () => void
   onExport: (kind: 'patch' | 'changed' | 'copy' | 'report') => void
   onReview: () => void
+  reviewLabel?: string
 }): ReactElement {
   return <div className="standard-page"><header className="page-head"><div><span className="overline">Sortie maîtrisée</span><h1>Exporter</h1><p>Choisissez le niveau de livraison. Responsiver n’écrit jamais silencieusement dans le projet d’origine.</p></div><span className={staging ? 'export-readiness is-ready' : 'export-readiness'}><i />{staging ? 'Staging prêt' : 'Staging requis'}</span></header>
     {project.previewBasePath && <div className="artifact-warning"><Icon name="info" size={16} /><div><strong>Livraison issue de {project.previewBasePath}</strong><span>Elle corrige l’artefact compilé actuel. Conservez le patch et reportez-le dans les sources avant de relancer votre build.</span></div></div>}
-    <section className="export-ledger"><header><div><span className="overline">Contenu de livraison</span><h2>{project.name}</h2></div><button className="text-button" onClick={onReview}>Réviser le staging <Icon name="arrow" size={15} /></button></header><div><span><b>{staging?.changes.length ?? 0}</b> modifications</span><span><b>{staging?.changedFiles.length ?? 0}</b> fichiers</span><span><b>{selectedCount}</b> règles retenues</span><span><b>{staging?.themeTarget ? '1' : '0'}</b> variante de thème</span></div></section>
+    <section className="export-ledger"><header><div><span className="overline">Contenu de livraison</span><h2>{project.name}</h2></div><button className="text-button" onClick={onReview}>{reviewLabel} <Icon name="arrow" size={15} /></button></header><div><span><b>{staging?.changes.length ?? 0}</b> modifications</span><span><b>{staging?.changedFiles.length ?? 0}</b> fichiers</span><span><b>{selectedCount}</b> règles retenues</span><span><b>{staging?.themeTarget ? '1' : '0'}</b> variante de thème</span></div></section>
     <section className="export-grid"><article><div className="export-icon"><Icon name="copy" /></div><span className="overline">Presse-papiers</span><h2>Copier le patch</h2><p>Pour relire ou appliquer le diff avec votre outil habituel.</p><button className="button button--secondary button--full" onClick={onCopy} disabled={!staging || busy}>Copier</button></article><article><div className="export-icon"><Icon name="file" /></div><span className="overline">Livraison minimale</span><h2>Fichiers modifiés</h2><p>Un dossier ne contenant que les fichiers réellement transformés.</p><button className="button button--secondary button--full" onClick={() => onExport('changed')} disabled={!staging || busy}>Choisir la destination</button></article><article><div className="export-icon"><Icon name="projects" /></div><span className="overline">Version complète</span><h2>Copie du projet</h2><p>Le projet entier avec le staging appliqué, sans altérer l’original.</p><button className="button button--primary button--full" onClick={() => onExport('copy')} disabled={!staging || busy}>Exporter une copie</button></article></section>
     <footer className="export-foot"><div><Icon name="shield" /><span><strong>Traçabilité locale</strong><small>Le patch, la liste des règles et le rapport restent lisibles.</small></span></div><div><button className="text-button" onClick={() => onExport('report')} disabled={busy}>Exporter le rapport d’analyse</button><button className="text-button" onClick={() => onExport('patch')} disabled={!staging || busy}>Enregistrer le fichier .patch</button></div></footer>
   </div>

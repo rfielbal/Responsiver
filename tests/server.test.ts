@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { LOCAL_RUNTIME_AUDIT_LIMITS, startProjectServer } from '../src/main/project-server.ts'
+import { LOCAL_RUNTIME_AUDIT_LIMITS, LOCAL_VISUAL_BRIDGE_LIMITS, startProjectServer } from '../src/main/project-server.ts'
 
 function requestWithHost(origin: string, path: string, host: string, method = 'GET'): Promise<{ status: number; body: string }> {
   const url = new URL(path, origin)
@@ -24,6 +24,9 @@ test('le runner sert uniquement localhost, injecte le bridge et gère les média
   await writeFile(join(root, 'index.html'), '<!doctype html><html><head><title>Runner</title></head><body>Source</body></html>')
   await writeFile(join(root, 'media.bin'), Buffer.from('0123456789'))
   await writeFile(join(root, 'clip.mp4'), Buffer.from('0123456789'))
+  await mkdir(join(root, '.responsiver'))
+  await writeFile(join(root, '.responsiver', 'responsiver.generated.css'), 'body { color: green; }')
+  await writeFile(join(root, '.responsiver', 'private.css'), 'body { color: red; }')
   const server = await startProjectServer(root)
   context.after(async () => {
     await server.close()
@@ -37,6 +40,21 @@ test('le runner sert uniquement localhost, injecte le bridge et gère les média
   assert.match(pageBody, /focus-selector/)
   assert.match(pageBody, /set-theme-preview/)
   assert.match(pageBody, /render-status/)
+  assert.match(pageBody, /data\.type === 'inspector-start'/)
+  assert.match(pageBody, /data\.type === 'inspector-stop'/)
+  assert.match(pageBody, /message\('inspector-hover', payload\)/)
+  assert.match(pageBody, /message\('inspector-selected', payload\)/)
+  assert.match(pageBody, /event\.composedPath\(\)/)
+  assert.match(pageBody, /segments\.join\(' >>> '\)/)
+  assert.match(pageBody, /data\.type === 'visual-style-preview'/)
+  assert.match(pageBody, /data\.type === 'visual-style-clear'/)
+  assert.match(pageBody, /message\('inspector-shortcut'\)/)
+  assert.match(pageBody, /selectInspectorTarget/)
+  assert.match(pageBody, /style\.textContent = value/)
+  assert.match(pageBody, /excludesEditableText/)
+  assert.doesNotMatch(pageBody, /element\.value/)
+  assert.doesNotMatch(pageBody, /innerHTML/)
+  assert.doesNotMatch(pageBody, /localStorage|sessionStorage/)
   assert.match(pageBody, /runtimeErrors\.length >= 12/)
   assert.match(pageBody, /element\.shadowRoot/)
   assert.match(pageBody, /document\.createTreeWalker/)
@@ -64,6 +82,10 @@ test('le runner sert uniquement localhost, injecte le bridge et gère les média
   assert.match(pageBody, new RegExp('const AUDIT_MAX_FINDINGS_PER_RULE = ' + LOCAL_RUNTIME_AUDIT_LIMITS.maxFindingsPerRule))
   assert.match(pageBody, new RegExp('const AUDIT_MAX_LEGACY_OVERFLOWS = ' + LOCAL_RUNTIME_AUDIT_LIMITS.maxLegacyOverflows))
   assert.match(pageBody, new RegExp('const AUDIT_MAX_CONTRAST_CHECKS = ' + LOCAL_RUNTIME_AUDIT_LIMITS.maxContrastChecks))
+  assert.match(pageBody, new RegExp('const VISUAL_MAX_CSS_BYTES = ' + LOCAL_VISUAL_BRIDGE_LIMITS.maxCssBytes))
+  assert.match(pageBody, new RegExp('const VISUAL_MAX_SELECTOR_LENGTH = ' + LOCAL_VISUAL_BRIDGE_LIMITS.maxSelectorLength))
+  assert.match(pageBody, new RegExp('const VISUAL_MAX_TEXT_LENGTH = ' + LOCAL_VISUAL_BRIDGE_LIMITS.maxTextLength))
+  assert.match(pageBody, new RegExp('const VISUAL_MAX_OCCURRENCE_SCAN = ' + LOCAL_VISUAL_BRIDGE_LIMITS.maxOccurrenceScan))
   const bridgeSource = pageBody.match(/<script data-responsiver-bridge>([\s\S]*?)<\/script>/)?.[1]
   assert.ok(bridgeSource)
   assert.doesNotThrow(() => new Function(bridgeSource))
@@ -80,6 +102,9 @@ test('le runner sert uniquement localhost, injecte le bridge et gère les média
   assert.equal((await requestWithHost(server.origin, '/', host, 'POST')).status, 405)
   assert.equal((await fetch(`${server.origin}/%2e%2e/package.json`)).status, 404)
   assert.equal((await fetch(`${server.origin}/media.bin`)).status, 403)
+  assert.match(await (await fetch(`${server.origin}/.responsiver/responsiver.generated.css`)).text(), /green/)
+  assert.equal((await fetch(`${server.origin}/.responsiver/private.css`)).status, 404)
+  assert.equal((await fetch(`${server.origin}/.responsiver/`)).status, 404)
 })
 
 test('un serveur staged privilégie ses fichiers virtuels', async (context) => {

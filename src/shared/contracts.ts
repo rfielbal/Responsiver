@@ -1,3 +1,5 @@
+import type { VisualEditOperation } from './visual-editor'
+
 export type Severity = 'bloquant' | 'attention' | 'information'
 export type Coverage = 'standard' | 'heuristique' | 'manuel'
 export type ThemeMode = 'dark' | 'light'
@@ -195,6 +197,53 @@ export interface RemoteFocusResult {
   path: string
 }
 
+export interface VisualElementSnapshot {
+  selector: string
+  tag: string
+  classes: string[]
+  rect: { x: number; y: number; width: number; height: number }
+  styles: Record<string, string>
+  occurrences: number
+  route: string
+  text: string
+  role: string | null
+  ariaLabel: string | null
+  /** Faux lorsqu’une surcharge du document courant ne peut pas cibler ce nœud. */
+  editable?: boolean
+  /** Vrai pour un nœud résolu dans une sous-frame distante. */
+  insideFrame?: boolean
+}
+
+export interface RemoteInspectorRequest {
+  /** Identifiant anti-course de la session distante affichée. */
+  projectId: string
+}
+
+export interface RemoteVisualStyleRequest extends RemoteInspectorRequest {
+  /** Opérations revalidées et recompilées dans le processus principal. */
+  visualEdits: VisualEditOperation[]
+  /** Route active utilisée pour exclure les réglages limités aux autres pages. */
+  route: string
+}
+
+export interface RemoteInspectorState {
+  active: boolean
+  editable: boolean
+  path: string
+}
+
+export interface RemoteInspectorSelection extends VisualElementSnapshot {
+  projectId: string
+  /** Faux pour une URL publique, un localhost non lié ou un Shadow DOM non ciblable en CSS. */
+  editable: boolean
+}
+
+export interface RemoteVisualStyleResult {
+  applied: boolean
+  bytes: number
+  path: string
+}
+
 export interface WorkspaceFileSummary {
   path: string
   size: number
@@ -320,13 +369,14 @@ export interface StagingRequest {
   issueIds: string[]
   themeTarget: ThemeMode | null
   instructions: string[]
+  visualEdits?: VisualEditOperation[]
 }
 
 export interface StagingChange {
   id: string
   title: string
   file: string
-  kind: 'html' | 'css' | 'theme' | 'instruction'
+  kind: 'html' | 'css' | 'theme' | 'instruction' | 'visual'
   before: string
   after: string
   confidence: 'safe' | 'review'
@@ -335,7 +385,7 @@ export interface StagingChange {
 export interface StagingOutcome {
   proposalId: string
   findingIds: string[]
-  kind: 'issue' | 'theme' | 'instruction'
+  kind: 'issue' | 'theme' | 'instruction' | 'visual'
   status: 'applied' | 'skipped' | 'conflict'
   changeIds: string[]
   reason: string
@@ -351,6 +401,7 @@ export interface StagingSnapshot {
   instructions: string[]
   recognizedInstructions?: string[]
   ignoredInstructions?: string[]
+  visualEdits?: VisualEditOperation[]
   changedFiles: string[]
   sourceHashes?: Record<string, string>
   outcomes?: StagingOutcome[]

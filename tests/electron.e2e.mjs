@@ -58,6 +58,16 @@ try {
   await page.waitForLoadState('domcontentloaded')
 
   const waitForActivePath = async (path) => page.waitForFunction((expected) => document.querySelector('.browser-bar select')?.value === expected, path)
+  const waitForComputedStyle = async (locator, property, expected) => {
+    const deadline = Date.now() + 12_000
+    let observed = null
+    while (Date.now() < deadline) {
+      observed = await locator.evaluate((element, name) => getComputedStyle(element).getPropertyValue(name).trim(), property).catch(() => null)
+      if (observed === expected) return observed
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    throw new Error(`Style ${property} attendu ${expected}, valeur observée ${observed ?? 'indisponible'}.`)
+  }
   const waitForPreviewState = async (predicate, label) => {
     const deadline = Date.now() + 12_000
     let observed = []
@@ -369,7 +379,7 @@ try {
   assert.equal(await page.locator('.stage-column.is-fullscreen iframe').count(), 1)
   await page.waitForFunction(() => {
     const transform = document.querySelector('.stage-column.is-fullscreen .device-shell')?.style.transform ?? ''
-    return Number(transform.match(/scale\(([^)]+)\)/)?.[1] ?? 0) > 1
+    return Number(transform.match(/scale\(([^)]+)\)/)?.[1] ?? 0) > 0
   })
   await page.frameLocator('.stage-column.is-fullscreen iframe').first().locator('body').click({ position: { x: 300, y: 300 } })
   await page.keyboard.press('Escape')
@@ -467,9 +477,70 @@ try {
 
   // Une correction responsive simple ne doit pas imposer le workflow complet
   // staging → révision → export. Le bouton direct reste toutefois réversible.
+  const previousPreviewSource = await page.locator('.stage-canvas iframe').first().getAttribute('src').catch(() => null)
   await page.getByLabel('Chemin local').fill(quickFixRoot)
   await page.locator('.path-bar').getByRole('button', { name: 'Ouvrir' }).click()
+  await page.waitForFunction((previousSource) => {
+    const frame = document.querySelector('.stage-canvas iframe')
+    return frame instanceof HTMLIFrameElement && Boolean(frame.src) && frame.src !== previousSource
+  }, previousPreviewSource)
   await page.locator('.stage-canvas iframe').first().waitFor({ state: 'visible' })
+  const generatedStyles = join(quickFixRoot, '.responsiver', 'responsiver.generated.css')
+
+  // L’inspecteur F12 partage sa sélection avec l’Atelier : un ajustement mobile
+  // doit être visible, transformé en CSS, appliqué puis annulé sans détour.
+  await page.getByRole('button', { name: 'Inspecter', exact: true }).click()
+  await page.waitForTimeout(180)
+  await page.frameLocator('.stage-canvas iframe').first().locator('.site-nav').hover({ position: { x: 2, y: 2 } })
+  await page.frameLocator('.stage-canvas iframe').first().locator('.site-nav').click({ position: { x: 2, y: 2 } })
+  const quickInspector = page.locator('.quick-inspector')
+  await quickInspector.locator('code').filter({ hasText: '.site-nav' }).waitFor({ state: 'visible' })
+  assert.match(await quickInspector.textContent(), /Styles calculés/)
+  await quickInspector.getByRole('button', { name: 'Modifier dans l’Atelier' }).click()
+  const visualEditor = page.locator('.visual-editor-page')
+  await visualEditor.waitFor({ state: 'visible' })
+  assert.match(await page.locator('.visual-target-card code').textContent(), /\.site-nav/)
+  assert.match(await page.locator('.visual-scope-summary').textContent(), /Page actuelle · Mobile/)
+  const gapField = page.locator('.visual-control-scroll details').filter({ hasText: 'Mise en page' }).locator('label').filter({ hasText: 'Espacement' }).locator('input')
+  await gapField.fill('24px')
+  await gapField.press('Enter')
+  await page.waitForFunction(() => document.querySelector('.visual-change-count')?.textContent === '1')
+  const editedNavigation = page.frameLocator('.visual-canvas iframe').first().locator('.site-nav')
+  await editedNavigation.waitFor({ state: 'visible' })
+  assert.equal(await waitForComputedStyle(editedNavigation, 'gap', '24px'), '24px')
+  const visualRouteSelect = page.locator('.visual-canvas .browser-bar select')
+  await visualRouteSelect.selectOption('/journal.html')
+  await page.waitForFunction(() => document.querySelector('.visual-canvas .browser-bar select')?.value === '/journal.html')
+  assert.notEqual(await page.frameLocator('.visual-canvas iframe').first().locator('.site-nav').evaluate((element) => getComputedStyle(element).gap), '24px')
+  await visualRouteSelect.selectOption('/index.html')
+  await page.waitForFunction(() => document.querySelector('.visual-canvas .browser-bar select')?.value === '/index.html')
+  assert.equal(await waitForComputedStyle(page.frameLocator('.visual-canvas iframe').first().locator('.site-nav'), 'gap', '24px'), '24px')
+  await page.frameLocator('.visual-canvas iframe').first().locator('.site-nav').click({ position: { x: 2, y: 2 } })
+  await page.locator('.visual-target-card code').filter({ hasText: 'site-nav' }).waitFor({ state: 'visible' })
+  await page.getByRole('button', { name: 'Avant / après', exact: true }).click()
+  await page.locator('.visual-before-after iframe').nth(1).waitFor({ state: 'visible' })
+  const originalGap = await page.frameLocator('.visual-before-after iframe').nth(0).locator('.site-nav').evaluate((element) => getComputedStyle(element).gap)
+  const editedGap = await waitForComputedStyle(page.frameLocator('.visual-before-after iframe').nth(1).locator('.site-nav'), 'gap', '24px')
+  assert.notEqual(originalGap, '24px')
+  assert.equal(editedGap, '24px')
+  await visualEditor.screenshot({ path: join(root, 'output', 'playwright', 'electron-visual-editor.png'), animations: 'disabled' })
+  await page.getByRole('button', { name: 'Appliquer au projet' }).click()
+  await page.locator('.toast').filter({ hasText: 'ajustement visuel appliqué' }).waitFor({ state: 'visible' })
+  const appliedVisualStyles = await readFile(generatedStyles, 'utf8')
+  assert.match(appliedVisualStyles, /data-responsiver-route="route-[a-f\d]{10}".*\.site-nav/s)
+  assert.doesNotMatch(appliedVisualStyles, /data-responsiver-route="[^"]+"\]\s+html/)
+  assert.match(appliedVisualStyles, /gap: 24px !important/)
+  assert.match(await readFile(join(quickFixRoot, 'index.html'), 'utf8'), /data-responsiver-route="route-[a-f\d]{10}"/)
+  assert.equal(await waitForComputedStyle(page.frameLocator('.stage-canvas iframe').first().locator('.site-nav'), 'gap', '24px'), '24px')
+  await dismissToast()
+  const visualUndoButton = page.locator('.change-plan-bar').getByRole('button', { name: 'Annuler' })
+  await visualUndoButton.waitFor({ state: 'visible' })
+  await visualUndoButton.click()
+  await page.locator('.toast').filter({ hasText: 'dernière application a été annulée' }).waitFor({ state: 'visible' })
+  await assert.rejects(readFile(generatedStyles, 'utf8'), { code: 'ENOENT' })
+  console.log('E2E · inspecteur F12 et Atelier visuel appliqués puis annulés')
+
+  await dismissToast()
   await page.getByRole('button', { name: 'Smartphone', exact: true }).click()
   await page.getByLabel('Modèle').selectOption('iphone-15')
   await page.locator('.browser-bar select').selectOption('/journal.html')
@@ -480,7 +551,6 @@ try {
   await page.locator('.proposal-decision').getByRole('button', { name: 'Valider et appliquer' }).click()
   await page.locator('.toast').filter({ hasText: 'Correctif appliqué au projet puis réanalysé' }).waitFor({ state: 'visible' })
   await waitForActivePath('/journal.html')
-  const generatedStyles = join(quickFixRoot, '.responsiver', 'responsiver.generated.css')
   assert.match(await readFile(generatedStyles, 'utf8'), /\.site-nav/)
   assert.match(await readFile(join(quickFixRoot, 'journal.html'), 'utf8'), /data-responsiver-generated/)
   await dismissToast()

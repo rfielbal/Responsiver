@@ -30,6 +30,15 @@ await new Promise((resolve, reject) => {
 const address = server.address()
 if (!address || typeof address === 'string') throw new Error('Le serveur localhost factice n’a pas démarré.')
 const origin = `http://127.0.0.1:${address.port}`
+const mainColorEdit = {
+  id: 'visual-a11ce001',
+  target: { selector: 'main', metadata: { matchCount: 1, selectionMode: 'single', stable: true, editable: true } },
+  property: 'color',
+  before: 'rgb(17, 17, 17)',
+  after: 'rgb(185, 77, 50)',
+  scope: { kind: 'all' },
+  route: { kind: 'all' }
+}
 
 const application = await electron.launch({
   executablePath: electronPath,
@@ -44,6 +53,15 @@ try {
   const opened = await page.evaluate((url) => window.responsiver.openRemoteUrl({ url, mode: 'localhost' }), origin)
   assert.equal(opened.source.readOnly, true)
   assert.equal(opened.source.localRoot, null)
+  await assert.rejects(
+    page.evaluate(({ projectId, visualEdit }) => window.responsiver.previewRemoteVisualStyle({ projectId, visualEdits: [visualEdit], route: '/' }), { projectId: opened.id, visualEdit: mainColorEdit }),
+    /réservée à un localhost associé/
+  )
+  assert.deepEqual(
+    await page.evaluate((projectId) => window.responsiver.startRemoteInspector({ projectId }), opened.id),
+    { active: true, editable: false, path: '/' }
+  )
+  await page.evaluate((projectId) => window.responsiver.stopRemoteInspector({ projectId }), opened.id)
 
   const remoteIdBefore = await application.evaluate(({ webContents }, expectedOrigin) => {
     const remote = webContents.getAllWebContents().find((contents) => contents.getURL().startsWith(expectedOrigin))
@@ -60,6 +78,99 @@ try {
   assert.equal(linked.source.localRoot, canonicalFirstRoot)
   assert.equal(linked.source.url?.startsWith(origin), true)
   assert.equal(linked.capabilities.framework, 'Symfony + React + Tailwind CSS')
+  await page.evaluate(() => {
+    window.__responsiverRemoteShortcut = null
+    window.__responsiverRemoteShortcutOff = window.responsiver.onRemoteInspectorShortcut((projectId) => {
+      window.__responsiverRemoteShortcut = projectId
+    })
+  })
+  await application.evaluate(({ webContents }, expectedOrigin) => {
+    const remote = webContents.getAllWebContents().find((contents) => contents.getURL().startsWith(expectedOrigin))
+    remote?.sendInputEvent({ type: 'keyDown', keyCode: 'F12' })
+    remote?.sendInputEvent({ type: 'keyUp', keyCode: 'F12' })
+  }, origin)
+  await page.waitForFunction(() => Boolean(window.__responsiverRemoteShortcut))
+  assert.equal(await page.evaluate(() => window.__responsiverRemoteShortcut), linked.id)
+  await page.evaluate(() => window.__responsiverRemoteShortcutOff?.())
+  await assert.rejects(
+    page.evaluate((projectId) => window.responsiver.previewRemoteVisualStyle({ projectId, css: '@\\69mport "https://example.test/x.css"' }), linked.id),
+    /invalide/
+  )
+
+  await page.evaluate(() => window.responsiver.setRemoteBounds({
+    x: 0,
+    y: 0,
+    width: 393,
+    height: 600,
+    scale: 1,
+    visible: true,
+    viewport: { width: 393, height: 852, deviceScaleFactor: 1, mobile: true, touch: true }
+  }))
+  const originalColor = await application.evaluate(async ({ webContents }, expectedOrigin) => {
+    const remote = webContents.getAllWebContents().find((contents) => contents.getURL().startsWith(expectedOrigin))
+    return remote?.executeJavaScript('getComputedStyle(document.querySelector("main")).color')
+  }, origin)
+  const visualPreview = await page.evaluate(
+    ({ projectId, visualEdit }) => window.responsiver.previewRemoteVisualStyle({ projectId, visualEdits: [visualEdit], route: '/' }),
+    { projectId: linked.id, visualEdit: mainColorEdit }
+  )
+  assert.equal(visualPreview.applied, true)
+  assert.ok(visualPreview.bytes > 0)
+  assert.equal(await application.evaluate(async ({ webContents }, expectedOrigin) => {
+    const remote = webContents.getAllWebContents().find((contents) => contents.getURL().startsWith(expectedOrigin))
+    return remote?.executeJavaScript('getComputedStyle(document.querySelector("main")).color')
+  }, origin), 'rgb(185, 77, 50)')
+  await page.evaluate(() => {
+    window.__responsiverRemoteSelection = null
+    window.__responsiverRemoteSelectionOff = window.responsiver.onRemoteInspectorSelection((selection) => {
+      window.__responsiverRemoteSelection = selection
+    })
+  })
+  assert.deepEqual(
+    await page.evaluate((projectId) => window.responsiver.startRemoteInspector({ projectId }), linked.id),
+    { active: true, editable: true, path: '/' }
+  )
+  await page.evaluate((url) => window.responsiver.navigateRemote('url', url), `${origin}/deux`)
+  await page.evaluate(() => { window.__responsiverRemoteSelection = null })
+  assert.equal(await application.evaluate(async ({ webContents }, expectedOrigin) => {
+    const remote = webContents.getAllWebContents().find((contents) => contents.getURL().startsWith(expectedOrigin))
+    return remote?.executeJavaScript('getComputedStyle(document.querySelector("main")).color')
+  }, origin), 'rgb(185, 77, 50)', 'la CSS visuelle doit être restaurée après navigation')
+  await application.evaluate(async ({ webContents }, expectedOrigin) => {
+    const remote = webContents.getAllWebContents().find((contents) => contents.getURL().startsWith(expectedOrigin))
+    await remote?.executeJavaScript('history.pushState({}, "", "/deux#section")')
+  }, origin)
+  await page.waitForFunction(async () => (await window.responsiver.getRemoteState()).path === '/deux#section')
+  assert.equal(await application.evaluate(async ({ webContents }, expectedOrigin) => {
+    const remote = webContents.getAllWebContents().find((contents) => contents.getURL().startsWith(expectedOrigin))
+    return remote?.executeJavaScript('getComputedStyle(document.querySelector("main")).color')
+  }, origin), 'rgb(185, 77, 50)', 'une navigation SPA ne doit couper ni la CSS ni l’inspecteur')
+  await application.evaluate(async ({ webContents }, expectedOrigin) => {
+    const remote = webContents.getAllWebContents().find((contents) => contents.getURL().startsWith(expectedOrigin))
+    if (!remote) throw new Error('WebContents localhost introuvable pour le test de l’inspecteur.')
+    const rectangle = await remote.executeJavaScript(`(() => {
+      const rect = document.querySelector('main').getBoundingClientRect();
+      return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+    })()`)
+    await remote.debugger.sendCommand('Input.dispatchMouseEvent', { type: 'mouseMoved', x: rectangle.x, y: rectangle.y })
+    await remote.debugger.sendCommand('Input.dispatchMouseEvent', { type: 'mousePressed', x: rectangle.x, y: rectangle.y, button: 'left', clickCount: 1 })
+    await remote.debugger.sendCommand('Input.dispatchMouseEvent', { type: 'mouseReleased', x: rectangle.x, y: rectangle.y, button: 'left', clickCount: 1 })
+  }, origin)
+  await page.waitForFunction(() => Boolean(window.__responsiverRemoteSelection))
+  const inspected = await page.evaluate(() => window.__responsiverRemoteSelection)
+  assert.equal(inspected.projectId, linked.id)
+  assert.equal(inspected.tag, 'main')
+  assert.equal(inspected.route, '/deux#section')
+  assert.equal(inspected.text, 'Session conservée')
+  assert.equal(inspected.editable, true)
+  assert.ok(inspected.rect.width > 0 && inspected.rect.height > 0)
+  await page.evaluate((projectId) => window.responsiver.stopRemoteInspector({ projectId }), linked.id)
+  await page.evaluate((projectId) => window.responsiver.clearRemoteVisualStyle({ projectId }), linked.id)
+  assert.equal(await application.evaluate(async ({ webContents }, expectedOrigin) => {
+    const remote = webContents.getAllWebContents().find((contents) => contents.getURL().startsWith(expectedOrigin))
+    return remote?.executeJavaScript('getComputedStyle(document.querySelector("main")).color')
+  }, origin), originalColor)
+  await page.evaluate(() => window.__responsiverRemoteSelectionOff?.())
 
   const files = await page.evaluate((projectId) => window.responsiver.listWorkspaceFiles(projectId), linked.id)
   assert.deepEqual(files.map((file) => file.path), ['composer.json', 'package.json', 'styles.css'])
@@ -73,6 +184,16 @@ try {
   )
   assert.equal(overlay.dirty, true)
   assert.equal(await readFile(join(firstRoot, 'styles.css'), 'utf8'), 'body { color: #111; }\n', 'prévisualiser ne doit jamais écrire dans les sources')
+  assert.equal(await application.evaluate(async ({ webContents }, expectedOrigin) => {
+    const remote = webContents.getAllWebContents().find((contents) => contents.getURL().startsWith(expectedOrigin))
+    return remote?.executeJavaScript('getComputedStyle(document.body).color')
+  }, origin), 'rgb(185, 77, 50)')
+  await page.evaluate(() => window.responsiver.navigateRemote('reload'))
+  assert.equal(await application.evaluate(async ({ webContents }, expectedOrigin) => {
+    const remote = webContents.getAllWebContents().find((contents) => contents.getURL().startsWith(expectedOrigin))
+    return remote?.executeJavaScript('getComputedStyle(document.body).color')
+  }, origin), 'rgb(185, 77, 50)', 'la preview CSS de Code doit être restaurée après rechargement')
+  assert.equal(await readFile(join(firstRoot, 'styles.css'), 'utf8'), 'body { color: #111; }\n', 'recharger la preview ne doit jamais écrire dans les sources')
 
   await assert.rejects(
     page.evaluate(

@@ -13,14 +13,23 @@ import type {
   ThemeProfile,
   ThemeVariable
 } from '../shared/contracts'
+import { compileVisualEditCss } from '../shared/visual-editor'
 
 export const GENERATED_STYLESHEET = '.responsiver/responsiver.generated.css'
 const GENERATED_THEME_ATTRIBUTE = 'data-responsiver-generated-theme'
 const GENERATED_INSTRUCTIONS_ATTRIBUTE = 'data-responsiver-generated-instructions'
+const GENERATED_ROUTE_ATTRIBUTE = 'data-responsiver-route'
 const GENERATED_FILE_HEADER = `/*
  * Généré localement par Responsiver.
  * Chaque règle reste lisible, exportable et réversible.
  */`
+
+function routeScopedVisualSelector(selector: string, token: string): string {
+  const routeAttribute = `[${GENERATED_ROUTE_ATTRIBUTE}="${token}"]`
+  return /^html(?=$|[\s.#:>+~]|\[)/i.test(selector)
+    ? selector.replace(/^html/i, `html${routeAttribute}`)
+    : `html${routeAttribute} ${selector}`
+}
 
 export interface ProjectStaging {
   /** Chemins relatifs POSIX. Le projet source n’est jamais modifié. */
@@ -579,6 +588,14 @@ function stylesheetHref(htmlFile: string, stylesheet: string): string {
   return relativePath.startsWith('.') ? relativePath : `./${relativePath}`
 }
 
+function htmlFileForRoute(project: ProjectSnapshot, routePath: string): string | null {
+  const route = project.routes.find((candidate) => candidate.path === routePath)
+  const source = route?.sourcePath ?? routePath.replace(/^\//, '')
+  return source && ['.html', '.htm'].includes(extname(source).toLowerCase())
+    ? normalizeRelativePath(source)
+    : null
+}
+
 function insertStylesheetLink(html: string, stylesheet: string, htmlFile: string): string | null {
   const href = stylesheetHref(htmlFile, stylesheet)
   if (html.includes(href)) return null
@@ -776,10 +793,12 @@ export async function buildProjectStaging(
   const generatedOperations = new Set<string>()
   const operationChangeIds = new Map<string, string[]>()
   const generatedRoutePaths = new Set<string>()
+  const generatedRouteTokens = new Map<string, string>()
   const recognizedInstructions: string[] = []
   const ignoredInstructions: string[] = []
   let generatedTheme: ThemeMode | null = null
   let hasGeneratedInstructions = false
+  let hasGeneratedGlobalVisual = false
 
   async function originalBuffer(path: string): Promise<Buffer | null> {
     const relativePath = normalizeRelativePath(path)
@@ -936,6 +955,57 @@ export async function buildProjectStaging(
       operationChangeIds.set(operationKey, [change.id])
       outcomes.push({ proposalId: issue.id, findingIds: [issue.id], kind: 'issue', status: 'applied', changeIds: [change.id], reason: 'Surcharge responsive préparée.' })
     }
+  }
+
+  const visualCompilation = compileVisualEditCss(request.visualEdits ?? [])
+  for (const invalid of visualCompilation.invalid) {
+    outcomes.push({ proposalId: invalid.operationId, findingIds: [], kind: 'visual', status: 'conflict', changeIds: [], reason: invalid.reason })
+  }
+  for (const conflict of visualCompilation.conflicts) {
+    for (const operationId of conflict.operationIds) {
+      outcomes.push({ proposalId: operationId, findingIds: [], kind: 'visual', status: 'conflict', changeIds: [], reason: conflict.reason })
+    }
+  }
+  for (const operationId of visualCompilation.skipped) {
+    outcomes.push({ proposalId: operationId, findingIds: [], kind: 'visual', status: 'skipped', changeIds: [], reason: 'Modification visuelle identique regroupée.' })
+  }
+  for (const operation of visualCompilation.operations) {
+    let persistedOperation = operation
+    if (operation.route.kind === 'current') {
+      const htmlFile = htmlFileForRoute(project, operation.route.path)
+      if (!htmlFile) {
+        outcomes.push({ proposalId: operation.id, findingIds: [], kind: 'visual', status: 'conflict', changeIds: [], reason: 'Cette route dynamique ne possède pas de page HTML distincte. Utilisez la portée « Toutes les pages » ou reliez la règle dans le composant du framework.' })
+        continue
+      }
+      const token = `route-${digest(operation.route.path).slice(0, 10)}`
+      const existingToken = generatedRouteTokens.get(htmlFile)
+      if (existingToken && existingToken !== token) {
+        outcomes.push({ proposalId: operation.id, findingIds: [], kind: 'visual', status: 'conflict', changeIds: [], reason: 'Plusieurs routes dynamiques partagent la même page HTML. Utilisez une portée globale ou modifiez le composant source dans Code.' })
+        continue
+      }
+      generatedRouteTokens.set(htmlFile, token)
+      persistedOperation = {
+        ...operation,
+        target: { ...operation.target, selector: routeScopedVisualSelector(operation.target.selector, token) }
+      }
+    }
+    const css = compileVisualEditCss([persistedOperation]).css
+    if (!css) continue
+    if (operation.route.kind === 'current') generatedRoutePaths.add(operation.route.path)
+    else hasGeneratedGlobalVisual = true
+    const routeLabel = operation.route.kind === 'current' ? ` · ${operation.route.path}` : ' · toutes les pages'
+    generatedSections.push(`/* Atelier visuel${routeLabel} · ${operation.id} */\n${css}`)
+    const change: StagingChange = {
+      id: changeId('visual', operation.id, operation.after),
+      title: `Ajuster ${operation.property} sur ${operation.target.selector}`,
+      file: GENERATED_STYLESHEET,
+      kind: 'visual',
+      before: `${operation.target.selector} { ${operation.property}: ${operation.before ?? 'valeur calculée'}; }`,
+      after: css,
+      confidence: operation.target.metadata.matchCount === 1 ? 'safe' : 'review'
+    }
+    changes.push(change)
+    outcomes.push({ proposalId: operation.id, findingIds: [], kind: 'visual', status: 'applied', changeIds: [change.id], reason: 'Surcharge visuelle responsive préparée.' })
   }
 
   const interpretations = request.instructions
@@ -1095,16 +1165,7 @@ export async function buildProjectStaging(
     }
 
     const htmlFiles = new Set<string>()
-    const routeFile = (routePath: string): string | null => {
-      const route = project.routes.find((candidate) => candidate.path === routePath)
-      const routeSource = route?.sourcePath ?? route?.label
-      const candidate = routeSource && ['.html', '.htm'].includes(extname(routeSource).toLowerCase())
-        ? routeSource
-        : routePath.replace(/^\//, '')
-      return ['.html', '.htm'].includes(extname(candidate).toLowerCase())
-        ? normalizeRelativePath(candidate)
-        : null
-    }
+    const routeFile = (routePath: string): string | null => htmlFileForRoute(project, routePath)
     for (const routePath of generatedRoutePaths) {
       const candidate = routeFile(routePath)
       if (candidate) htmlFiles.add(candidate)
@@ -1123,7 +1184,7 @@ export async function buildProjectStaging(
       if (!isAuxiliary || candidate === entryFile) primaryHtmlFiles.add(candidate)
     }
     if (entryFile) primaryHtmlFiles.add(entryFile)
-    if (generatedTheme || hasGeneratedInstructions) {
+    if (generatedTheme || hasGeneratedInstructions || hasGeneratedGlobalVisual) {
       for (const primaryFile of primaryHtmlFiles) htmlFiles.add(primaryFile)
     } else if (entryFile && htmlFiles.size === 0) {
       htmlFiles.add(entryFile)
@@ -1138,6 +1199,22 @@ export async function buildProjectStaging(
       }
       let preparedContent = beforeContent
       const isPrimaryFile = primaryHtmlFiles.has(htmlFile)
+      const visualRouteToken = generatedRouteTokens.get(htmlFile)
+      if (visualRouteToken) {
+        const routedContent = setHtmlAttribute(preparedContent, GENERATED_ROUTE_ATTRIBUTE, visualRouteToken)
+        if (routedContent) {
+          preparedContent = routedContent
+          changes.push({
+            id: changeId('visual-route-attribute', htmlFile, visualRouteToken),
+            title: 'Limiter les ajustements visuels à cette page',
+            file: htmlFile,
+            kind: 'html',
+            before: `Attribut ${GENERATED_ROUTE_ATTRIBUTE} absent`,
+            after: `${GENERATED_ROUTE_ATTRIBUTE}="${visualRouteToken}"`,
+            confidence: 'safe'
+          })
+        }
+      }
       if (isPrimaryFile && generatedTheme) {
         const themedContent = setHtmlAttribute(preparedContent, GENERATED_THEME_ATTRIBUTE, generatedTheme)
         if (themedContent) {
@@ -1209,6 +1286,7 @@ export async function buildProjectStaging(
     instructions: request.instructions,
     recognizedInstructions,
     ignoredInstructions,
+    visualEdits: visualCompilation.operations,
     changedFiles,
     sourceHashes,
     outcomes,

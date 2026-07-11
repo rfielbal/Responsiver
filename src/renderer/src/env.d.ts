@@ -11,11 +11,16 @@ import type {
   RecentProjectSummary,
   RemoteAuditResult,
   RemoteFocusResult,
+  RemoteInspectorRequest,
+  RemoteInspectorSelection,
+  RemoteInspectorState,
   RemoteOpenRequest,
   RemotePageState,
   RemoteSourceAssociationRequest,
   RemoteViewBounds,
   RemoteViewport,
+  RemoteVisualStyleRequest,
+  RemoteVisualStyleResult,
   StagingApplyResult,
   StagingRequest,
   StagingSnapshot,
@@ -49,6 +54,12 @@ declare global {
     getRemoteState: () => Promise<RemotePageState>
     auditRemote: (viewports: RemoteViewport[]) => Promise<RemoteAuditResult>
     focusRemoteFinding: (selector: string) => Promise<RemoteFocusResult>
+    startRemoteInspector: (request: RemoteInspectorRequest) => Promise<RemoteInspectorState>
+    stopRemoteInspector: (request: RemoteInspectorRequest) => Promise<RemoteInspectorState>
+    previewRemoteVisualStyle: (request: RemoteVisualStyleRequest) => Promise<RemoteVisualStyleResult>
+    clearRemoteVisualStyle: (request: RemoteInspectorRequest) => Promise<RemoteVisualStyleResult>
+    onRemoteInspectorSelection: (listener: (selection: RemoteInspectorSelection) => void) => () => void
+    onRemoteInspectorShortcut: (listener: (projectId: string) => void) => () => void
     onRemoteState: (listener: (state: RemotePageState) => void) => () => void
     onRemoteBlockedNavigation: (listener: (payload: { url: string; detail: string }) => void) => () => void
     onExtensionOpenProject: (listener: (payload: { project: ProjectSnapshot; viewport: RemoteViewport }) => void) => () => void

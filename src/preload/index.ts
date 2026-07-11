@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron'
-import type { ExportResult, LocalAiRequest, LocalAiResponse, LocalAiStatus, ProjectPreparationProgress, ProjectSnapshot, RecentProjectSummary, RemoteAuditResult, RemoteFocusResult, RemoteOpenRequest, RemotePageState, RemoteSourceAssociationRequest, RemoteViewBounds, RemoteViewport, StagingApplyResult, StagingRequest, StagingSnapshot, StagingUndoResult, WorkspaceApplyResult, WorkspaceDiff, WorkspaceFileSnapshot, WorkspaceFileSummary, WorkspaceSnapshot } from '../shared/contracts'
+import type { ExportResult, LocalAiRequest, LocalAiResponse, LocalAiStatus, ProjectPreparationProgress, ProjectSnapshot, RecentProjectSummary, RemoteAuditResult, RemoteFocusResult, RemoteInspectorRequest, RemoteInspectorSelection, RemoteInspectorState, RemoteOpenRequest, RemotePageState, RemoteSourceAssociationRequest, RemoteViewBounds, RemoteViewport, RemoteVisualStyleRequest, RemoteVisualStyleResult, StagingApplyResult, StagingRequest, StagingSnapshot, StagingUndoResult, WorkspaceApplyResult, WorkspaceDiff, WorkspaceFileSnapshot, WorkspaceFileSummary, WorkspaceSnapshot } from '../shared/contracts'
 
 function reportRuleIds(projectOrRuleIds?: ProjectSnapshot | string[], acceptedRuleIds?: string[]): string[] {
   return Array.isArray(projectOrRuleIds) ? projectOrRuleIds : acceptedRuleIds ?? []
@@ -28,6 +28,20 @@ if (process.isMainFrame) {
     getRemoteState: (): Promise<RemotePageState> => ipcRenderer.invoke('remote:state'),
     auditRemote: (viewports: RemoteViewport[]): Promise<RemoteAuditResult> => ipcRenderer.invoke('remote:audit', viewports),
     focusRemoteFinding: (selector: string): Promise<RemoteFocusResult> => ipcRenderer.invoke('remote:focus', selector),
+    startRemoteInspector: (request: RemoteInspectorRequest): Promise<RemoteInspectorState> => ipcRenderer.invoke('remote:inspector-start', request),
+    stopRemoteInspector: (request: RemoteInspectorRequest): Promise<RemoteInspectorState> => ipcRenderer.invoke('remote:inspector-stop', request),
+    previewRemoteVisualStyle: (request: RemoteVisualStyleRequest): Promise<RemoteVisualStyleResult> => ipcRenderer.invoke('remote:visual-style-preview', request),
+    clearRemoteVisualStyle: (request: RemoteInspectorRequest): Promise<RemoteVisualStyleResult> => ipcRenderer.invoke('remote:visual-style-clear', request),
+    onRemoteInspectorSelection: (listener: (selection: RemoteInspectorSelection) => void): (() => void) => {
+      const handler = (_event: IpcRendererEvent, selection: RemoteInspectorSelection): void => listener(selection)
+      ipcRenderer.on('remote:inspector-selection', handler)
+      return () => ipcRenderer.removeListener('remote:inspector-selection', handler)
+    },
+    onRemoteInspectorShortcut: (listener: (projectId: string) => void): (() => void) => {
+      const handler = (_event: IpcRendererEvent, projectId: string): void => listener(projectId)
+      ipcRenderer.on('remote:inspector-shortcut', handler)
+      return () => ipcRenderer.removeListener('remote:inspector-shortcut', handler)
+    },
     onRemoteState: (listener: (state: RemotePageState) => void): (() => void) => {
       const handler = (_event: IpcRendererEvent, state: RemotePageState): void => listener(state)
       ipcRenderer.on('remote:state', handler)

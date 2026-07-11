@@ -3,17 +3,18 @@ import { createHash } from 'node:crypto'
 import { cp, lstat, mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
 import { dirname, extname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import type { ExportResult, LocalAiRequest, LocalAiResponse, LocalAiStatus, ProjectPreparationProgress, ProjectSnapshot, RecentProjectSummary, RemoteAuditResult, RemoteFocusResult, RemoteOpenRequest, RemotePageState, RemoteSourceAssociationRequest, RemoteViewBounds, RemoteViewport, StagingApplyResult, StagingRequest, StagingSnapshot, StagingUndoResult, WorkspaceApplyResult, WorkspaceDiff, WorkspaceFileSnapshot, WorkspaceFileSummary, WorkspaceSnapshot } from '../shared/contracts'
+import type { ExportResult, LocalAiRequest, LocalAiResponse, LocalAiStatus, ProjectPreparationProgress, ProjectSnapshot, RecentProjectSummary, RemoteAuditResult, RemoteFocusResult, RemoteInspectorRequest, RemoteInspectorSelection, RemoteInspectorState, RemoteOpenRequest, RemotePageState, RemoteSourceAssociationRequest, RemoteViewBounds, RemoteViewport, RemoteVisualStyleRequest, RemoteVisualStyleResult, StagingApplyResult, StagingRequest, StagingSnapshot, StagingUndoResult, WorkspaceApplyResult, WorkspaceDiff, WorkspaceFileSnapshot, WorkspaceFileSummary, WorkspaceSnapshot } from '../shared/contracts'
 import { analyzeProject, createDemoProject } from './project-analyzer'
 import { startProjectServer, type ProjectServer } from './project-server'
 import { buildProjectStaging, type ProjectStaging } from './project-transformer'
 import { createRecentProjectsStore, type RecentProjectsStore } from './recent-projects'
 import { assertPrivateExportDirectory, reservePrivateExportDirectory } from './secure-export'
-import { RemoteBrowserSession } from './remote-session'
+import { REMOTE_INSPECTOR_LIMITS, RemoteBrowserSession } from './remote-session'
 import { createWorkspaceEditor, type WorkspaceEditor } from './workspace-editor'
 import { probeLocalAi, sendLocalAiRequest } from './local-ai'
 import { resolveExtensionInbox, startExtensionInboxWatcher, type ExtensionOpenUrlRequest } from './extension-inbox'
 import { applyProjectStagingToSource, undoProjectStagingSource, type StagingSourceUndoSnapshot } from './staging-source-apply'
+import { compileVisualEditCss, validateVisualEditOperation } from '../shared/visual-editor'
 
 interface ActiveProjectSession {
   root: string
@@ -303,6 +304,7 @@ async function openRemoteProject(value: unknown): Promise<ProjectSnapshot> {
   notifyProjectPreparation({ phase: 'selection', step: 1, total: 4, label: 'Validation de l’URL', detail: value.mode === 'public' ? 'Vérification HTTPS et résolution publique avant toute navigation.' : 'Vérification de la boucle locale et du dossier éventuellement associé.' })
   const linkedRoot = value.mode === 'localhost' ? await normalizeLinkedRoot(value.linkedRoot) : null
   notifyProjectPreparation({ phase: 'preview', step: 2, total: 4, label: 'Création de la session isolée', detail: 'Chromium prépare une partition éphémère sans accès Node, fichier ou IPC.' })
+  let createdBrowser: RemoteBrowserSession | null = null
   const remoteBrowser = await RemoteBrowserSession.create({
     owner: mainWindow,
     request: value,
@@ -311,8 +313,22 @@ async function openRemoteProject(value: unknown): Promise<ProjectSnapshot> {
     onBlockedNavigation: (url, detail) => {
       if (!mainWindow || mainWindow.isDestroyed()) return
       mainWindow.webContents.send('remote:blocked-navigation', { url, detail })
+    },
+    onInspectorSelection: (selection) => {
+      if (!mainWindow || mainWindow.isDestroyed()) return
+      const session = activeSession
+      if (!createdBrowser || session?.remoteBrowser !== createdBrowser) return
+      const payload: RemoteInspectorSelection = { ...selection, projectId: session.project.id }
+      mainWindow.webContents.send('remote:inspector-selection', payload)
+    },
+    onInspectorShortcut: () => {
+      if (!mainWindow || mainWindow.isDestroyed()) return
+      const session = activeSession
+      if (!createdBrowser || session?.remoteBrowser !== createdBrowser) return
+      mainWindow.webContents.send('remote:inspector-shortcut', session.project.id)
     }
   })
+  createdBrowser = remoteBrowser
   const project = await enrichLinkedSourceProfile(remoteBrowser.projectSnapshot(), linkedRoot)
   const next: ActiveProjectSession = {
     root: linkedRoot ?? '',
@@ -341,6 +357,30 @@ function currentRemoteSession(): { session: ActiveProjectSession; browser: Remot
   return { session, browser: session.remoteBrowser }
 }
 
+function validRemoteInspectorRequest(value: unknown): value is RemoteInspectorRequest {
+  if (!value || typeof value !== 'object') return false
+  const request = value as Partial<RemoteInspectorRequest>
+  return typeof request.projectId === 'string' && request.projectId.length > 0 && request.projectId.length <= 300
+}
+
+function validRemoteVisualStyleRequest(value: unknown): value is RemoteVisualStyleRequest {
+  if (!validRemoteInspectorRequest(value)) return false
+  const request = value as Partial<RemoteVisualStyleRequest>
+  if (!Object.keys(value as object).every((key) => key === 'projectId' || key === 'visualEdits' || key === 'route')) return false
+  if (!Array.isArray(request.visualEdits) || request.visualEdits.length > 500) return false
+  if (typeof request.route !== 'string' || !request.route.startsWith('/') || request.route.length > 2_048 || request.route.includes('\0')) return false
+  const compiled = compileVisualEditCss(request.visualEdits, request.route)
+  return compiled.invalid.length === 0 && compiled.conflicts.length === 0 &&
+    Buffer.byteLength(compiled.css, 'utf8') <= REMOTE_INSPECTOR_LIMITS.maxCssBytes
+}
+
+function remoteSessionForRequest(value: unknown): { session: ActiveProjectSession; browser: RemoteBrowserSession } {
+  if (!validRemoteInspectorRequest(value)) throw new Error('La demande d’inspection distante est invalide.')
+  const current = currentRemoteSession()
+  assertExpectedProject(current.session, value.projectId)
+  return current
+}
+
 function validRemoteSourceAssociationRequest(value: unknown): value is RemoteSourceAssociationRequest {
   if (!value || typeof value !== 'object') return false
   const request = value as Partial<RemoteSourceAssociationRequest>
@@ -362,7 +402,7 @@ async function associateRemoteSource(value: unknown): Promise<ProjectSnapshot> {
   }
   // L’association ne redémarre ni ne recharge le site. Elle remplace uniquement
   // l’autorité locale utilisée par l’éditeur et efface un éventuel overlay CSS.
-  await browser.setWorkspaceCss('')
+  await Promise.all([browser.setWorkspaceCss(''), browser.clearVisualStyle()])
   if (activeSession !== session) throw new Error('La session a changé pendant l’association du dossier source.')
   const previousWorkspaceServer = session.workspaceServer
   browser.associateLinkedRoot(root)
@@ -491,7 +531,8 @@ function validStagingRequest(value: unknown): value is StagingRequest {
   const request = value as Partial<StagingRequest>
   return Array.isArray(request.issueIds) && request.issueIds.length <= 500 && request.issueIds.every((id) => typeof id === 'string' && id.length <= 256) &&
     (request.themeTarget === null || request.themeTarget === 'dark' || request.themeTarget === 'light') &&
-    Array.isArray(request.instructions) && request.instructions.length <= 100 && request.instructions.every((instruction) => typeof instruction === 'string' && instruction.length <= 2_000)
+    Array.isArray(request.instructions) && request.instructions.length <= 100 && request.instructions.every((instruction) => typeof instruction === 'string' && instruction.length <= 2_000) &&
+    (request.visualEdits === undefined || (Array.isArray(request.visualEdits) && request.visualEdits.length <= 500 && request.visualEdits.every((operation) => validateVisualEditOperation(operation).valid)))
 }
 
 function currentSession(): ActiveProjectSession {
@@ -515,7 +556,7 @@ async function buildStaging(value: unknown): Promise<StagingSnapshot> {
     throw new Error(`${conflicts.length} proposition${conflicts.length > 1 ? 's sont incompatibles' : ' est incompatible'} avec une autre sur la même cible. Retirez l’une des corrections concernées avant de construire le staging.`)
   }
   if (activeSession !== session || !mainWindow) throw new Error('La session projet a changé pendant la construction du staging.')
-  const stagedServer = session.project.entryPath
+  const stagedServer = !session.remoteBrowser && session.project.entryPath
     ? await startProjectServer(session.root, { mode: 'staged', overrides: staging.overrides, previewBasePath: session.project.previewBasePath ?? undefined })
     : null
   if (activeSession !== session || !mainWindow) {
@@ -541,7 +582,7 @@ async function previewStaging(value: unknown): Promise<StagingSnapshot> {
   if (!session.project.capabilities.staging) throw new Error('Ce projet ne possède pas encore de rendu exploitable à prévisualiser.')
   const proposal = await buildProjectStaging(session.root, session.project, value)
   if (activeSession !== session || !mainWindow) throw new Error('La session projet a changé pendant la préparation de la prévisualisation.')
-  const proposalServer = session.project.entryPath
+  const proposalServer = !session.remoteBrowser && session.project.entryPath
     ? await startProjectServer(session.root, { mode: 'proposal', overrides: proposal.overrides, previewBasePath: session.project.previewBasePath ?? undefined })
     : null
   if (activeSession !== session || !mainWindow) {
@@ -1036,6 +1077,23 @@ function registerIpcHandlers(): void {
   ipcMain.handle('remote:focus', async (event, selector: unknown): Promise<RemoteFocusResult> => {
     requireTrustedWindow(event)
     return currentRemoteSession().browser.focusSelector(selector)
+  })
+  ipcMain.handle('remote:inspector-start', async (event, request: unknown): Promise<RemoteInspectorState> => {
+    requireTrustedWindow(event)
+    return queueSessionOperation(() => remoteSessionForRequest(request).browser.startInspector())
+  })
+  ipcMain.handle('remote:inspector-stop', async (event, request: unknown): Promise<RemoteInspectorState> => {
+    requireTrustedWindow(event)
+    return queueSessionOperation(() => remoteSessionForRequest(request).browser.stopInspector())
+  })
+  ipcMain.handle('remote:visual-style-preview', async (event, request: unknown): Promise<RemoteVisualStyleResult> => {
+    requireTrustedWindow(event)
+    if (!validRemoteVisualStyleRequest(request)) throw new Error('La demande de prévisualisation visuelle est invalide.')
+    return queueSessionOperation(() => remoteSessionForRequest(request).browser.previewVisualStyle(request.visualEdits, request.route))
+  })
+  ipcMain.handle('remote:visual-style-clear', async (event, request: unknown): Promise<RemoteVisualStyleResult> => {
+    requireTrustedWindow(event)
+    return queueSessionOperation(() => remoteSessionForRequest(request).browser.clearVisualStyle())
   })
   ipcMain.handle('workspace:list', async (event, projectId: unknown): Promise<WorkspaceFileSummary[]> => {
     requireTrustedWindow(event)
