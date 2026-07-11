@@ -15,6 +15,8 @@ const secondRoot = join(fixtureRoot, 'sources-b')
 await Promise.all([mkdir(userDataRoot), mkdir(firstRoot), mkdir(secondRoot)])
 const [canonicalFirstRoot, canonicalSecondRoot] = await Promise.all([realpath(firstRoot), realpath(secondRoot)])
 await writeFile(join(firstRoot, 'styles.css'), 'body { color: #111; }\n')
+await writeFile(join(firstRoot, 'package.json'), JSON.stringify({ dependencies: { react: '^19.0.0', tailwindcss: '^4.0.0' } }))
+await writeFile(join(firstRoot, 'composer.json'), JSON.stringify({ require: { 'symfony/framework-bundle': '^7.0' } }))
 await writeFile(join(secondRoot, 'theme.css'), 'body { background: #fff; }\n')
 
 const server = createServer((_request, response) => {
@@ -57,9 +59,10 @@ try {
   assert.equal(linked.source.readOnly, false)
   assert.equal(linked.source.localRoot, canonicalFirstRoot)
   assert.equal(linked.source.url?.startsWith(origin), true)
+  assert.equal(linked.capabilities.framework, 'Symfony + React + Tailwind CSS')
 
   const files = await page.evaluate((projectId) => window.responsiver.listWorkspaceFiles(projectId), linked.id)
-  assert.deepEqual(files.map((file) => file.path), ['styles.css'])
+  assert.deepEqual(files.map((file) => file.path), ['composer.json', 'package.json', 'styles.css'])
   const source = await page.evaluate(
     ({ projectId }) => window.responsiver.readWorkspaceFile(projectId, 'styles.css'),
     { projectId: linked.id }

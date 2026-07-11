@@ -16,8 +16,10 @@ import type {
   RemoteSourceAssociationRequest,
   RemoteViewBounds,
   RemoteViewport,
+  StagingApplyResult,
   StagingRequest,
   StagingSnapshot,
+  StagingUndoResult,
   WorkspaceApplyResult,
   WorkspaceDiff,
   WorkspaceFileSnapshot,
@@ -37,6 +39,7 @@ declare global {
     openDemoProject: () => Promise<ProjectSnapshot>
     listRecentProjects: () => Promise<RecentProjectSummary[]>
     openRecentProject: (id: string) => Promise<ProjectSnapshot>
+    reanalyzeCurrentProject: () => Promise<ProjectSnapshot>
     forgetRecentProject: (id: string) => Promise<RecentProjectSummary[]>
     onProjectPreparation: (listener: (progress: ProjectPreparationProgress) => void) => () => void
     openRemoteUrl: (request: RemoteOpenRequest) => Promise<ProjectSnapshot>
@@ -65,6 +68,8 @@ declare global {
     clearPreviewStaging: (expectedOrigin: string) => Promise<void>
     buildStaging: (request: StagingRequest) => Promise<StagingSnapshot>
     clearStaging: () => Promise<void>
+    applyStagingToSource: () => Promise<StagingApplyResult>
+    undoLastStagingApply: () => Promise<StagingUndoResult>
     exportPatch: () => Promise<string | null>
     exportChangedFiles: () => Promise<ExportResult | null>
     exportProjectCopy: () => Promise<ExportResult | null>

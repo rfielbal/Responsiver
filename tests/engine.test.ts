@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { analyzeProject } from '../src/main/project-analyzer.ts'
+import { applyProjectStagingToSource } from '../src/main/staging-source-apply.ts'
 import type { ProjectPreparationProgress } from '../src/shared/contracts.ts'
 import {
   assessComplementaryTheme,
@@ -320,6 +321,24 @@ test('un template public de framework n’est pas confondu avec un artefact comp
   assert.equal(project.capabilities.buildRequired, true)
 })
 
+test('la stack Symfony, React et Tailwind est annoncée sans exécuter sa chaîne de build', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'responsiver-framework-stack-'))
+  await mkdir(join(root, 'src'))
+  await writeFile(join(root, 'package.json'), JSON.stringify({
+    scripts: { build: 'vite build' },
+    dependencies: { react: '^19.0.0', vite: '^6.0.0', tailwindcss: '^4.0.0' }
+  }))
+  await writeFile(join(root, 'composer.json'), JSON.stringify({ require: { 'symfony/framework-bundle': '^7.0' } }))
+  await writeFile(join(root, 'index.html'), '<!doctype html><html><head><title>Shell</title></head><body><div id="root"></div><script type="module" src="/src/main.tsx"></script></body></html>')
+  await writeFile(join(root, 'src', 'main.tsx'), 'export const App = () => <main>Application</main>')
+  context.after(() => rm(root, { recursive: true, force: true }))
+
+  const project = await analyzeProject(root)
+  assert.equal(project.capabilities.framework, 'Symfony + React + Tailwind CSS')
+  assert.equal(project.capabilities.buildRequired, true)
+  assert.equal(project.previewReadiness.status, 'needs-build')
+})
+
 test('le staging produit un patch et une variante claire sans toucher aux sources', async (context) => {
   const fixture = await createFixture()
   context.after(() => rm(fixture.root, { recursive: true, force: true }))
@@ -350,11 +369,110 @@ test('le staging produit un patch et une variante claire sans toucher aux source
   assert.match(staging.snapshot.patch, /diff --git a\/index\.html b\/index\.html/)
   assert.deepEqual(staging.snapshot.recognizedInstructions, ['Utilise un accent #315f8c'])
   assert.deepEqual(staging.snapshot.ignoredInstructions, ['Ajoute une intelligence artificielle distante'])
+  assert.ok(staging.snapshot.outcomes?.some((outcome) => outcome.kind === 'theme' && outcome.status === 'applied'))
+  assert.ok(staging.snapshot.outcomes?.some((outcome) => outcome.kind === 'instruction' && outcome.status === 'skipped'))
+  assert.ok(selectedIssues.every((id) => staging.snapshot.outcomes?.some((outcome) => outcome.proposalId === id && outcome.status === 'applied')))
 
   const stagedIndex = staging.overrides.get('index.html')?.toString('utf8') ?? ''
   const stagedJournal = staging.overrides.get('journal.html')?.toString('utf8') ?? ''
   assert.match(stagedIndex, /data-responsiver-generated-theme="light"/)
   assert.match(stagedJournal, /data-responsiver-generated-theme="light"/)
+})
+
+test('deux propositions incompatibles sur la même cible sont signalées sans disparaître du staging', async (context) => {
+  const fixture = await createFixture()
+  context.after(() => rm(fixture.root, { recursive: true, force: true }))
+  const project = await analyzeProject(fixture.root)
+  const base = project.issues.find((issue) => issue.rule === 'css.min-width-mobile' && issue.routePath === '/index.html')
+  assert.ok(base?.fix && base.fix.kind === 'css-media-override')
+  const conflicting = {
+    ...base,
+    id: `${base.id}-conflict`,
+    fix: { ...base.fix, after: '12rem' }
+  }
+  project.issues.push(conflicting)
+
+  const staging = await buildProjectStaging(fixture.root, project, {
+    issueIds: [base.id, conflicting.id],
+    themeTarget: null,
+    instructions: []
+  })
+
+  const conflicts = staging.snapshot.outcomes?.filter((outcome) => outcome.status === 'conflict') ?? []
+  assert.deepEqual(conflicts.map((outcome) => outcome.proposalId).sort(), [base.id, conflicting.id].sort())
+  assert.equal(staging.snapshot.changedFiles.length, 0)
+})
+
+test('deux applications successives réutilisent la feuille Responsiver gérée', async (context) => {
+  const fixture = await createFixture()
+  context.after(() => rm(fixture.root, { recursive: true, force: true }))
+  const firstProject = await analyzeProject(fixture.root)
+  const first = await buildProjectStaging(fixture.root, firstProject, {
+    issueIds: [], themeTarget: null, instructions: ['Utilise un accent #315f8c']
+  })
+  await applyProjectStagingToSource(fixture.root, first)
+
+  const refreshed = await analyzeProject(fixture.root)
+  const duplicate = await buildProjectStaging(fixture.root, refreshed, {
+    issueIds: [], themeTarget: null, instructions: ['Utilise un accent #315f8c']
+  })
+  assert.equal(duplicate.snapshot.changes.length, 0, JSON.stringify(duplicate.snapshot.changes))
+  assert.equal(duplicate.snapshot.outcomes?.find((outcome) => outcome.kind === 'instruction')?.status, 'skipped')
+  const second = await buildProjectStaging(fixture.root, refreshed, {
+    issueIds: [], themeTarget: null, instructions: ['Mets les angles droits sur les composants']
+  })
+  assert.ok(second.snapshot.changedFiles.includes('.responsiver/responsiver.generated.css'))
+  assert.equal(second.snapshot.changedFiles.some((path) => /responsiver\.generated\.\d+\.css$/.test(path)), false)
+  const generated = second.overrides.get('.responsiver/responsiver.generated.css')?.toString('utf8') ?? ''
+  assert.match(generated, /--responsiver-accent: #315f8c/)
+  assert.match(generated, /border-radius: 0/)
+})
+
+test('un correctif déjà couvert par la feuille gérée devient un no-op explicite', async (context) => {
+  const fixture = await createFixture()
+  context.after(() => rm(fixture.root, { recursive: true, force: true }))
+  const initial = await analyzeProject(fixture.root)
+  const finding = initial.issues.find((issue) => issue.rule === 'css.min-width-mobile' && issue.routePath === '/index.html')
+  assert.ok(finding)
+  const first = await buildProjectStaging(fixture.root, initial, { issueIds: [finding.id], themeTarget: null, instructions: [] })
+  await applyProjectStagingToSource(fixture.root, first)
+
+  const refreshed = await analyzeProject(fixture.root)
+  const repeatedFinding = refreshed.issues.find((issue) => issue.rule === 'css.min-width-mobile' && issue.routePath === '/index.html')
+  assert.ok(repeatedFinding)
+  const repeated = await buildProjectStaging(fixture.root, refreshed, { issueIds: [repeatedFinding.id], themeTarget: null, instructions: [] })
+  assert.equal(repeated.snapshot.changes.length, 0)
+  assert.equal(repeated.snapshot.changedFiles.length, 0)
+  assert.equal(repeated.snapshot.outcomes?.find((outcome) => outcome.proposalId === repeatedFinding.id)?.status, 'skipped')
+})
+
+test('deux déclarations CSS de même cible à des lignes différentes ne sont pas un faux conflit', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'responsiver-css-lines-'))
+  context.after(() => rm(root, { recursive: true, force: true }))
+  await writeFile(join(root, 'index.html'), '<!doctype html><html><head><meta name="viewport" content="width=device-width"><link rel="stylesheet" href="styles.css"><title>CSS</title></head><body><nav class="site-nav">Menu</nav></body></html>')
+  await writeFile(join(root, 'styles.css'), '.site-nav { min-width: 720px; }\n\n.site-nav { min-width: 680px; }\n')
+  const project = await analyzeProject(root)
+  const findings = project.issues.filter((issue) => issue.rule === 'css.min-width-mobile')
+  assert.ok(findings.length >= 2)
+  const staged = await buildProjectStaging(root, project, { issueIds: findings.map((issue) => issue.id), themeTarget: null, instructions: [] })
+  assert.equal(staged.snapshot.outcomes?.some((outcome) => outcome.status === 'conflict'), false)
+})
+
+test('les instructions et thèmes incompatibles sont refusés au lieu de laisser gagner le dernier', async (context) => {
+  const fixture = await createFixture()
+  context.after(() => rm(fixture.root, { recursive: true, force: true }))
+  const project = await analyzeProject(fixture.root)
+  const accents = await buildProjectStaging(fixture.root, project, {
+    issueIds: [], themeTarget: null, instructions: ['Utilise un accent #315f8c', 'Utilise un accent #b74538']
+  })
+  assert.equal(accents.snapshot.outcomes?.filter((outcome) => outcome.status === 'conflict').length, 2)
+  assert.equal(accents.snapshot.changedFiles.length, 0)
+
+  const themes = await buildProjectStaging(fixture.root, project, {
+    issueIds: [], themeTarget: 'dark', instructions: ['Crée une version claire']
+  })
+  assert.equal(themes.snapshot.outcomes?.filter((outcome) => outcome.status === 'conflict').length, 2)
+  assert.equal(themes.snapshot.changedFiles.length, 0)
 })
 
 test('un thème existant n’est jamais proposé comme doublon', async (context) => {
@@ -370,6 +488,7 @@ test('un thème existant n’est jamais proposé comme doublon', async (context)
   assert.equal(staging.snapshot.generatedCss, '')
   assert.equal(staging.snapshot.changes.length, 0)
   assert.equal(staging.overrides.size, 0)
+  assert.equal(staging.snapshot.outcomes?.[0]?.status, 'skipped')
 })
 
 test('la génération de thème refuse une palette sans rôles fond et texte fiables', async (context) => {

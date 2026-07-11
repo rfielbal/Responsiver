@@ -1002,6 +1002,7 @@ async function detectCapabilities(
 ): Promise<Omit<ProjectCapabilities, 'previewStrategy'>> {
   const relativeFiles = new Set(files.map((file) => posixRelative(root, file).toLowerCase()))
   const packageFile = files.find((file) => posixRelative(root, file).toLowerCase() === 'package.json')
+  const composerFile = files.find((file) => posixRelative(root, file).toLowerCase() === 'composer.json')
   let framework: string | null = null
   let hasBuildScript = false
   if (packageFile) {
@@ -1022,12 +1023,33 @@ async function detectCapabilities(
         ['svelte', 'Svelte'],
         ['vue', 'Vue'],
         ['react', 'React'],
-        ['vite', 'Vite']
+        ['vite', 'Vite'],
+        ['express', 'Node.js / Express']
       ]
       framework = frameworks.find(([dependency]) => dependency in dependencies)?.[1] ?? null
+      if ('tailwindcss' in dependencies || '@tailwindcss/vite' in dependencies || '@tailwindcss/postcss' in dependencies) {
+        framework = framework ? `${framework} + Tailwind CSS` : 'Tailwind CSS'
+      }
       hasBuildScript = typeof packageJson.scripts?.build === 'string'
     } catch {
       // Un package.json invalide ne doit pas empêcher l’analyse du HTML/CSS.
+    }
+  }
+  if (composerFile) {
+    try {
+      const composerJson = JSON.parse(await readTextFile(composerFile, root)) as {
+        require?: Record<string, string>
+        'require-dev'?: Record<string, string>
+      }
+      const dependencies = { ...composerJson['require-dev'], ...composerJson.require }
+      const backend = 'symfony/framework-bundle' in dependencies
+        ? 'Symfony'
+        : 'laravel/framework' in dependencies
+          ? 'Laravel'
+          : null
+      if (backend) framework = framework ? `${backend} + ${framework}` : backend
+    } catch {
+      // La détection de stack reste informative et ne bloque jamais le rendu.
     }
   }
 

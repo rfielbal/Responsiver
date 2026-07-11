@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { cp, lstat, mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
 import { dirname, extname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import type { ExportResult, LocalAiRequest, LocalAiResponse, LocalAiStatus, ProjectPreparationProgress, ProjectSnapshot, RecentProjectSummary, RemoteAuditResult, RemoteFocusResult, RemoteOpenRequest, RemotePageState, RemoteSourceAssociationRequest, RemoteViewBounds, RemoteViewport, StagingRequest, StagingSnapshot, WorkspaceApplyResult, WorkspaceDiff, WorkspaceFileSnapshot, WorkspaceFileSummary, WorkspaceSnapshot } from '../shared/contracts'
+import type { ExportResult, LocalAiRequest, LocalAiResponse, LocalAiStatus, ProjectPreparationProgress, ProjectSnapshot, RecentProjectSummary, RemoteAuditResult, RemoteFocusResult, RemoteOpenRequest, RemotePageState, RemoteSourceAssociationRequest, RemoteViewBounds, RemoteViewport, StagingApplyResult, StagingRequest, StagingSnapshot, StagingUndoResult, WorkspaceApplyResult, WorkspaceDiff, WorkspaceFileSnapshot, WorkspaceFileSummary, WorkspaceSnapshot } from '../shared/contracts'
 import { analyzeProject, createDemoProject } from './project-analyzer'
 import { startProjectServer, type ProjectServer } from './project-server'
 import { buildProjectStaging, type ProjectStaging } from './project-transformer'
@@ -13,6 +13,7 @@ import { RemoteBrowserSession } from './remote-session'
 import { createWorkspaceEditor, type WorkspaceEditor } from './workspace-editor'
 import { probeLocalAi, sendLocalAiRequest } from './local-ai'
 import { resolveExtensionInbox, startExtensionInboxWatcher, type ExtensionOpenUrlRequest } from './extension-inbox'
+import { applyProjectStagingToSource, undoProjectStagingSource, type StagingSourceUndoSnapshot } from './staging-source-apply'
 
 interface ActiveProjectSession {
   root: string
@@ -24,6 +25,7 @@ interface ActiveProjectSession {
   stagedServer: ProjectServer | null
   workspaceServer: ProjectServer | null
   staging: ProjectStaging | null
+  stagingUndo: StagingSourceUndoSnapshot | null
   remoteBrowser: RemoteBrowserSession | null
   workspace: WorkspaceEditor | null
   remoteRouteTruncation?: Map<string, boolean>
@@ -201,6 +203,7 @@ async function createLocalSession(selection: NormalizedProjectSelection): Promis
     stagedServer: null,
     workspaceServer: null,
     staging: null,
+    stagingUndo: null,
     remoteBrowser: null,
     workspace: null
   }
@@ -251,7 +254,7 @@ async function openDemoProject(): Promise<ProjectSnapshot> {
   if (demoRoot) return openLocalProject({ root: demoRoot, selectionPath: demoRoot, preferredEntryPath: '/index.html' }, false)
   if (!mainWindow) throw new Error('La fenêtre Responsiver a été fermée pendant l’ouverture de la démonstration.')
   const project = createDemoProject()
-  await replaceActiveSession({ root: '', selectionPath: null, recentId: null, project, sourceServer: null, proposalServer: null, stagedServer: null, workspaceServer: null, staging: null, remoteBrowser: null, workspace: null })
+  await replaceActiveSession({ root: '', selectionPath: null, recentId: null, project, sourceServer: null, proposalServer: null, stagedServer: null, workspaceServer: null, staging: null, stagingUndo: null, remoteBrowser: null, workspace: null })
   return project
 }
 
@@ -266,6 +269,24 @@ async function normalizeLinkedRoot(value: unknown): Promise<string | null> {
   const root = await realpath(value).catch(() => null)
   if (!root || !(await stat(root).catch(() => null))?.isDirectory()) throw new Error('Le dossier associé au localhost est introuvable.')
   return root
+}
+
+async function enrichLinkedSourceProfile(project: ProjectSnapshot, root: string | null): Promise<ProjectSnapshot> {
+  if (!root) return project
+  const local = await analyzeProject(root).catch(() => null)
+  if (!local) return project
+  const framework = local.capabilities.framework ?? project.capabilities.framework
+  return {
+    ...project,
+    files: local.files,
+    kind: framework && !project.kind.includes(framework) ? `${project.kind} · ${framework}` : project.kind,
+    capabilities: {
+      ...project.capabilities,
+      framework,
+      packageManager: local.capabilities.packageManager,
+      buildRequired: local.capabilities.buildRequired
+    }
+  }
 }
 
 function validRemoteOpenRequest(value: unknown): value is RemoteOpenRequest {
@@ -292,7 +313,7 @@ async function openRemoteProject(value: unknown): Promise<ProjectSnapshot> {
       mainWindow.webContents.send('remote:blocked-navigation', { url, detail })
     }
   })
-  const project = remoteBrowser.projectSnapshot()
+  const project = await enrichLinkedSourceProfile(remoteBrowser.projectSnapshot(), linkedRoot)
   const next: ActiveProjectSession = {
     root: linkedRoot ?? '',
     selectionPath: linkedRoot,
@@ -303,6 +324,7 @@ async function openRemoteProject(value: unknown): Promise<ProjectSnapshot> {
     stagedServer: null,
     workspaceServer: null,
     staging: null,
+    stagingUndo: null,
     remoteBrowser,
     workspace: null,
     remoteRouteTruncation: new Map()
@@ -338,19 +360,20 @@ async function associateRemoteSource(value: unknown): Promise<ProjectSnapshot> {
   if (session.workspace?.getSnapshot().dirtyCount) {
     throw new Error('Des changements temporaires sont encore ouverts. Appliquez-les ou écartez-les avant de remplacer le dossier source.')
   }
-
   // L’association ne redémarre ni ne recharge le site. Elle remplace uniquement
   // l’autorité locale utilisée par l’éditeur et efface un éventuel overlay CSS.
   await browser.setWorkspaceCss('')
   if (activeSession !== session) throw new Error('La session a changé pendant l’association du dossier source.')
   const previousWorkspaceServer = session.workspaceServer
   browser.associateLinkedRoot(root)
+  const sourceProfile = await enrichLinkedSourceProfile(browser.projectSnapshot(session.project.issues), root)
+  if (activeSession !== session) throw new Error('La session a changé pendant l’analyse du dossier source.')
   session.root = root
   session.selectionPath = root
   session.workspace = null
   session.workspaceServer = null
   const previous = session.project
-  const linked = browser.projectSnapshot(previous.issues)
+  const linked = sourceProfile
   session.project = {
     ...linked,
     routes: previous.routes,
@@ -382,6 +405,9 @@ async function runRemoteAudit(value: unknown): Promise<RemoteAuditResult> {
   const route = { path: currentState.path, label: currentUrl.pathname === '/' ? currentUrl.hostname : currentUrl.pathname, title: currentState.title, theme: 'unknown' as const }
   session.project = {
     ...base,
+    files: previous.files,
+    kind: previous.kind,
+    capabilities: previous.capabilities,
     issues: [
       ...previous.issues.filter((issue) => (issue.routePath ?? issue.evidence?.route) !== result.path),
       ...result.findings
@@ -484,6 +510,10 @@ async function buildStaging(value: unknown): Promise<StagingSnapshot> {
   const session = currentSession()
   if (!session.project.capabilities.staging) throw new Error('Ce projet ne possède pas encore de rendu exploitable à corriger.')
   const staging = await buildProjectStaging(session.root, session.project, value)
+  const conflicts = staging.snapshot.outcomes?.filter((outcome) => outcome.status === 'conflict') ?? []
+  if (conflicts.length) {
+    throw new Error(`${conflicts.length} proposition${conflicts.length > 1 ? 's sont incompatibles' : ' est incompatible'} avec une autre sur la même cible. Retirez l’une des corrections concernées avant de construire le staging.`)
+  }
   if (activeSession !== session || !mainWindow) throw new Error('La session projet a changé pendant la construction du staging.')
   const stagedServer = session.project.entryPath
     ? await startProjectServer(session.root, { mode: 'staged', overrides: staging.overrides, previewBasePath: session.project.previewBasePath ?? undefined })
@@ -540,6 +570,78 @@ async function clearStaging(): Promise<void> {
   activeSession.staging = null
   activeSession.stagedServer = null
   await closePreviewServer(server)
+}
+
+function assertLocalStagingSession(): ActiveProjectSession {
+  const session = currentEditableSession()
+  if (session.project.source.kind !== 'local-project') {
+    throw new Error('L’application directe des corrections est réservée aux projets locaux ouverts depuis leur dossier source.')
+  }
+  if (session.project.previewBasePath || session.project.capabilities.previewStrategy === 'artifact') {
+    throw new Error('Cette prévisualisation cible une sortie compilée. Exportez le staging ou reportez le correctif dans les sources auteur afin qu’un prochain build ne l’efface pas.')
+  }
+  if (session.workspace?.getSnapshot().dirtyCount) {
+    throw new Error('Des changements sont encore ouverts dans l’éditeur. Appliquez-les ou écartez-les avant de modifier les sources depuis le staging.')
+  }
+  return session
+}
+
+async function invalidateSourceMutationPreviews(session: ActiveProjectSession, paths: string[]): Promise<void> {
+  const servers = [session.stagedServer, session.proposalServer, session.workspaceServer]
+  session.staging = null
+  session.stagedServer = null
+  session.proposalServer = null
+  session.workspaceServer = null
+  session.workspace = null
+  await Promise.all(servers.map((server) => closePreviewServer(server)))
+  mainWindow?.webContents.send('workspace:preview-origin', null)
+  // Le renderer peut recharger le rendu source et réanalyser les chemins
+  // concernés sans recevoir le contenu ni les sauvegardes d’annulation.
+  mainWindow?.webContents.send('workspace:applied', paths)
+}
+
+async function applyStagingToSource(): Promise<StagingApplyResult> {
+  const session = assertLocalStagingSession()
+  const staging = session.staging
+  if (!staging) throw new Error('Préparez d’abord une version corrigée avant de l’appliquer aux sources.')
+  const operation = await applyProjectStagingToSource(session.root, staging)
+  if (activeSession !== session) throw new Error('La session projet a changé pendant l’application des corrections.')
+  session.stagingUndo = operation.undo
+  await invalidateSourceMutationPreviews(session, operation.result.paths)
+  return operation.result
+}
+
+async function undoLastStagingApply(): Promise<StagingUndoResult> {
+  const session = assertLocalStagingSession()
+  const undo = session.stagingUndo
+  if (!undo) throw new Error('Aucune application récente de staging ne peut être annulée dans cette session.')
+  const result = await undoProjectStagingSource(undo)
+  if (activeSession !== session) throw new Error('La session projet a changé pendant l’annulation des corrections.')
+  session.stagingUndo = null
+  await invalidateSourceMutationPreviews(session, result.paths)
+  return result
+}
+
+async function reanalyzeCurrentProject(): Promise<ProjectSnapshot> {
+  const session = currentEditableSession()
+  if (session.project.source.kind !== 'local-project') throw new Error('La réanalyse directe est réservée aux projets locaux.')
+  const selection = await normalizeProjectSelection(session.selectionPath ?? session.root)
+  const undo = session.stagingUndo
+  const recentId = session.recentId
+  const next = await createLocalSession(selection)
+  next.stagingUndo = undo
+  next.recentId = recentId
+  if (!mainWindow) {
+    await disposeSession(next)
+    throw new Error('La fenêtre Responsiver a été fermée pendant la réanalyse.')
+  }
+  await replaceActiveSession(next)
+  if (recentId) {
+    await recentStore().upsert(selection.selectionPath, next.project).then((memorizedId) => {
+      next.recentId = memorizedId
+    }).catch(() => undefined)
+  }
+  return next.project
 }
 
 function safeOverrideDestination(root: string, relativePath: string): string | null {
@@ -863,6 +965,10 @@ function registerIpcHandlers(): void {
     requireTrustedWindow(event)
     return queueSessionOperation(() => prepareLocalProject(path))
   })
+  ipcMain.handle('project:reanalyze', async (event): Promise<ProjectSnapshot> => {
+    requireTrustedWindow(event)
+    return queueSessionOperation(() => queueWorkspaceOperation(reanalyzeCurrentProject))
+  })
   ipcMain.handle('project:demo', async (event): Promise<ProjectSnapshot> => {
     requireTrustedWindow(event)
     return queueSessionOperation(openDemoProject)
@@ -1013,6 +1119,14 @@ function registerIpcHandlers(): void {
   ipcMain.handle('staging:clear', async (event): Promise<void> => {
     requireTrustedWindow(event)
     return queueSessionOperation(clearStaging)
+  })
+  ipcMain.handle('staging:apply-source', async (event): Promise<StagingApplyResult> => {
+    requireTrustedWindow(event)
+    return queueSessionOperation(() => queueWorkspaceOperation(applyStagingToSource))
+  })
+  ipcMain.handle('staging:undo-source', async (event): Promise<StagingUndoResult> => {
+    requireTrustedWindow(event)
+    return queueSessionOperation(() => queueWorkspaceOperation(undoLastStagingApply))
   })
   ipcMain.handle('staging:export-patch', (event): Promise<string | null> => exportPatch(requireTrustedWindow(event)))
   ipcMain.handle('staging:export-changed', (event): Promise<ExportResult | null> => exportChangedFiles(requireTrustedWindow(event)))

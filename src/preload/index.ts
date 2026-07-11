@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron'
-import type { ExportResult, LocalAiRequest, LocalAiResponse, LocalAiStatus, ProjectPreparationProgress, ProjectSnapshot, RecentProjectSummary, RemoteAuditResult, RemoteFocusResult, RemoteOpenRequest, RemotePageState, RemoteSourceAssociationRequest, RemoteViewBounds, RemoteViewport, StagingRequest, StagingSnapshot, WorkspaceApplyResult, WorkspaceDiff, WorkspaceFileSnapshot, WorkspaceFileSummary, WorkspaceSnapshot } from '../shared/contracts'
+import type { ExportResult, LocalAiRequest, LocalAiResponse, LocalAiStatus, ProjectPreparationProgress, ProjectSnapshot, RecentProjectSummary, RemoteAuditResult, RemoteFocusResult, RemoteOpenRequest, RemotePageState, RemoteSourceAssociationRequest, RemoteViewBounds, RemoteViewport, StagingApplyResult, StagingRequest, StagingSnapshot, StagingUndoResult, WorkspaceApplyResult, WorkspaceDiff, WorkspaceFileSnapshot, WorkspaceFileSummary, WorkspaceSnapshot } from '../shared/contracts'
 
 function reportRuleIds(projectOrRuleIds?: ProjectSnapshot | string[], acceptedRuleIds?: string[]): string[] {
   return Array.isArray(projectOrRuleIds) ? projectOrRuleIds : acceptedRuleIds ?? []
@@ -14,6 +14,7 @@ if (process.isMainFrame) {
     openDemoProject: (): Promise<ProjectSnapshot> => ipcRenderer.invoke('project:demo'),
     listRecentProjects: (): Promise<RecentProjectSummary[]> => ipcRenderer.invoke('project:recent:list'),
     openRecentProject: (id: string): Promise<ProjectSnapshot> => ipcRenderer.invoke('project:recent:open', id),
+    reanalyzeCurrentProject: (): Promise<ProjectSnapshot> => ipcRenderer.invoke('project:reanalyze'),
     forgetRecentProject: (id: string): Promise<RecentProjectSummary[]> => ipcRenderer.invoke('project:recent:forget', id),
     onProjectPreparation: (listener: (progress: ProjectPreparationProgress) => void): (() => void) => {
       const handler = (_event: IpcRendererEvent, progress: ProjectPreparationProgress): void => listener(progress)
@@ -66,6 +67,8 @@ if (process.isMainFrame) {
     clearPreviewStaging: (expectedOrigin: string): Promise<void> => ipcRenderer.invoke('staging:clear-preview', expectedOrigin),
     buildStaging: (request: StagingRequest): Promise<StagingSnapshot> => ipcRenderer.invoke('staging:build', request),
     clearStaging: (): Promise<void> => ipcRenderer.invoke('staging:clear'),
+    applyStagingToSource: (): Promise<StagingApplyResult> => ipcRenderer.invoke('staging:apply-source'),
+    undoLastStagingApply: (): Promise<StagingUndoResult> => ipcRenderer.invoke('staging:undo-source'),
     exportPatch: (): Promise<string | null> => ipcRenderer.invoke('staging:export-patch'),
     exportChangedFiles: (): Promise<ExportResult | null> => ipcRenderer.invoke('staging:export-changed'),
     exportProjectCopy: (): Promise<ExportResult | null> => ipcRenderer.invoke('staging:export-copy'),

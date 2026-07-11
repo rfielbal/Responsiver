@@ -6,6 +6,7 @@ import type {
   ProjectFix,
   ProjectSnapshot,
   StagingChange,
+  StagingOutcome,
   StagingRequest,
   StagingSnapshot,
   ThemeMode,
@@ -16,6 +17,10 @@ import type {
 export const GENERATED_STYLESHEET = '.responsiver/responsiver.generated.css'
 const GENERATED_THEME_ATTRIBUTE = 'data-responsiver-generated-theme'
 const GENERATED_INSTRUCTIONS_ATTRIBUTE = 'data-responsiver-generated-instructions'
+const GENERATED_FILE_HEADER = `/*
+ * Généré localement par Responsiver.
+ * Chaque règle reste lisible, exportable et réversible.
+ */`
 
 export interface ProjectStaging {
   /** Chemins relatifs POSIX. Le projet source n’est jamais modifié. */
@@ -320,6 +325,26 @@ export function interpretLocalInstruction(instruction: string): InstructionInter
   return { instruction, recognized: false }
 }
 
+function instructionCssTargets(css: string): Array<{ target: string; value: string }> {
+  const targets: Array<{ target: string; value: string }> = []
+  const root = postcss.parse(css)
+  root.walkDecls((declaration) => {
+    let selector = ''
+    const contexts: string[] = []
+    let parent = declaration.parent
+    while (parent && parent.type !== 'root') {
+      if (parent.type === 'rule' && !selector) selector = normalizeSelector(parent.selector)
+      if (parent.type === 'atrule') contexts.push(`@${parent.name} ${parent.params}`.trim())
+      parent = parent.parent
+    }
+    targets.push({
+      target: [...contexts.reverse(), selector, declaration.prop.toLowerCase()].join('\u001f'),
+      value: `${declaration.value.trim()}${declaration.important ? ' !important' : ''}`
+    })
+  })
+  return targets
+}
+
 function parseRgb(value: string): [number, number, number] | null {
   const source = value.trim()
   const hex = source.match(/^#([\da-f]{3,8})$/i)?.[1]
@@ -415,8 +440,9 @@ export function assessComplementaryTheme(project: ProjectSnapshot, target: Theme
 function enrichAccentInstruction(css: string, variables: ThemeVariable[]): string {
   const color = css.match(/--responsiver-accent\s*:\s*([^;]+)/)?.[1]?.trim()
   if (!color) return css
-  const semanticOverrides = variables
-    .filter((variable) => variable.role === 'accent')
+  const semanticOverrides = [...new Map(variables
+    .filter((variable) => variable.role === 'accent' && !variable.name.startsWith('--responsiver-'))
+    .map((variable) => [variable.name, variable])).values()]
     .map((variable) => `  ${variable.name}: ${color};`)
   if (semanticOverrides.length === 0) return css
   return `${css}\n\n:root {\n${semanticOverrides.join('\n')}\n}`
@@ -717,7 +743,7 @@ function unifiedFileDiff(path: string, before: string | null, after: string): st
   return lines.join('\n')
 }
 
-async function availableGeneratedPath(root: string, previewBasePath: string | null): Promise<string> {
+async function availableGeneratedPath(root: string, previewBasePath: string | null): Promise<{ path: string; existing: string | null }> {
   const generatedDirectory = previewBasePath
     ? `${normalizeRelativePath(previewBasePath)}/.responsiver`
     : '.responsiver'
@@ -726,7 +752,11 @@ async function availableGeneratedPath(root: string, previewBasePath: string | nu
       ? `${generatedDirectory}/responsiver.generated.css`
       : `${generatedDirectory}/responsiver.generated.${index}.css`
     const state = await guardedProjectPath(root, candidate)
-    if (!state.exists) return candidate
+    if (!state.exists) return { path: candidate, existing: null }
+    const metadata = await fs.stat(state.path).catch(() => null)
+    if (!metadata?.isFile() || metadata.size > 4 * 1024 * 1024) continue
+    const existing = await fs.readFile(state.path, 'utf8').catch(() => null)
+    if (existing?.startsWith(GENERATED_FILE_HEADER)) return { path: candidate, existing }
   }
   throw new Error('Impossible de réserver un nom pour la feuille Responsiver.')
 }
@@ -741,8 +771,10 @@ export async function buildProjectStaging(
   const currentTexts = new Map<string, string>()
   const overrides = new Map<string, Buffer>()
   const changes: StagingChange[] = []
+  const outcomes: StagingOutcome[] = []
   const generatedSections: string[] = []
   const generatedOperations = new Set<string>()
+  const operationChangeIds = new Map<string, string[]>()
   const generatedRoutePaths = new Set<string>()
   const recognizedInstructions: string[] = []
   const ignoredInstructions: string[] = []
@@ -779,21 +811,69 @@ export async function buildProjectStaging(
     overrides.set(relativePath, Buffer.from(value, 'utf8'))
   }
 
-  const acceptedIssues = new Set(request.issueIds)
+  const requestedIssueIds = [...new Set(request.issueIds)]
+  const acceptedIssues = new Set(requestedIssueIds)
+  const issueById = new Map(project.issues.map((issue) => [issue.id, issue]))
+  const sourceIdentityFor = (issue: ProjectSnapshot['issues'][number]): string => issue.source
+    ? `${normalizeRelativePath(issue.source.file)}:${issue.source.line}`
+    : 'source-inconnue'
+  const operationKeyFor = (issue: ProjectSnapshot['issues'][number]): string => {
+    const fix = issue.fix!
+    return [fix.kind, normalizeRelativePath(fix.file), sourceIdentityFor(issue), normalizeSelector(fix.selector ?? ''), fix.property, fix.before, fix.after, fix.breakpoint].join('\u001f')
+  }
+  const targetKeyFor = (issue: ProjectSnapshot['issues'][number]): string => {
+    const fix = issue.fix!
+    return fix.kind === 'html-insert'
+      ? `${normalizeRelativePath(fix.file)}\u001f${sourceIdentityFor(issue)}\u001fhead`
+      : [normalizeRelativePath(fix.file), sourceIdentityFor(issue), normalizeSelector(fix.selector ?? ''), fix.property, fix.breakpoint].join('\u001f')
+  }
+  const candidatesByTarget = new Map<string, Array<{ issueId: string; operationKey: string }>>()
+  const conflictingIssueIds = new Set<string>()
+
+  for (const issueId of requestedIssueIds) {
+    const issue = issueById.get(issueId)
+    if (!issue) {
+      outcomes.push({ proposalId: issueId, findingIds: [issueId], kind: 'issue', status: 'skipped', changeIds: [], reason: 'Le constat n’existe plus dans cette analyse.' })
+      continue
+    }
+    if (!issue.fix || issue.fix.kind === 'manual') {
+      outcomes.push({ proposalId: issueId, findingIds: [issueId], kind: 'issue', status: 'skipped', changeIds: [], reason: 'Aucune transformation automatique sûre n’est définie pour ce constat.' })
+      continue
+    }
+    const targetKey = targetKeyFor(issue)
+    const entries = candidatesByTarget.get(targetKey) ?? []
+    entries.push({ issueId, operationKey: operationKeyFor(issue) })
+    candidatesByTarget.set(targetKey, entries)
+  }
+
+  for (const entries of candidatesByTarget.values()) {
+    if (new Set(entries.map((entry) => entry.operationKey)).size <= 1) continue
+    for (const entry of entries) conflictingIssueIds.add(entry.issueId)
+  }
+  for (const issueId of conflictingIssueIds) {
+    outcomes.push({ proposalId: issueId, findingIds: [issueId], kind: 'issue', status: 'conflict', changeIds: [], reason: 'Une autre proposition modifie la même cible avec une valeur différente.' })
+  }
+
   for (const issue of project.issues) {
-    if (!acceptedIssues.has(issue.id) || !issue.fix || issue.fix.kind === 'manual') continue
+    if (!acceptedIssues.has(issue.id) || !issue.fix || issue.fix.kind === 'manual' || conflictingIssueIds.has(issue.id)) continue
     const fix = issue.fix
-    const operationKey = [fix.kind, fix.file, fix.selector, fix.property, fix.before, fix.after, fix.breakpoint].join('\u001f')
+    const operationKey = operationKeyFor(issue)
     if (fix.kind === 'css-media-override') generatedRoutePaths.add(issue.routePath ?? project.entryPath ?? '')
-    if (generatedOperations.has(operationKey)) continue
+    if (generatedOperations.has(operationKey)) {
+      outcomes.push({ proposalId: issue.id, findingIds: [issue.id], kind: 'issue', status: 'applied', changeIds: operationChangeIds.get(operationKey) ?? [], reason: 'Transformation identique regroupée avec une autre proposition.' })
+      continue
+    }
 
     if (fix.kind === 'html-insert') {
       const beforeContent = await currentText(fix.file)
       const afterContent = insertViewport(beforeContent)
-      if (!afterContent || afterContent === beforeContent) continue
+      if (!afterContent || afterContent === beforeContent) {
+        outcomes.push({ proposalId: issue.id, findingIds: [issue.id], kind: 'issue', status: 'skipped', changeIds: [], reason: 'La cible HTML est déjà corrigée ou n’existe plus.' })
+        continue
+      }
       setText(fix.file, afterContent)
       generatedOperations.add(operationKey)
-      changes.push({
+      const change: StagingChange = {
         id: changeId(issue.id, operationKey),
         title: issue.title,
         file: normalizeRelativePath(fix.file),
@@ -801,7 +881,10 @@ export async function buildProjectStaging(
         before: 'Balise viewport absente',
         after: '<meta name="viewport" content="width=device-width, initial-scale=1">',
         confidence: fix.confidence
-      })
+      }
+      changes.push(change)
+      operationChangeIds.set(operationKey, [change.id])
+      outcomes.push({ proposalId: issue.id, findingIds: [issue.id], kind: 'issue', status: 'applied', changeIds: [change.id], reason: 'Transformation HTML préparée.' })
       continue
     }
 
@@ -811,10 +894,13 @@ export async function buildProjectStaging(
       const replacement = ['.html', '.htm'].includes(extension)
         ? replaceEmbeddedCss(beforeContent, fix)
         : replaceCssDeclaration(beforeContent, fix, issue.source?.line)
-      if (!replacement || replacement.content === beforeContent) continue
+      if (!replacement || replacement.content === beforeContent) {
+        outcomes.push({ proposalId: issue.id, findingIds: [issue.id], kind: 'issue', status: 'skipped', changeIds: [], reason: 'La déclaration ciblée a changé ou n’existe plus.' })
+        continue
+      }
       setText(fix.file, replacement.content)
       generatedOperations.add(operationKey)
-      changes.push({
+      const change: StagingChange = {
         id: changeId(issue.id, operationKey),
         title: issue.title,
         file: normalizeRelativePath(fix.file),
@@ -822,16 +908,22 @@ export async function buildProjectStaging(
         before: replacement.before,
         after: replacement.after,
         confidence: fix.confidence
-      })
+      }
+      changes.push(change)
+      operationChangeIds.set(operationKey, [change.id])
+      outcomes.push({ proposalId: issue.id, findingIds: [issue.id], kind: 'issue', status: 'applied', changeIds: [change.id], reason: 'Remplacement CSS préparé.' })
       continue
     }
 
     if (fix.kind === 'css-media-override') {
       const css = mediaOverride(fix)
-      if (!css) continue
+      if (!css) {
+        outcomes.push({ proposalId: issue.id, findingIds: [issue.id], kind: 'issue', status: 'skipped', changeIds: [], reason: 'La media query ne peut plus être générée avec ces paramètres.' })
+        continue
+      }
       generatedOperations.add(operationKey)
       generatedSections.push(`/* ${issue.rule} · ${issue.source?.file ?? fix.file}:${issue.source?.line ?? 1} */\n${css}`)
-      changes.push({
+      const change: StagingChange = {
         id: changeId(issue.id, operationKey),
         title: issue.title,
         file: GENERATED_STYLESHEET,
@@ -839,7 +931,10 @@ export async function buildProjectStaging(
         before: `${fix.selector ?? ''} { ${fix.property ?? ''}: ${fix.before ?? ''}; }`,
         after: css,
         confidence: fix.confidence
-      })
+      }
+      changes.push(change)
+      operationChangeIds.set(operationKey, [change.id])
+      outcomes.push({ proposalId: issue.id, findingIds: [issue.id], kind: 'issue', status: 'applied', changeIds: [change.id], reason: 'Surcharge responsive préparée.' })
     }
   }
 
@@ -847,16 +942,59 @@ export async function buildProjectStaging(
     .map((instruction) => instruction.trim())
     .filter(Boolean)
     .map(interpretLocalInstruction)
-  let effectiveTheme = request.themeTarget
+  const instructionProposalId = (instruction: string): string => changeId('instruction-proposal', instruction)
+  const conflictingProposalIds = new Set<string>()
+  const conflictKinds = new Map<string, StagingOutcome['kind']>()
+  const themeRequests: Array<{ proposalId: string; target: ThemeMode; kind: StagingOutcome['kind'] }> = []
+  if (request.themeTarget) themeRequests.push({ proposalId: `theme:${request.themeTarget}`, target: request.themeTarget, kind: 'theme' })
   for (const interpretation of interpretations) {
-    if (interpretation.requestedTheme) effectiveTheme = interpretation.requestedTheme
+    if (interpretation.requestedTheme) themeRequests.push({ proposalId: instructionProposalId(interpretation.instruction), target: interpretation.requestedTheme, kind: 'instruction' })
+  }
+  if (new Set(themeRequests.map((entry) => entry.target)).size > 1) {
+    for (const entry of themeRequests) {
+      conflictingProposalIds.add(entry.proposalId)
+      conflictKinds.set(entry.proposalId, entry.kind)
+    }
+  }
+
+  const cssTargets = new Map<string, Array<{ proposalId: string; value: string }>>()
+  for (const interpretation of interpretations) {
+    if (!interpretation.recognized || !interpretation.css) continue
+    const proposalId = instructionProposalId(interpretation.instruction)
+    for (const target of instructionCssTargets(interpretation.css)) {
+      const entries = cssTargets.get(target.target) ?? []
+      entries.push({ proposalId, value: target.value })
+      cssTargets.set(target.target, entries)
+    }
+  }
+  for (const entries of cssTargets.values()) {
+    if (new Set(entries.map((entry) => entry.value)).size <= 1) continue
+    for (const entry of entries) {
+      conflictingProposalIds.add(entry.proposalId)
+      conflictKinds.set(entry.proposalId, 'instruction')
+    }
+  }
+  for (const proposalId of conflictingProposalIds) {
+    outcomes.push({
+      proposalId,
+      findingIds: [],
+      kind: conflictKinds.get(proposalId) ?? 'instruction',
+      status: 'conflict',
+      changeIds: [],
+      reason: 'Une autre proposition modifie la même cible avec une valeur incompatible.'
+    })
+  }
+
+  let effectiveTheme = request.themeTarget && !conflictingProposalIds.has(`theme:${request.themeTarget}`) ? request.themeTarget : null
+  for (const interpretation of interpretations) {
+    if (interpretation.requestedTheme && !conflictingProposalIds.has(instructionProposalId(interpretation.instruction))) effectiveTheme = interpretation.requestedTheme
   }
 
   if (effectiveTheme && !themeAlreadyExists(project.theme, effectiveTheme)) {
     const themeCss = generateComplementaryThemeCss(project, effectiveTheme)
     generatedTheme = effectiveTheme
     generatedSections.push(themeCss)
-    changes.push({
+    const change: StagingChange = {
       id: changeId('theme', effectiveTheme, project.id),
       title: effectiveTheme === 'dark' ? 'Créer le thème sombre complémentaire' : 'Créer le thème clair complémentaire',
       file: GENERATED_STYLESHEET,
@@ -864,28 +1002,50 @@ export async function buildProjectStaging(
       before: project.theme.detected,
       after: themeCss,
       confidence: project.theme.variables.some((variable) => variable.role !== 'unknown') ? 'safe' : 'review'
-    })
+    }
+    changes.push(change)
+    outcomes.push({ proposalId: `theme:${effectiveTheme}`, findingIds: [], kind: 'theme', status: 'applied', changeIds: [change.id], reason: 'Variante de thème préparée.' })
+  } else if (effectiveTheme) {
+    outcomes.push({ proposalId: `theme:${effectiveTheme}`, findingIds: [], kind: 'theme', status: 'skipped', changeIds: [], reason: 'Cette variante existe déjà dans le projet.' })
   }
 
+  const instructionChangeIds = new Map<string, string[]>()
   for (const interpretation of interpretations) {
+    const proposalId = instructionProposalId(interpretation.instruction)
+    if (conflictingProposalIds.has(proposalId)) continue
+    const existingInstructionChanges = instructionChangeIds.get(interpretation.instruction)
+    if (existingInstructionChanges) {
+      outcomes.push({ proposalId, findingIds: [], kind: 'instruction', status: 'applied', changeIds: existingInstructionChanges, reason: 'Instruction identique regroupée.' })
+      continue
+    }
     if (!interpretation.recognized) {
       ignoredInstructions.push(interpretation.instruction)
+      outcomes.push({ proposalId, findingIds: [], kind: 'instruction', status: 'skipped', changeIds: [], reason: 'Instruction non reconnue par le moteur déterministe.' })
       continue
     }
     if (interpretation.requestedTheme) {
-      if (themeAlreadyExists(project.theme, interpretation.requestedTheme)) ignoredInstructions.push(interpretation.instruction)
-      else recognizedInstructions.push(interpretation.instruction)
+      const themeChange = changes.find((change) => change.kind === 'theme' && generatedTheme === interpretation.requestedTheme)
+      if (themeAlreadyExists(project.theme, interpretation.requestedTheme)) {
+        ignoredInstructions.push(interpretation.instruction)
+        outcomes.push({ proposalId, findingIds: [], kind: 'instruction', status: 'skipped', changeIds: [], reason: 'La variante demandée existe déjà.' })
+      } else {
+        recognizedInstructions.push(interpretation.instruction)
+        const changeIds = themeChange ? [themeChange.id] : []
+        instructionChangeIds.set(interpretation.instruction, changeIds)
+        outcomes.push({ proposalId, findingIds: [], kind: 'instruction', status: 'applied', changeIds, reason: 'Instruction de thème préparée.' })
+      }
       continue
     }
     if (!interpretation.css || !interpretation.title) {
       ignoredInstructions.push(interpretation.instruction)
+      outcomes.push({ proposalId, findingIds: [], kind: 'instruction', status: 'skipped', changeIds: [], reason: 'Cette instruction ne produit aucune transformation sûre.' })
       continue
     }
     recognizedInstructions.push(interpretation.instruction)
     hasGeneratedInstructions = true
     const instructionCss = scopeInstructionCss(enrichAccentInstruction(interpretation.css, project.theme.variables))
     generatedSections.push(`/* Instruction locale : ${interpretation.instruction.replace(/\*\//g, '* /')} */\n${instructionCss}`)
-    changes.push({
+    const change: StagingChange = {
       id: changeId('instruction', interpretation.instruction),
       title: interpretation.title,
       file: GENERATED_STYLESHEET,
@@ -893,16 +1053,42 @@ export async function buildProjectStaging(
       before: interpretation.instruction,
       after: instructionCss,
       confidence: 'review'
-    })
+    }
+    changes.push(change)
+    instructionChangeIds.set(interpretation.instruction, [change.id])
+    outcomes.push({ proposalId, findingIds: [], kind: 'instruction', status: 'applied', changeIds: [change.id], reason: 'Ajustement déterministe préparé.' })
   }
 
   let generatedFile: string | null = null
   let generatedCss = ''
   if (generatedSections.length > 0) {
-    generatedFile = await availableGeneratedPath(normalizedRoot, project.previewBasePath)
-    generatedCss = `/*\n * Généré localement par Responsiver.\n * Chaque règle reste lisible, exportable et réversible.\n */\n\n${generatedSections.join('\n\n')}`
+    const generatedTarget = await availableGeneratedPath(normalizedRoot, project.previewBasePath)
+    generatedFile = generatedTarget.path
+    const existing = generatedTarget.existing?.trim() ?? ''
+    const duplicateChangeIds = new Set(changes
+      .filter((change) => change.file === GENERATED_STYLESHEET && existing && existing.includes(change.after.trim()))
+      .map((change) => change.id))
+    if (duplicateChangeIds.size) {
+      for (let index = changes.length - 1; index >= 0; index -= 1) {
+        if (duplicateChangeIds.has(changes[index].id)) changes.splice(index, 1)
+      }
+      for (const outcome of outcomes) {
+        if (!outcome.changeIds.some((id) => duplicateChangeIds.has(id))) continue
+        outcome.changeIds = outcome.changeIds.filter((id) => !duplicateChangeIds.has(id))
+        if (outcome.changeIds.length === 0) {
+          outcome.status = 'skipped'
+          outcome.reason = 'Cette transformation est déjà couverte par la feuille Responsiver gérée.'
+        }
+      }
+    }
+    const freshSections = generatedSections.filter((section) => {
+      const trimmed = section.trim()
+      const withoutLeadingComment = trimmed.replace(/^\/\*[\s\S]*?\*\/\s*/, '')
+      return !existing.includes(trimmed) && !existing.includes(withoutLeadingComment)
+    })
+    generatedCss = [existing || GENERATED_FILE_HEADER, ...freshSections].filter(Boolean).join('\n\n')
     await originalBuffer(generatedFile)
-    setText(generatedFile, `${generatedCss.trim()}\n`)
+    if (!existing || freshSections.length > 0) setText(generatedFile, `${generatedCss.trim()}\n`)
 
     for (const change of changes) {
       if (change.file === GENERATED_STYLESHEET) change.file = generatedFile
@@ -1025,6 +1211,7 @@ export async function buildProjectStaging(
     ignoredInstructions,
     changedFiles,
     sourceHashes,
+    outcomes,
     createdAt: new Date().toISOString()
   }
   return { overrides, snapshot }

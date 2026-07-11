@@ -332,6 +332,15 @@ export interface StagingChange {
   confidence: 'safe' | 'review'
 }
 
+export interface StagingOutcome {
+  proposalId: string
+  findingIds: string[]
+  kind: 'issue' | 'theme' | 'instruction'
+  status: 'applied' | 'skipped' | 'conflict'
+  changeIds: string[]
+  reason: string
+}
+
 export interface StagingSnapshot {
   previewOrigin: string | null
   changes: StagingChange[]
@@ -344,7 +353,19 @@ export interface StagingSnapshot {
   ignoredInstructions?: string[]
   changedFiles: string[]
   sourceHashes?: Record<string, string>
+  outcomes?: StagingOutcome[]
   createdAt: string
+}
+
+export interface StagingApplyResult {
+  paths: string[]
+  appliedAt: string
+  undoAvailable: boolean
+}
+
+export interface StagingUndoResult {
+  paths: string[]
+  undoneAt: string
 }
 
 export interface RuntimeOverflow {
