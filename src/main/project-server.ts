@@ -1627,6 +1627,9 @@ const bridge = `<style data-responsiver-bridge-style>
       capture,
       startX: event.clientX,
       startY: event.clientY,
+      lastX: event.clientX,
+      lastY: event.clientY,
+      lastShiftKey: Boolean(event.shiftKey),
       actualStartRect: { left: actualRectangle.left, top: actualRectangle.top, right: actualRectangle.right, bottom: actualRectangle.bottom, width: actualRectangle.width, height: actualRectangle.height },
       startRect: { left: rectangle.left, top: rectangle.top, right: rectangle.right, bottom: rectangle.bottom, width: rectangle.width, height: rectangle.height },
       previewRect: { left: rectangle.left, top: rectangle.top, right: rectangle.right, bottom: rectangle.bottom, width: rectangle.width, height: rectangle.height },
@@ -1645,6 +1648,9 @@ const bridge = `<style data-responsiver-bridge-style>
     event.stopImmediatePropagation();
     const rawX = event.clientX - gesture.startX;
     const rawY = event.clientY - gesture.startY;
+    gesture.lastX = event.clientX;
+    gesture.lastY = event.clientY;
+    gesture.lastShiftKey = Boolean(event.shiftKey);
     gesture.moved = gesture.moved || Math.hypot(rawX, rawY) >= 2;
     const start = gesture.startRect;
     if (gesture.kind === 'move') {
@@ -1831,7 +1837,7 @@ const bridge = `<style data-responsiver-bridge-style>
     designRevision = 0;
     nativeApply(nativeEventAddEventListener, designPort, ['message', (portEvent) => {
       const command = readMessageEventData(portEvent);
-      if (!command || command.protocol !== DESIGN_PROTOCOL || command.sessionId !== designSessionId || !Number.isSafeInteger(command.revision) || command.revision < designRevision) return;
+      if (!command || command.protocol !== DESIGN_PROTOCOL || command.sessionId !== designSessionId || !Number.isSafeInteger(command.revision) || command.revision <= designRevision) return;
       designRevision = command.revision;
       if (command.type === 'design-start' && acceptInteractionRevision(command.interactionRevision)) startDesign();
       if (command.type === 'design-stop' && acceptInteractionRevision(command.interactionRevision)) stopDesign('request');
@@ -1872,7 +1878,18 @@ const bridge = `<style data-responsiver-bridge-style>
           scheduleDesignPaint();
         }));
       }
-      if (command.type === 'design-cancel') finishDesignGesture(true);
+      if (command.type === 'design-release' && designGesture && Number.isSafeInteger(command.pointerId) && command.pointerId === designGesture.pointerId) {
+        const gesture = designGesture;
+        commitDesignGesture({
+          pointerId: gesture.pointerId,
+          clientX: gesture.lastX,
+          clientY: gesture.lastY,
+          shiftKey: typeof command.shiftKey === 'boolean' ? command.shiftKey : gesture.lastShiftKey,
+          preventDefault() {},
+          stopImmediatePropagation() {}
+        });
+      }
+      if (command.type === 'design-cancel' && designGesture && Number.isSafeInteger(command.pointerId) && command.pointerId === designGesture.pointerId) finishDesignGesture(true);
     }]);
     nativeApply(nativeMessagePortStart, designPort, []);
     designMessage('design-ready', { route: designClean(location.pathname, VISUAL_MAX_ROUTE_LENGTH) || '/' });

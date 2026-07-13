@@ -383,6 +383,33 @@ try {
   assert.match(generatedCss, /translate:/)
   assert.match(generatedCss, /width: min\(/)
   assert.match(generatedCss, /height: auto !important/)
+
+  // Une preview démontée avant la vérification d'un geste ne doit jamais
+  // conserver silencieusement ce changement dans le futur export.
+  await page.getByRole('button', { name: 'Atelier visuel', exact: true }).click()
+  await page.locator('.visual-editor-page').waitFor({ state: 'visible' })
+  await page.getByRole('button', { name: 'Composer' }).click()
+  const interruptionFrame = page.frameLocator('.visual-canvas iframe').first()
+  await interruptionFrame.locator('[data-responsiver-composer-active]').waitFor({ state: 'attached' })
+  const interruptionTarget = interruptionFrame.locator('.site-nav')
+  const interruptionBox = await revealInCanvas(interruptionTarget)
+  await page.mouse.click(interruptionBox.x + 2, interruptionBox.y + 2)
+  await page.locator('.visual-target-card code').filter({ hasText: 'site-nav' }).waitFor({ state: 'visible' })
+  await page.waitForTimeout(240)
+  const countBeforeInterruptedPreview = Number(await page.locator('.visual-change-count').textContent())
+  await interruptionTarget.evaluate(() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })))
+  await page.waitForFunction(
+    (before) => Number(document.querySelector('.visual-change-count')?.textContent) > before,
+    countBeforeInterruptedPreview,
+    { polling: 'raf' }
+  )
+  await page.getByRole('button', { name: 'Avant / après' }).evaluate((button) => button.click())
+  await page.locator('.visual-before-after').waitFor({ state: 'visible' })
+  await page.waitForFunction(
+    (before) => Number(document.querySelector('.visual-change-count')?.textContent) === before,
+    countBeforeInterruptedPreview
+  )
+  await page.locator('.toast').filter({ hasText: /prévisualisation.*interrompue/i }).waitFor({ state: 'visible' })
   console.log('E2E visuel · composition directe, gel, resize, historique, test, comparaison et application — OK')
 } finally {
   await application.close()

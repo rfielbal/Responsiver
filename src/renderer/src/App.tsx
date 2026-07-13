@@ -817,6 +817,7 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
 
   useEffect(() => () => resizeCleanupRef.current?.(), [])
   useEffect(() => () => {
+    rejectPendingComposerGestures('preview-interrupted')
     composerPortRef.current?.close()
     composerPortRef.current = null
     if (visualStyleTimerRef.current) window.clearTimeout(visualStyleTimerRef.current)
@@ -824,6 +825,22 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
   }, [])
   useEffect(() => () => {
     if (frameLoadTimerRef.current) window.clearTimeout(frameLoadTimerRef.current)
+  }, [])
+
+  useEffect(() => {
+    const releaseComposerGesture = (event: PointerEvent): void => {
+      if (!composerEnabledRef.current || !event.isTrusted || !event.isPrimary || event.button !== 0) return
+      sendComposerCommand('design-release', { pointerId: event.pointerId, shiftKey: event.shiftKey })
+    }
+    const cancelComposerGesture = (event: PointerEvent): void => {
+      if (composerEnabledRef.current && event.isTrusted && event.isPrimary) sendComposerCommand('design-cancel', { pointerId: event.pointerId })
+    }
+    window.addEventListener('pointerup', releaseComposerGesture, true)
+    window.addEventListener('pointercancel', cancelComposerGesture, true)
+    return () => {
+      window.removeEventListener('pointerup', releaseComposerGesture, true)
+      window.removeEventListener('pointercancel', cancelComposerGesture, true)
+    }
   }, [])
 
   function stageCenter(): { x: number; y: number } | undefined {
@@ -991,15 +1008,24 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
       'payload-too-large': 'Cette réorganisation touche trop d’éléments en une fois. Manipulez un groupe plus petit.',
       'layout-still-constrained': 'La mise en page bloque encore cette géométrie : le geste a été annulé pour éviter d’appliquer un réglage trompeur.',
       'invalid-css': 'Le CSS temporaire produit par ce geste est invalide. Le geste a été retiré sans toucher aux autres changements.',
-      'css-too-large': 'La prévisualisation temporaire dépasse la limite de sécurité. Les gestes concernés ont été retirés sans toucher aux changements plus récents.'
+      'css-too-large': 'La prévisualisation temporaire dépasse la limite de sécurité. Les gestes concernés ont été retirés sans toucher aux changements plus récents.',
+      'preview-interrupted': 'La prévisualisation a été interrompue avant validation. Seuls les gestes encore en attente ont été annulés.'
     }
     composerNoticeRef.current?.(messages[String(reason)] ?? 'Ce geste ne peut pas être converti en CSS responsive sûr.')
   }
 
+  function rejectPendingComposerGestures(reason: 'preview-interrupted'): void {
+    let rejected = false
+    for (const gestureId of [...composerPendingGestureIdsRef.current]) {
+      if (!composerPendingGestureIdsRef.current.delete(gestureId)) continue
+      composerRejectedRef.current?.(gestureId, reason)
+      rejected = true
+    }
+    if (rejected) composerNotice(reason)
+  }
+
   function connectComposerBridge(): void {
-    const abandonedGestureIds = [...composerPendingGestureIdsRef.current]
-    for (const gestureId of abandonedGestureIds) composerRejectedRef.current?.(gestureId, 'target-detached')
-    if (abandonedGestureIds.length) composerNotice('target-detached')
+    rejectPendingComposerGestures('preview-interrupted')
     composerPortRef.current?.close()
     composerPortRef.current = null
     composerDocumentRef.current = ''
@@ -1865,7 +1891,7 @@ export default function App(): ReactElement {
   }
 
   function rejectVisualGesture(gestureId: string, reason: string): void {
-    if (!['layout-still-constrained', 'target-detached', 'invalid-css', 'css-too-large'].includes(reason)) return
+    if (!['layout-still-constrained', 'target-detached', 'invalid-css', 'css-too-large', 'preview-interrupted'].includes(reason)) return
     const checkpoint = visualGestureCheckpoints.current.get(gestureId)
     visualGestureCheckpoints.current.delete(gestureId)
     if (!checkpoint) return
