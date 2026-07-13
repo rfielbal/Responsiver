@@ -13,6 +13,7 @@ La direction UI conserve sa propre grammaire — rail graphite, papier minéral,
 | Demande | Livraison 0.6 | Limite ou preuve |
 | --- | --- | --- |
 | Déposer un fichier ou dossier | Sélecteurs, chemin et glisser-déposer | Pipeline local testé |
+| Comprendre l’application au premier lancement | Visite illustrée en six pages, progression libre et parcours clavier | Masquage local facultatif et relance permanente par `?` |
 | Analyser dès l’import | Inventaire, routes, CSS, readiness et runner avant redirection | Progression IPC et tests moteur |
 | Éviter les previews blanches | Verdict `ready/degraded/blocked/needs-build` et smoke-test runtime | Fixtures incomplètes et bundle en erreur |
 | Retrouver les anciens projets | Historique de chemins, sans cache de code, avec réanalyse | Store privé et atomique |
@@ -164,9 +165,10 @@ Les paquets restent non signés. Une diffusion sans avertissements système et u
 Contrôles reproductibles exécutés sur l’état consolidé :
 
 - `npm run typecheck` : réussi ;
-- `npm test` : 113 tests applicatifs réussis ;
+- `npm test` : 126 tests applicatifs réussis ;
 - `npm run test:native-host` : 17 tests du protocole Chrome réussis ;
 - `npm run test:e2e:visual` : F12 dans l’iframe, sélection réelle, application route-scopée et rendu après réanalyse réussis ;
+- `npm run test:e2e:onboarding` : premier lancement, pagination, préférence locale, relance par le rail, focus et rendu mobile vérifiés ;
 - `npm run test:e2e:remote` : redirection, audit mobile et formulaire localhost réussis ;
 - `npm run test:e2e` : parcours Electron complet, catégories, inspecteur, Atelier, avant/après, application réelle, conservation de route et annulation réussis ;
 - `npm run test:e2e:localhost-link` : association et remplacement à chaud sans écriture implicite réussis ;

@@ -41,6 +41,14 @@ Changer de source ferme les serveurs de preview, le `WebContentsView`, l’espac
 
 Un verrou Electron d’instance unique évite deux consommateurs concurrents pour le compagnon Chrome. La seconde instance réactive la fenêtre existante et déclenche une nouvelle lecture de la file.
 
+## Guide de prise en main
+
+Le guide initial appartient entièrement au renderer de confiance. Il présente six pages statiques et illustrées sans naviguer dans le projet, lancer une analyse ou déclencher une écriture. Son dialogue est monté comme frère du rail et de la zone principale ; ces deux régions passent temporairement en `inert` avec restauration exacte de leur état précédent. Le focus reste dans le dialogue, puis revient au bouton d’aide lorsqu’il a servi à relancer la visite.
+
+La seule persistance est la clé versionnée `responsiver.onboarding.v1.hidden` dans le `localStorage` de l’application. Elle contient un booléen, pas l’avancement, le projet actif ou une donnée d’usage. La décocher réactive l’ouverture automatique ; le bouton `?` du rail reste disponible quelle que soit cette préférence.
+
+Une `WebContentsView` distante est native et pourrait recouvrir un overlay React. Sa visibilité dépend donc de l’absence de guide global et de guide contextuel, dans le Laboratoire comme dans Atelier et Code.
+
 ## Pipeline des projets locaux
 
 Une sélection peut être un dossier ou un fichier `.html/.htm`. L’ouverture suit une transaction locale : validation canonique, inventaire, routes, analyse responsive, readiness, puis démarrage du runner.

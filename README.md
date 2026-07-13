@@ -16,6 +16,14 @@ Responsiver ne prétend pas retrouver le code auteur d’un site public à parti
 
 ## Fonctionnalités
 
+### Prise en main guidée
+
+- Visite en six pages au premier lancement : source, Laboratoire, constats, Atelier/Code, révision et application.
+- Illustrations intégrées, progression cliquable, navigation Précédent/Continuer et commandes clavier gauche/droite.
+- Option **Ne plus afficher au démarrage** persistée uniquement dans le stockage local de l’application.
+- Relance permanente depuis le bouton `?` du menu, y compris lorsque l’affichage automatique a été désactivé.
+- Dialogue accessible : arrière-plan neutralisé, focus contenu dans la visite, fermeture par `Échap` et restitution du focus au raccourci d’aide.
+
 ### Projets locaux
 
 - Ouverture par dossier, fichier HTML, chemin local ou glisser-déposer.
@@ -126,6 +134,7 @@ Responsiver ne crée aucun compte et n’active ni télémétrie, analytics, rap
 - URL publique : Responsiver contacte nécessairement le site et ses ressources publiques autorisées. Le site reçoit l’adresse IP et les métadonnées HTTP normales.
 - IA locale : Responsiver communique uniquement avec l’adresse loopback choisie. Aucun fallback cloud n’existe, mais le moteur local reste un logiciel séparé dont la configuration et les journaux doivent être contrôlés par l’utilisateur.
 - Chrome : le transport extension → host reste local ; l’ouverture ultérieure de l’URL produit ensuite la connexion réseau normale au site.
+- Guide : seule la préférence versionnée d’affichage au démarrage est conservée dans `localStorage` ; aucune étape, donnée de projet ou mesure d’usage n’est envoyée.
 
 Consultez [PRIVACY.md](PRIVACY.md) et [SECURITY.md](SECURITY.md) pour le détail.
 
@@ -155,6 +164,7 @@ npm run typecheck
 npm test
 npm run test:native-host
 npm run test:e2e
+npm run test:e2e:onboarding
 npm run test:e2e:visual
 npm run test:e2e:remote
 npm run test:e2e:localhost-link
