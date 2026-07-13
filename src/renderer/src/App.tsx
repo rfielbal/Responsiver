@@ -4,7 +4,15 @@ import type { ProjectPreparationProgress, RecentProjectSummary, RemoteAuditResul
 import { classifyProjectIssue, consolidateProjectIssues, deterministicVisualTarget, type FindingGroup, type FindingPolicy } from '../../shared/finding-policy'
 import { frameworkSupportFor } from '../../shared/framework-support'
 import { authorizeVisualEditor, compileVisualEditCss, createVisualEditOperation, visualEditOperationKey, type VisualEditOperation, type VisualEditProperty, type VisualEditScope } from '../../shared/visual-editor'
-import { mergeVisualGestureOperations, sanitizeVisualGestureCommit, visualGestureOperations } from '../../shared/visual-manipulation'
+import {
+  mergeVisualGestureOperations,
+  rebaseVisualGestureChangesAfterRejection,
+  rollbackVisualGestureOperations,
+  sanitizeVisualGestureCommit,
+  visualGestureOperationChanges,
+  visualGestureOperations,
+  type VisualGestureOperationChange
+} from '../../shared/visual-manipulation'
 import LocalAssistant from './LocalAssistant'
 import OnboardingTour from './OnboardingTour'
 import PreviewZoomControls from './PreviewZoomControls'
@@ -132,6 +140,11 @@ interface VisualEditHistory {
   past: VisualEditOperation[][]
   present: VisualEditOperation[]
   future: VisualEditOperation[][]
+}
+
+interface VisualGestureCheckpoint {
+  changes: VisualGestureOperationChange[]
+  revision: number
 }
 
 interface ConversationMessage {
@@ -655,7 +668,7 @@ function previewOwnsMessageSource(frame: HTMLIFrameElement | null, source: Messa
   return false
 }
 
-function PreviewFrame({ project, origin, device, path, compact = false, label, focusSelector, themeOverride, resizable = false, allowUpscale = false, zoomable = false, inspectorEnabled = false, composerEnabled = false, visualCss = '', onResize, onPathChange, onThemeChange, onExternal, onAudit, onRenderStatus, onEscape, onInspectElement, onInspectorReady, onInspectorStop, onInspectorShortcut, onComposerGesture, onComposerNotice }: {
+function PreviewFrame({ project, origin, device, path, compact = false, label, focusSelector, themeOverride, resizable = false, allowUpscale = false, zoomable = false, inspectorEnabled = false, composerEnabled = false, visualCss = '', onResize, onPathChange, onThemeChange, onExternal, onAudit, onRenderStatus, onEscape, onInspectElement, onInspectorReady, onInspectorStop, onInspectorShortcut, onComposerGesture, onComposerVerified, onComposerRejected, onComposerNotice }: {
   project: ProjectSnapshot & ProjectExtra
   origin: string | null
   device: Device
@@ -682,6 +695,8 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
   onInspectorStop?: () => void
   onInspectorShortcut?: () => void
   onComposerGesture?: (gesture: VisualGestureCommit) => void
+  onComposerVerified?: (gestureId: string) => void
+  onComposerRejected?: (gestureId: string, reason: string) => void
   onComposerNotice?: (message: string) => void
 }): ReactElement {
   const stageRef = useRef<HTMLDivElement>(null)
@@ -703,12 +718,19 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
   const composerEnabledRef = useRef(composerEnabled)
   const visualCssRef = useRef(visualCss)
   const composerGestureRef = useRef(onComposerGesture)
+  const composerVerifiedRef = useRef(onComposerVerified)
+  const composerRejectedRef = useRef(onComposerRejected)
   const composerNoticeRef = useRef(onComposerNotice)
   const inspectElementRef = useRef(onInspectElement)
   const composerPortRef = useRef<MessagePort | null>(null)
   const composerSessionRef = useRef('')
   const composerDocumentRef = useRef('')
   const composerRevisionRef = useRef(0)
+  const interactionRevisionRef = useRef(0)
+  const composerGestureIdsRef = useRef(new Set<string>())
+  const composerPendingGestureIdsRef = useRef(new Set<string>())
+  const visualStyleRequestSequenceRef = useRef(0)
+  const visualStyleTimerRef = useRef<number | null>(null)
   const pendingPathRef = useRef<string | null>(null)
   const pendingPathLoadedRef = useRef(false)
   const stateRequestSequenceRef = useRef(0)
@@ -725,6 +747,8 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
   composerEnabledRef.current = composerEnabled
   visualCssRef.current = visualCss
   composerGestureRef.current = onComposerGesture
+  composerVerifiedRef.current = onComposerVerified
+  composerRejectedRef.current = onComposerRejected
   composerNoticeRef.current = onComposerNotice
   inspectElementRef.current = onInspectElement
   scaleRef.current = scale
@@ -795,6 +819,8 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
   useEffect(() => () => {
     composerPortRef.current?.close()
     composerPortRef.current = null
+    if (visualStyleTimerRef.current) window.clearTimeout(visualStyleTimerRef.current)
+    visualStyleTimerRef.current = null
   }, [])
   useEffect(() => () => {
     if (frameLoadTimerRef.current) window.clearTimeout(frameLoadTimerRef.current)
@@ -805,6 +831,12 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
     if (!stage) return undefined
     const rectangle = stage.getBoundingClientRect()
     return { x: rectangle.left + rectangle.width / 2, y: rectangle.top + rectangle.height / 2 }
+  }
+
+  function correlatedGestureIds(value: unknown): string[] {
+    return Array.isArray(value)
+      ? [...new Set(value.filter((entry): entry is string => typeof entry === 'string').map((entry) => cleanInspectionText(entry, 80)).filter(Boolean))].slice(0, 200)
+      : []
   }
 
   function applyManualZoom(nextValue: number, anchor = stageCenter()): void {
@@ -842,7 +874,7 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
       if (!previewOwnsMessageSource(frameRef.current, event.source)) return
       const directFrameMessage = event.source === frameRef.current?.contentWindow
       if (origin && event.origin !== origin && !(event.origin === 'null' && !directFrameMessage)) return
-      const data = event.data as { channel?: string; type?: string; reason?: string; path?: string; documentId?: string; requestId?: string; background?: string; url?: string; status?: 'ready' | 'empty'; state?: 'visible' | 'empty'; settled?: boolean; stable?: boolean; failureCount?: number; errorCount?: number; errors?: Array<{ detail?: unknown }>; deltaY?: number; deltaMode?: number; clientX?: number; clientY?: number } & Partial<RuntimeAudit>
+      const data = event.data as { channel?: string; type?: string; reason?: string; path?: string; documentId?: string; requestId?: string; gestureIds?: unknown; background?: string; detected?: RuntimeTheme; theme?: { detected?: RuntimeTheme }; url?: string; status?: 'ready' | 'empty'; state?: 'visible' | 'empty'; settled?: boolean; stable?: boolean; failureCount?: number; errorCount?: number; errors?: Array<{ detail?: unknown }>; deltaY?: number; deltaMode?: number; clientX?: number; clientY?: number; applied?: boolean } & Partial<RuntimeAudit>
       if (data.channel !== 'responsiver-preview') return
       if (!directFrameMessage && !['preview-zoom', 'inspector-hover', 'inspector-selected', 'inspector-started', 'inspector-stopped', 'inspector-shortcut'].includes(data.type ?? '')) return
       if (data.type === 'state') {
@@ -866,8 +898,12 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
           emittedPathRef.current = data.path
           onPathChange?.(data.path)
         }
-        const value = luminance(data.background ?? '')
-        if (value !== null) onThemeChange?.(value < 0.42 ? 'dark' : 'light')
+        const measuredTheme = data.detected ?? data.theme?.detected
+        if (measuredTheme === 'dark' || measuredTheme === 'light' || measuredTheme === 'unknown') onThemeChange?.(measuredTheme)
+        else {
+          const value = luminance(data.background ?? '')
+          onThemeChange?.(value === null || value >= .42 && value <= .58 ? 'unknown' : value < .42 ? 'dark' : 'light')
+        }
       }
       if (data.type === 'audit') {
         const audit = sanitizeRuntimeAudit(data, device)
@@ -886,6 +922,21 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
       }
       if (data.type === 'external-link' && data.url) onExternal?.(data.url)
       if (data.type === 'escape') onEscape?.()
+      if (data.type === 'visual-style-preview-result' && data.applied === false && data.requestId) {
+        const gestureIds = correlatedGestureIds(data.gestureIds)
+        const requestId = cleanInspectionText(data.requestId, 80)
+        const reason = data.reason === 'css-too-large' ? 'css-too-large' : 'invalid-css'
+        sendComposerCommand('design-discard', { requestId, gestureIds })
+        for (const gestureId of gestureIds) {
+          if (!composerPendingGestureIdsRef.current.delete(gestureId)) continue
+          composerRejectedRef.current?.(gestureId, reason)
+        }
+        composerNotice(reason)
+      }
+      if (((data.type === 'visual-style-preview-result' && data.applied !== false) || data.type === 'visual-style-clear-result') && data.requestId) {
+        const gestureIds = correlatedGestureIds(data.gestureIds)
+        sendComposerCommand('design-sync', { requestId: cleanInspectionText(data.requestId, 80), gestureIds })
+      }
       if (data.type === 'preview-zoom' && zoomable && typeof data.deltaY === 'number') {
         const frameRectangle = frameRef.current?.getBoundingClientRect()
         const anchor = directFrameMessage && frameRectangle && typeof data.clientX === 'number' && typeof data.clientY === 'number'
@@ -906,7 +957,18 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
     return () => window.removeEventListener('message', listener)
   }, [device, onAudit, onEscape, onExternal, onInspectElement, onInspectorReady, onInspectorShortcut, onInspectorStop, onPathChange, onRenderStatus, onThemeChange, origin, zoomable])
 
-  const post = (type: string, payload: Record<string, string> = {}): void => frameRef.current?.contentWindow?.postMessage({ channel: 'responsiver-preview', type, ...payload }, origin ?? '*')
+  const post = (type: string, payload: Record<string, unknown> = {}): void => frameRef.current?.contentWindow?.postMessage({ channel: 'responsiver-preview', type, ...payload }, origin ?? '*')
+
+  function scheduleVisualStylePreview(delay = 80): void {
+    if (visualStyleTimerRef.current) window.clearTimeout(visualStyleTimerRef.current)
+    visualStyleTimerRef.current = window.setTimeout(() => {
+      visualStyleTimerRef.current = null
+      const requestId = `${composerSessionRef.current || project.id}:${++visualStyleRequestSequenceRef.current}`
+      const gestureIds = [...composerPendingGestureIdsRef.current].slice(0, 200)
+      const css = visualCssRef.current
+      post(css ? 'visual-style-preview' : 'visual-style-clear', css ? { css, requestId, gestureIds } : { requestId, gestureIds })
+    }, delay)
+  }
   const source = origin ? `${origin}${framePath}` : undefined
   const runtimeBlocked = runtimeRender?.status === 'empty' && runtimeRender.settled
   const outerWidth = Math.round((device.width + 14) * scale)
@@ -925,16 +987,25 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
       'unstable-or-sensitive-target': 'Cet élément ne peut pas être déplacé sûrement. Sélectionnez son conteneur.',
       'existing-complex-transform': 'Ce bloc utilise déjà une transformation complexe. Responsiver refuse de l’écraser.',
       'text-height-is-fluid': 'La hauteur d’un texte reste fluide pour préserver sa lisibilité. Utilisez une poignée latérale.',
-      'target-detached': 'Le site a recréé cet élément ; sélectionnez-le de nouveau.'
+      'target-detached': 'Le site a recréé cet élément ; sélectionnez-le de nouveau.',
+      'payload-too-large': 'Cette réorganisation touche trop d’éléments en une fois. Manipulez un groupe plus petit.',
+      'layout-still-constrained': 'La mise en page bloque encore cette géométrie : le geste a été annulé pour éviter d’appliquer un réglage trompeur.',
+      'invalid-css': 'Le CSS temporaire produit par ce geste est invalide. Le geste a été retiré sans toucher aux autres changements.',
+      'css-too-large': 'La prévisualisation temporaire dépasse la limite de sécurité. Les gestes concernés ont été retirés sans toucher aux changements plus récents.'
     }
     composerNoticeRef.current?.(messages[String(reason)] ?? 'Ce geste ne peut pas être converti en CSS responsive sûr.')
   }
 
   function connectComposerBridge(): void {
+    const abandonedGestureIds = [...composerPendingGestureIdsRef.current]
+    for (const gestureId of abandonedGestureIds) composerRejectedRef.current?.(gestureId, 'target-detached')
+    if (abandonedGestureIds.length) composerNotice('target-detached')
     composerPortRef.current?.close()
     composerPortRef.current = null
     composerDocumentRef.current = ''
     composerRevisionRef.current = 0
+    composerGestureIdsRef.current.clear()
+    composerPendingGestureIdsRef.current.clear()
     const frameWindow = frameRef.current?.contentWindow
     if (!frameWindow || !origin || !composerGestureRef.current) return
     const bridgeChannel = new MessageChannel()
@@ -948,21 +1019,42 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
         const documentId = cleanInspectionText(data.documentId, 80)
         if (!documentId) return
         composerDocumentRef.current = documentId
-        sendComposerCommand(composerEnabledRef.current ? 'design-start' : 'design-stop')
+        sendComposerCommand(composerEnabledRef.current ? 'design-start' : 'design-stop', { interactionRevision: Math.max(1, interactionRevisionRef.current) })
         if (composerEnabledRef.current && focusSelectorRef.current) sendComposerCommand('design-select', { selector: focusSelectorRef.current })
         return
       }
-      if (data.documentId !== composerDocumentRef.current || data.revision !== composerRevisionRef.current) return
+      const eventRevision = Number(data.revision)
+      if (data.documentId !== composerDocumentRef.current || !Number.isSafeInteger(eventRevision) || eventRevision < 0 || eventRevision > composerRevisionRef.current) return
       if (data.type === 'design-selection') {
         const selection = sanitizeVisualElement(data.selection)
         if (selection) inspectElementRef.current?.(selection, 'selected')
       }
       if (data.type === 'design-commit') {
         const gesture = sanitizeVisualGestureCommit(data)
-        if (gesture) composerGestureRef.current?.(gesture)
-        else composerNoticeRef.current?.('Le geste reçu n’a pas passé les contrôles de sécurité.')
+        if (!gesture) composerNoticeRef.current?.('Le geste reçu n’a pas passé les contrôles de sécurité.')
+        else if (!composerGestureIdsRef.current.has(gesture.gestureId)) {
+          composerGestureIdsRef.current.add(gesture.gestureId)
+          composerPendingGestureIdsRef.current.add(gesture.gestureId)
+          if (composerGestureIdsRef.current.size > 200) composerGestureIdsRef.current.delete(composerGestureIdsRef.current.values().next().value!)
+          composerGestureRef.current?.(gesture)
+          scheduleVisualStylePreview()
+        }
       }
-      if (data.type === 'design-rejected' || data.type === 'design-invalidated') composerNotice(data.reason)
+      if (data.type === 'design-verified') {
+        const gestureId = cleanInspectionText(data.gestureId, 80)
+        if (gestureId) {
+          composerPendingGestureIdsRef.current.delete(gestureId)
+          composerVerifiedRef.current?.(gestureId)
+        }
+      }
+      if (data.type === 'design-rejected') {
+        const gestureId = cleanInspectionText(data.gestureId, 80)
+        const reason = cleanInspectionText(data.reason, 80)
+        if (gestureId) composerPendingGestureIdsRef.current.delete(gestureId)
+        if (gestureId && reason) composerRejectedRef.current?.(gestureId, reason)
+        composerNotice(data.reason)
+      }
+      if (data.type === 'design-invalidated') composerNotice(data.reason)
     }
     bridgeChannel.port1.start()
     frameWindow.postMessage({ channel: 'responsiver-preview', type: 'design-connect', protocol: 1, sessionId }, origin, [bridgeChannel.port2])
@@ -979,9 +1071,8 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
     frameLoadTimerRef.current = window.setTimeout(() => {
       const currentFocus = focusSelectorRef.current
       const currentTheme = themeOverrideRef.current
-      const currentCss = visualCssRef.current
-      post(inspectorEnabledRef.current ? 'inspector-start' : 'inspector-stop')
-      post(currentCss ? 'visual-style-preview' : 'visual-style-clear', currentCss ? { css: currentCss } : {})
+      post(inspectorEnabledRef.current ? 'inspector-start' : 'inspector-stop', { interactionRevision: Math.max(1, interactionRevisionRef.current) })
+      scheduleVisualStylePreview(0)
       post(currentTheme ? 'set-theme-preview' : 'clear-theme-preview', currentTheme ? { theme: currentTheme } : {})
       post(currentFocus ? 'focus-selector' : 'clear-focus', currentFocus ? { selector: currentFocus } : {})
     }, 90)
@@ -1003,20 +1094,21 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
   }, [source, themeOverride])
 
   useEffect(() => {
-    const timer = window.setTimeout(() => post(inspectorEnabled ? 'inspector-start' : 'inspector-stop'), 20)
-    return () => window.clearTimeout(timer)
-  }, [inspectorEnabled, source])
-
-  useEffect(() => {
-    sendComposerCommand(composerEnabled ? 'design-start' : 'design-stop')
-  }, [composerEnabled, source])
-
-  useEffect(() => {
+    const interactionRevision = ++interactionRevisionRef.current
     const timer = window.setTimeout(() => {
-      post(visualCss ? 'visual-style-preview' : 'visual-style-clear', visualCss ? { css: visualCss } : {})
-      sendComposerCommand('design-sync')
-    }, 80)
+      post(inspectorEnabled ? 'inspector-start' : 'inspector-stop', { interactionRevision })
+      sendComposerCommand(composerEnabled ? 'design-start' : 'design-stop', { interactionRevision })
+      if (composerEnabled && focusSelectorRef.current) sendComposerCommand('design-select', { selector: focusSelectorRef.current })
+    }, 20)
     return () => window.clearTimeout(timer)
+  }, [composerEnabled, inspectorEnabled, source])
+
+  useEffect(() => {
+    scheduleVisualStylePreview()
+    return () => {
+      if (visualStyleTimerRef.current) window.clearTimeout(visualStyleTimerRef.current)
+      visualStyleTimerRef.current = null
+    }
   }, [source, visualCss])
 
   function beginResize(edge: ResizeEdge, event: React.PointerEvent<HTMLButtonElement>): void {
@@ -1132,6 +1224,7 @@ export default function App(): ReactElement {
   const [previewMode, setPreviewMode] = useState<PreviewMode>('source')
   const [labMode, setLabMode] = useState<LabMode>('device')
   const [stageFullscreen, setStageFullscreen] = useState(false)
+  const [visualFullscreen, setVisualFullscreen] = useState(false)
   const [visualMode, setVisualMode] = useState<VisualEditorMode>('compose')
   const [inspectorLocation, setInspectorLocation] = useState<InspectorLocation>(null)
   const [inspectorPhase, setInspectorPhase] = useState<InspectorPhase>('idle')
@@ -1140,6 +1233,11 @@ export default function App(): ReactElement {
   const [visualRouteScope, setVisualRouteScope] = useState<'current' | 'all'>('current')
   const [visualMultipleConfirmed, setVisualMultipleConfirmed] = useState(false)
   const [visualHistory, setVisualHistory] = useState<VisualEditHistory>({ past: [], present: [], future: [] })
+  const visualHistoryRef = useRef(visualHistory)
+  const visualMutationSequenceRef = useRef(0)
+  const visualKeyRevisionsRef = useRef(new Map<string, number>())
+  const visualGestureCheckpoints = useRef(new Map<string, VisualGestureCheckpoint>())
+  visualHistoryRef.current = visualHistory
   const [family, setFamily] = useState<DeviceFamily>('smartphone')
   const [deviceId, setDeviceId] = useState('iphone-15')
   const [width, setWidth] = useState('393')
@@ -1183,6 +1281,7 @@ export default function App(): ReactElement {
   const activePathRef = useRef(activePath)
   const fastApplyInFlight = useRef(false)
   const fullscreenButtonRef = useRef<HTMLButtonElement>(null)
+  const visualFullscreenButtonRef = useRef<HTMLButtonElement>(null)
   const onboardingTriggerRef = useRef<HTMLButtonElement>(null)
   const onboardingFallbackFocusRef = useRef<HTMLButtonElement>(null)
   const onboardingOpenedFromRail = useRef(false)
@@ -1249,7 +1348,6 @@ export default function App(): ReactElement {
   const isRemote = project?.source.kind === 'remote-url' || project?.source.kind === 'linked-localhost'
   const frameworkSupport = useMemo(() => project ? frameworkSupportFor(project) : null, [project])
   const workspaceEnabled = Boolean(project && !project.source.readOnly && project.source.localRoot)
-  const detectedTheme: RuntimeTheme = runtimeTheme !== 'unknown' ? runtimeTheme : project?.theme.detected === 'dark' ? 'dark' : project?.theme.detected === 'light' ? 'light' : 'unknown'
   const activeOrigin = previewMode === 'staging' && staging?.previewOrigin
     ? staging.previewOrigin
     : (previewMode === 'proposal' || previewMode === 'before-after') && proposal?.previewOrigin
@@ -1365,20 +1463,98 @@ export default function App(): ReactElement {
   }, [destination])
 
   useEffect(() => {
+    if (!visualFullscreen) return
+    const dialog = visualFullscreenButtonRef.current?.closest<HTMLElement>('.visual-workspace')
+    if (!dialog) return
+    const suppressed: HTMLElement[] = []
+    let branch: HTMLElement = dialog
+    while (branch.parentElement) {
+      const parent = branch.parentElement
+      for (const sibling of parent.children) {
+        if (sibling !== branch && sibling instanceof HTMLElement && !sibling.classList.contains('toast')) suppressed.push(sibling)
+      }
+      branch = parent
+      if (branch.classList.contains('app-shell')) break
+    }
+    const previous = suppressed.map((element) => ({ element, inert: element.inert, ariaHidden: element.getAttribute('aria-hidden') }))
+    for (const { element } of previous) {
+      element.inert = true
+      element.setAttribute('aria-hidden', 'true')
+    }
+    const focusFrame = window.requestAnimationFrame(() => visualFullscreenButtonRef.current?.focus())
+    const focusableElements = (): HTMLElement[] => [...dialog.querySelectorAll<HTMLElement>('a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), iframe, [tabindex]:not([tabindex="-1"]), [contenteditable="true"]')]
+      .filter((element) => !element.inert && !element.closest('[inert]') && element.getAttribute('aria-hidden') !== 'true' && element.getClientRects().length > 0)
+    const keepFocusInside = (event: FocusEvent): void => {
+      if (event.target instanceof Node && dialog.contains(event.target)) return
+      visualFullscreenButtonRef.current?.focus()
+    }
+    const handleKeydown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        setVisualFullscreen(false)
+        return
+      }
+      if (event.key !== 'Tab') return
+      const focusable = focusableElements()
+      const first = focusable[0]
+      const last = focusable.at(-1)
+      if (!first || !last) {
+        event.preventDefault()
+        visualFullscreenButtonRef.current?.focus()
+        return
+      }
+      const active = document.activeElement
+      if (!(active instanceof Node) || !dialog.contains(active)) {
+        event.preventDefault()
+        ;(event.shiftKey ? last : first).focus()
+      } else if (event.shiftKey && active === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+    document.addEventListener('focusin', keepFocusInside, true)
+    document.addEventListener('keydown', handleKeydown, true)
+    return () => {
+      window.cancelAnimationFrame(focusFrame)
+      document.removeEventListener('focusin', keepFocusInside, true)
+      document.removeEventListener('keydown', handleKeydown, true)
+      for (const { element, inert, ariaHidden } of previous) {
+        element.inert = inert
+        if (ariaHidden === null) element.removeAttribute('aria-hidden')
+        else element.setAttribute('aria-hidden', ariaHidden)
+      }
+      window.requestAnimationFrame(() => visualFullscreenButtonRef.current?.focus())
+    }
+  }, [visualFullscreen])
+
+  useEffect(() => {
+    if (destination !== 'visual') setVisualFullscreen(false)
+  }, [destination])
+
+  useEffect(() => {
     const shortcut = (event: KeyboardEvent): void => {
       const togglesInspector = event.key === 'F12' || ((event.metaKey || event.ctrlKey) && event.altKey && event.key.toLowerCase() === 'i') || ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === 'c')
-      if (!togglesInspector || onboardingState.open || showPreparation || (destination !== 'lab' && destination !== 'code')) return
+      if (!togglesInspector || onboardingState.open || showPreparation || (destination !== 'lab' && destination !== 'code' && destination !== 'visual')) return
       event.preventDefault()
-      toggleInspector(destination)
+      if (destination === 'visual') {
+        setInspectedElement(null)
+        setVisualMode((current) => current === 'select' ? 'interact' : 'select')
+      } else toggleInspector(destination)
     }
     window.addEventListener('keydown', shortcut, true)
     return () => window.removeEventListener('keydown', shortcut, true)
   }, [destination, inspectorLocation, onboardingState.open, project?.id, showPreparation])
 
   useEffect(() => window.responsiver.onRemoteInspectorShortcut((projectId) => {
-    if (projectId !== activeProjectId.current || onboardingState.open || showPreparation || (destination !== 'lab' && destination !== 'code')) return
-    toggleInspector(destination)
-  }), [destination, inspectorLocation, onboardingState.open, project?.id, showPreparation])
+    if (projectId !== activeProjectId.current || onboardingState.open || showPreparation || (destination !== 'lab' && destination !== 'code' && destination !== 'visual')) return
+    if (destination === 'visual') {
+      setInspectedElement(null)
+      setVisualMode((current) => current === 'select' ? 'interact' : 'select')
+    } else toggleInspector(destination)
+  }), [destination, inspectorLocation, onboardingState.open, project?.id, showPreparation, visualMode])
 
   useEffect(() => window.responsiver.onRemoteInspectorCanceled((projectId) => {
     if (projectId !== activeProjectId.current) return
@@ -1455,7 +1631,7 @@ export default function App(): ReactElement {
     setProposalContext(null)
     setPreviewMode('source')
     setActivePath(next.entryPath ?? next.routes[0]?.path ?? '/')
-    setRuntimeTheme(next.theme.detected === 'dark' ? 'dark' : next.theme.detected === 'light' ? 'light' : 'unknown')
+    setRuntimeTheme('unknown')
     setSelectedIssueId(next.issues[0]?.id ?? null)
     setSelectedIssueIds([])
     setQueuedIssueIds([])
@@ -1477,7 +1653,12 @@ export default function App(): ReactElement {
     setVisualScope({ kind: 'mobile' })
     setVisualRouteScope('current')
     setVisualMultipleConfirmed(false)
-    setVisualHistory({ past: [], present: [], future: [] })
+    visualGestureCheckpoints.current.clear()
+    visualKeyRevisionsRef.current.clear()
+    visualMutationSequenceRef.current = 0
+    const emptyVisualHistory = { past: [], present: [], future: [] }
+    visualHistoryRef.current = emptyVisualHistory
+    setVisualHistory(emptyVisualHistory)
     setInspectorLocation(null)
     setInspectorPhase('idle')
     setInspectedElement(null)
@@ -1588,13 +1769,29 @@ export default function App(): ReactElement {
     void api().clearStaging?.().catch(() => undefined)
   }
 
-  function commitVisualOperations(next: VisualEditOperation[]): void {
+  const sameVisualPlan = (left: readonly VisualEditOperation[], right: readonly VisualEditOperation[]): boolean =>
+    left.length === right.length && left.every((operation, index) => {
+      const candidate = right[index]
+      return Boolean(candidate) && visualEditOperationKey(operation) === visualEditOperationKey(candidate) && operation.after === candidate.after && operation.before === candidate.before
+    })
+
+  const visualTransitionKeys = (left: readonly VisualEditOperation[], right: readonly VisualEditOperation[]): string[] =>
+    [...new Set([...left, ...right].map((operation) => visualEditOperationKey(operation)))]
+
+  function replaceVisualHistory(next: VisualEditHistory, touchedKeys: readonly string[]): number {
+    const revision = ++visualMutationSequenceRef.current
+    for (const key of touchedKeys) visualKeyRevisionsRef.current.set(key, revision)
+    visualHistoryRef.current = next
+    setVisualHistory(next)
+    return revision
+  }
+
+  function commitVisualOperations(next: VisualEditOperation[], touchedKeys?: readonly string[]): number | null {
+    const current = visualHistoryRef.current
+    if (sameVisualPlan(current.present, next)) return null
     invalidateStaging()
-    setVisualHistory((current) => ({
-      past: [...current.past.slice(-49), current.present],
-      present: next,
-      future: []
-    }))
+    const history = { past: [...current.past.slice(-49), current.present], present: next, future: [] }
+    return replaceVisualHistory(history, touchedKeys ?? visualTransitionKeys(current.present, next))
   }
 
   function updateVisualProperty(property: VisualEditProperty, after: string): void {
@@ -1620,9 +1817,9 @@ export default function App(): ReactElement {
         route: visualRouteScope === 'current' ? { kind: 'current', path: documentPath(activePath) } : { kind: 'all' }
       })
       const key = visualEditOperationKey(operation)
-      const current = visualHistory.present.filter((entry) => visualEditOperationKey(entry) !== key)
+      const current = visualHistoryRef.current.present.filter((entry) => visualEditOperationKey(entry) !== key)
       if (operation.before !== operation.after) current.push(operation)
-      commitVisualOperations(current)
+      commitVisualOperations(current, [key])
     } catch (error) {
       flash(error instanceof Error ? error.message : 'Cette valeur ne peut pas être transformée en CSS sûr.')
     }
@@ -1635,9 +1832,18 @@ export default function App(): ReactElement {
       if (!gesture) throw new Error('Ce geste ne peut pas être appliqué en toute sécurité.')
       const route = visualRouteScope === 'current' ? { kind: 'current' as const, path: documentPath(activePath) } : { kind: 'all' as const }
       const batch = visualGestureOperations(gesture, { scope: visualScope, route })
-      const next = mergeVisualGestureOperations(visualHistory.present, batch)
-      if (next.length === visualHistory.present.length && next.every((operation, index) => operation === visualHistory.present[index])) return
-      commitVisualOperations(next)
+      const current = visualHistoryRef.current.present
+      const next = mergeVisualGestureOperations(current, batch)
+      const changes = visualGestureOperationChanges(current, next, batch)
+      if (!changes.length || sameVisualPlan(current, next)) return
+      const revision = commitVisualOperations(next, changes.map((change) => change.key))
+      if (revision === null) return
+      visualGestureCheckpoints.current.set(gesture.gestureId, { changes, revision })
+      while (visualGestureCheckpoints.current.size > 200) {
+        const oldestGestureId = visualGestureCheckpoints.current.keys().next().value
+        if (!oldestGestureId) break
+        visualGestureCheckpoints.current.delete(oldestGestureId)
+      }
       const selected = gesture.mutations[0]?.target
       if (selected) setInspectedElement(selected)
       const retainedCount = next.filter((operation) => batch.some((candidate) => visualEditOperationKey(candidate) === visualEditOperationKey(operation))).length
@@ -1654,50 +1860,100 @@ export default function App(): ReactElement {
     }
   }
 
+  function verifyVisualGesture(gestureId: string): void {
+    visualGestureCheckpoints.current.delete(gestureId)
+  }
+
+  function rejectVisualGesture(gestureId: string, reason: string): void {
+    if (!['layout-still-constrained', 'target-detached', 'invalid-css', 'css-too-large'].includes(reason)) return
+    const checkpoint = visualGestureCheckpoints.current.get(gestureId)
+    visualGestureCheckpoints.current.delete(gestureId)
+    if (!checkpoint) return
+    for (const laterCheckpoint of visualGestureCheckpoints.current.values()) {
+      if (laterCheckpoint.revision <= checkpoint.revision) continue
+      laterCheckpoint.changes = rebaseVisualGestureChangesAfterRejection(laterCheckpoint.changes, checkpoint.changes)
+    }
+    const eligible = checkpoint.changes.filter((change) => visualKeyRevisionsRef.current.get(change.key) === checkpoint.revision)
+    if (!eligible.length) return
+    const current = visualHistoryRef.current
+    const compact = (plans: VisualEditOperation[][]): VisualEditOperation[][] => plans.filter((plan, index) => index === 0 || !sameVisualPlan(plan, plans[index - 1]!))
+    const present = rollbackVisualGestureOperations(current.present, eligible)
+    let past = compact(current.past.map((plan) => rollbackVisualGestureOperations(plan, eligible)))
+    const future = compact(current.future.map((plan) => rollbackVisualGestureOperations(plan, eligible)))
+    while (past.length && sameVisualPlan(past.at(-1)!, present)) past = past.slice(0, -1)
+    if (sameVisualPlan(current.present, present) && current.past.length === past.length && current.future.length === future.length) return
+    invalidateStaging()
+    replaceVisualHistory({ past, present, future }, eligible.map((change) => change.key))
+    for (const change of eligible) {
+      let predecessorRevision = 0
+      for (const pendingCheckpoint of visualGestureCheckpoints.current.values()) {
+        if (pendingCheckpoint.revision >= checkpoint.revision || pendingCheckpoint.revision <= predecessorRevision) continue
+        const predecessor = pendingCheckpoint.changes.find((candidate) => candidate.key === change.key)
+        if (!predecessor || !sameVisualPlan(
+          predecessor.after ? [predecessor.after] : [],
+          change.before ? [change.before] : []
+        )) continue
+        predecessorRevision = pendingCheckpoint.revision
+      }
+      if (predecessorRevision) visualKeyRevisionsRef.current.set(change.key, predecessorRevision)
+    }
+  }
+
   function removeVisualOperation(id: string): void {
-    const next = visualHistory.present.filter((operation) => operation.id !== id)
-    if (next.length !== visualHistory.present.length) commitVisualOperations(next)
+    const current = visualHistoryRef.current.present
+    const removed = current.find((operation) => operation.id === id)
+    const next = current.filter((operation) => operation.id !== id)
+    if (removed) commitVisualOperations(next, [visualEditOperationKey(removed)])
   }
 
   function undoVisualEdit(): void {
-    if (!visualHistory.past.length) return
+    const current = visualHistoryRef.current
+    if (!current.past.length) return
+    const previous = current.past.at(-1)
+    if (!previous) return
     invalidateStaging()
-    setVisualHistory((current) => {
-      const previous = current.past.at(-1)
-      if (!previous) return current
-      return { past: current.past.slice(0, -1), present: previous, future: [current.present, ...current.future].slice(0, 50) }
-    })
+    replaceVisualHistory(
+      { past: current.past.slice(0, -1), present: previous, future: [current.present, ...current.future].slice(0, 50) },
+      visualTransitionKeys(current.present, previous)
+    )
   }
 
   function redoVisualEdit(): void {
-    if (!visualHistory.future.length) return
+    const current = visualHistoryRef.current
+    if (!current.future.length) return
+    const next = current.future[0]
+    if (!next) return
     invalidateStaging()
-    setVisualHistory((current) => {
-      const next = current.future[0]
-      if (!next) return current
-      return { past: [...current.past.slice(-49), current.present], present: next, future: current.future.slice(1) }
-    })
+    replaceVisualHistory(
+      { past: [...current.past.slice(-49), current.present], present: next, future: current.future.slice(1) },
+      visualTransitionKeys(current.present, next)
+    )
   }
 
   function clearVisualEdits(): void {
-    if (!visualHistory.present.length) return
-    commitVisualOperations([])
+    const current = visualHistoryRef.current.present
+    if (!current.length) return
+    commitVisualOperations([], current.map((operation) => visualEditOperationKey(operation)))
   }
 
-  async function prepareVisualChanges(openReview = false): Promise<void> {
-    if (!visualHistory.present.length) { flash('Sélectionnez un élément puis effectuez au moins un ajustement.'); return }
+  async function prepareVisualChanges(openReview = false): Promise<StagingSnapshot | null> {
+    const visualEdits = visualHistoryRef.current.present
+    if (!visualEdits.length) { flash('Sélectionnez un élément puis effectuez au moins un ajustement.'); return null }
     if (compiledVisualEdits.invalid.length || compiledVisualEdits.conflicts.length) {
       flash('Le plan visuel contient une valeur invalide ou deux changements incompatibles. Corrigez les lignes signalées avant de continuer.')
-      return
+      return null
     }
-    const result = await buildStaging({ issueIds: selectedIssueIds, themeTarget, instructions, visualEdits: visualHistory.present })
+    const result = await buildStaging({ issueIds: [], themeTarget: null, instructions: [], visualEdits })
     if (result && openReview && project?.source.kind === 'local-project') setDestination('review')
+    return result
   }
 
   async function applyVisualChanges(): Promise<void> {
     if (!visualAuthorization?.persistable) {
-      await prepareVisualChanges(false)
-      flash('La feuille visuelle est prête à être exportée. Son import dans le framework reste à valider dans Code.')
+      const result = await prepareVisualChanges(false)
+      if (!result) return
+      setDestination('export')
+      flash('La feuille visuelle est prête. Choisissez son format de livraison dans Exporter.')
       return
     }
     await applyPlanToSource(
@@ -2363,7 +2619,7 @@ export default function App(): ReactElement {
             </div>
             {inspectorLocation === 'lab' && <QuickInspectorPanel element={inspectedElement} phase={inspectorPhase} readOnly={project.source.kind === 'remote-url'} onClose={() => { setInspectorLocation(null); setInspectorPhase('idle') }} onEdit={() => go('visual')} />}
           </div>
-          {scopedProject && <Inspector project={scopedProject} allIssues={project.issues} activeIssueCount={routeIssues.length} totalIssueCount={project.issues.length} showAllIssues={showAllIssues} onShowAllIssues={setShowAllIssues} tab={inspectorTab} onTab={setInspectorTab} selectedIssue={selectedIssue} selectedIds={selectedIssueIds} queuedIds={queuedIssueIds} onPreviewIssue={(issue) => void previewIssue(issue)} onToggleIssue={toggleAcceptedIssue} onToggleQueued={toggleQueuedIssue} detectedTheme={detectedTheme} themeTarget={themeTarget} previewThemeTarget={previewThemeTarget} onPreviewTheme={(target) => void previewTheme(target)} onRemoveTheme={removeTheme} proposal={proposal} proposalContext={proposalContext} previewBusy={previewBusy} staging={staging} runtimeAudit={runtimeAudit} runtimeRenderStatus={runtimeRenderStatus} instructions={instructions} onRemoveInstruction={removeInstruction} messages={messages} draft={draft} onDraft={setDraft} onSubmit={submitInstruction} busy={busy} onAcceptProposal={acceptProposal} onAcceptAndApply={() => void acceptAndApplyProposal()} onRejectProposal={rejectProposal} onApplySafe={(ids) => void applyQueuedSafeIssues(ids)} undoAvailable={undoAvailable} onUndo={() => void undoLastApply()} directApplyAvailable={project.source.kind === 'local-project' && !project.source.readOnly && Boolean(api().applyStagingToSource) && Boolean(frameworkSupport?.durableAutomaticFixes)} onBuild={() => void buildStaging()} onClear={() => void clearStaging()} assistantRoute={remoteState?.path ?? activePath} assistantViewport={{ width: currentDevice.width, height: currentDevice.height, deviceScaleFactor: 1, mobile: currentDevice.family !== 'computer', touch: currentDevice.family !== 'computer' }} assistantScreenshot={remoteAudit?.screenshotDataUrl ?? null} workspaceEnabled={workspaceEnabled} onWorkspacePreviewOrigin={setWorkspaceOrigin} onNotice={flash} onOpenCode={() => go('code')} />}
+          {scopedProject && <Inspector project={scopedProject} allIssues={project.issues} activeIssueCount={routeIssues.length} totalIssueCount={project.issues.length} showAllIssues={showAllIssues} onShowAllIssues={setShowAllIssues} tab={inspectorTab} onTab={setInspectorTab} selectedIssue={selectedIssue} selectedIds={selectedIssueIds} queuedIds={queuedIssueIds} onPreviewIssue={(issue) => void previewIssue(issue)} onToggleIssue={toggleAcceptedIssue} onToggleQueued={toggleQueuedIssue} runtimeTheme={runtimeTheme} themeTarget={themeTarget} previewThemeTarget={previewThemeTarget} onPreviewTheme={(target) => void previewTheme(target)} onRemoveTheme={removeTheme} proposal={proposal} proposalContext={proposalContext} previewBusy={previewBusy} staging={staging} runtimeAudit={runtimeAudit} runtimeRenderStatus={runtimeRenderStatus} instructions={instructions} onRemoveInstruction={removeInstruction} messages={messages} draft={draft} onDraft={setDraft} onSubmit={submitInstruction} busy={busy} onAcceptProposal={acceptProposal} onAcceptAndApply={() => void acceptAndApplyProposal()} onRejectProposal={rejectProposal} onApplySafe={(ids) => void applyQueuedSafeIssues(ids)} undoAvailable={undoAvailable} onUndo={() => void undoLastApply()} directApplyAvailable={project.source.kind === 'local-project' && !project.source.readOnly && Boolean(api().applyStagingToSource) && Boolean(frameworkSupport?.durableAutomaticFixes)} onBuild={() => void buildStaging()} onClear={() => void clearStaging()} assistantRoute={remoteState?.path ?? activePath} assistantViewport={{ width: currentDevice.width, height: currentDevice.height, deviceScaleFactor: 1, mobile: currentDevice.family !== 'computer', touch: currentDevice.family !== 'computer' }} assistantScreenshot={remoteAudit?.screenshotDataUrl ?? null} workspaceEnabled={workspaceEnabled} onWorkspacePreviewOrigin={setWorkspaceOrigin} onNotice={flash} onOpenCode={() => go('code')} />}
         </div>
         {!isRemote && previewMode === 'source' && project.previewOrigin && (project.previewReadiness.status === 'ready' || project.previewReadiness.status === 'degraded') && <div className="runtime-audit-probes" aria-hidden="true" inert>
           {auditDevices.map((device) => <PreviewFrame key={`${project.id}:${device.id}`} compact project={project} origin={project.previewOrigin} device={device} path={activePath} label={`Sonde ${auditFamily(device.width)}`} onAudit={(audit) => applyRuntimeAudit(audit, false)} />)}
@@ -2393,6 +2649,8 @@ export default function App(): ReactElement {
         canUndo={visualHistory.past.length > 0}
         canRedo={visualHistory.future.length > 0}
         busy={busy}
+        fullscreen={visualFullscreen}
+        fullscreenButtonRef={visualFullscreenButtonRef}
         onMode={setVisualMode}
         onScope={selectVisualScope}
         onRouteScope={setVisualRouteScope}
@@ -2400,6 +2658,8 @@ export default function App(): ReactElement {
         onInspect={(element, phase) => { if (phase === 'selected') { setInspectedElement(element); setVisualMultipleConfirmed(false) } }}
         onInspectorStop={() => setVisualMode('interact')}
         onGesture={commitVisualGesture}
+        onGestureVerified={verifyVisualGesture}
+        onGestureRejected={rejectVisualGesture}
         onProperty={updateVisualProperty}
         onRemoveOperation={removeVisualOperation}
         onUndo={undoVisualEdit}
@@ -2414,7 +2674,7 @@ export default function App(): ReactElement {
         onRotate={() => { setWidth(height); setHeight(width); setDeviceId('custom') }}
         onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }}
         onPathChange={changePreviewPath}
-        onOpenLab={() => go('lab')}
+        onFullscreen={() => setVisualFullscreen((current) => !current)}
         onOpenCode={() => go('code')}
         onNotice={flash}
       />}
@@ -2444,7 +2704,7 @@ export default function App(): ReactElement {
     </main>
     {onboardingState.open && !showPreparation && <OnboardingTour initialHideOnStartup={onboardingState.hideOnStartup} onClose={closeOnboarding} />}
     {showPreparation && preparation && <PreparationOverlay progress={preparation} />}
-    {notice && <div className={destination === 'visual' ? 'toast toast--above-visual-tray' : 'toast'} role="status"><Icon name="info" size={16} /> <span>{notice}</span><button aria-label="Fermer" onClick={() => setNotice(null)}><Icon name="close" size={14} /></button></div>}
+    {notice && <div className={destination === 'visual' ? 'toast toast--above-visual-tray' : 'toast'} role="status" inert={visualFullscreen || undefined} aria-hidden={visualFullscreen || undefined}><Icon name="info" size={16} /> <span>{notice}</span><button aria-label="Fermer" onClick={() => setNotice(null)}><Icon name="close" size={14} /></button></div>}
   </div>
 }
 
@@ -2571,7 +2831,7 @@ function VisualPropertiesPanel({ target, scope, routeScope, multipleConfirmed, o
   </aside>
 }
 
-function VisualEditorView({ project, remotePreviewVisible, device, family, familyDevices, selectedDeviceId, width, height, path, mode, scope, routeScope, currentRoutePersistent, target, multipleConfirmed, operations, visualCss, authorization, canUndo, canRedo, busy, onMode, onScope, onRouteScope, onMultipleConfirmed, onInspect, onInspectorStop, onGesture, onProperty, onRemoveOperation, onUndo, onRedo, onClear, onPrepare, onApply, onFamily, onDevice, onWidth, onHeight, onRotate, onResize, onPathChange, onOpenLab, onOpenCode, onNotice }: {
+function VisualEditorView({ project, remotePreviewVisible, device, family, familyDevices, selectedDeviceId, width, height, path, mode, scope, routeScope, currentRoutePersistent, target, multipleConfirmed, operations, visualCss, authorization, canUndo, canRedo, busy, fullscreen, fullscreenButtonRef, onMode, onScope, onRouteScope, onMultipleConfirmed, onInspect, onInspectorStop, onGesture, onGestureVerified, onGestureRejected, onProperty, onRemoveOperation, onUndo, onRedo, onClear, onPrepare, onApply, onFamily, onDevice, onWidth, onHeight, onRotate, onResize, onPathChange, onFullscreen, onOpenCode, onNotice }: {
   project: ProjectSnapshot & ProjectExtra
   remotePreviewVisible: boolean
   device: Device
@@ -2593,6 +2853,8 @@ function VisualEditorView({ project, remotePreviewVisible, device, family, famil
   canUndo: boolean
   canRedo: boolean
   busy: boolean
+  fullscreen: boolean
+  fullscreenButtonRef: React.RefObject<HTMLButtonElement | null>
   onMode: (mode: VisualEditorMode) => void
   onScope: (scope: VisualEditScope) => void
   onRouteScope: (scope: 'current' | 'all') => void
@@ -2600,6 +2862,8 @@ function VisualEditorView({ project, remotePreviewVisible, device, family, famil
   onInspect: (element: VisualElementSnapshot, phase: 'hover' | 'selected') => void
   onInspectorStop: () => void
   onGesture: (gesture: VisualGestureCommit) => void
+  onGestureVerified: (gestureId: string) => void
+  onGestureRejected: (gestureId: string, reason: string) => void
   onProperty: (property: VisualEditProperty, value: string) => void
   onRemoveOperation: (id: string) => void
   onUndo: () => void
@@ -2614,12 +2878,11 @@ function VisualEditorView({ project, remotePreviewVisible, device, family, famil
   onRotate: () => void
   onResize: (width: number, height: number) => void
   onPathChange: (path: string) => void
-  onOpenLab: () => void
+  onFullscreen: () => void
   onOpenCode: () => void
   onNotice: (message: string) => void
 }): ReactElement {
   const remote = project.source.kind === 'linked-localhost'
-  const scopeLabel = scope.kind === 'all' ? 'Toutes tailles' : scope.kind === 'mobile' ? 'Mobile ≤ 767 px' : scope.kind === 'tablet' ? 'Tablette 768–1024 px' : `${scope.minWidth ?? '…'}–${scope.maxWidth ?? '…'} px`
   const selectedScope = scope.kind
   const operationScopes = new Set(operations.map((operation) => {
     const operationScope = operation.scope.kind === 'all' ? 'Toutes tailles' : operation.scope.kind === 'mobile' ? 'Mobile ≤ 767 px' : operation.scope.kind === 'tablet' ? 'Tablette 768–1024 px' : `${operation.scope.minWidth ?? '…'}–${operation.scope.maxWidth ?? '…'} px`
@@ -2629,24 +2892,21 @@ function VisualEditorView({ project, remotePreviewVisible, device, family, famil
   return <div className="visual-editor-page">
     <h1 className="sr-only">Atelier visuel</h1>
     <div className="visual-toolbar">
-      <div className="visual-mode-switch" role="group" aria-label="Mode de l’Atelier"><button className={mode === 'compose' ? 'is-active' : ''} onClick={() => onMode('compose')} aria-pressed={mode === 'compose'} disabled={remote} title={remote ? 'La composition directe nécessite la preview locale instrumentée. Les propriétés restent disponibles.' : 'Figer la page et manipuler ses éléments à la souris'}><Icon name="compose" size={15} /> Composer</button><button className={mode === 'select' ? 'is-active' : ''} onClick={() => onMode('select')} aria-pressed={mode === 'select'}><Icon name="cursor" size={15} /> Propriétés</button><button className={mode === 'interact' ? 'is-active' : ''} onClick={() => onMode('interact')} aria-pressed={mode === 'interact'}><Icon name="play" size={15} /> Tester</button><button className={mode === 'compare' ? 'is-active' : ''} onClick={() => onMode('compare')} aria-pressed={mode === 'compare'} disabled={remote} title={remote ? 'La comparaison du localhost utilise une seule session réelle.' : undefined}><Icon name="compare" size={15} /> Avant / après</button></div>
+      <div className="visual-mode-switch" role="group" aria-label="Mode de l’Atelier"><button className={mode === 'compose' ? 'is-active' : ''} onClick={() => onMode('compose')} aria-pressed={mode === 'compose'} disabled={remote} title={remote ? 'La composition directe nécessite la preview locale instrumentée. L’inspection reste disponible.' : 'Figer la page et manipuler ses éléments à la souris'}><Icon name="compose" size={15} /> Composer</button><button className={mode === 'select' ? 'is-active' : ''} onClick={() => onMode('select')} aria-pressed={mode === 'select'} title="Inspecter un élément · F12"><Icon name="cursor" size={15} /> Inspecter</button><button className={mode === 'interact' ? 'is-active' : ''} onClick={() => onMode('interact')} aria-pressed={mode === 'interact'}><Icon name="play" size={15} /> Tester</button><button className={mode === 'compare' ? 'is-active' : ''} onClick={() => onMode('compare')} aria-pressed={mode === 'compare'} disabled={remote} title={remote ? 'La comparaison du localhost utilise une seule session réelle.' : undefined}><Icon name="compare" size={15} /> Avant / après</button></div>
       <div className="visual-history-actions"><button className="icon-button" type="button" onClick={onUndo} disabled={!canUndo} aria-label="Annuler la dernière modification" title="Annuler"><Icon name="undo" size={15} /></button><button className="icon-button" type="button" onClick={onRedo} disabled={!canRedo} aria-label="Rétablir la modification" title="Rétablir"><Icon name="redo" size={15} /></button></div>
       <div className="visual-toolbar-divider" />
-      <label className="visual-scope-select"><span>Écran</span><select value={selectedScope} onChange={(event) => { const next = event.target.value; onScope(next === 'all' || next === 'mobile' || next === 'tablet' ? { kind: next } : { kind: 'custom', minWidth: device.width, maxWidth: device.width }) }}><option value="all">Toutes tailles</option><option value="mobile">Mobile ≤ 767 px</option><option value="tablet">Tablette 768–1024 px</option><option value="custom">Plage personnalisée</option></select></label>
-      {scope.kind === 'custom' && <div className="custom-scope-fields"><label>Min <input type="number" min="240" max="3840" value={scope.minWidth ?? ''} onChange={(event) => onScope({ ...scope, minWidth: event.target.value ? Number(event.target.value) : null })} /></label><label>Max <input type="number" min="240" max="3840" value={scope.maxWidth ?? ''} onChange={(event) => onScope({ ...scope, maxWidth: event.target.value ? Number(event.target.value) : null })} /></label></div>}
-      <div className="route-scope-switch" role="group" aria-label="Portée de page"><button className={routeScope === 'current' ? 'is-active' : ''} onClick={() => onRouteScope('current')} disabled={!currentRoutePersistent} title={!currentRoutePersistent ? 'Cette route dynamique partage son fichier HTML avec l’application. Utilisez une portée globale ou modifiez le composant dans Code.' : undefined}>Cette page</button><button className={routeScope === 'all' ? 'is-active' : ''} onClick={() => onRouteScope('all')}>Toutes les pages</button></div>
-      <span className="visual-scope-summary">{routeScope === 'current' ? 'Page actuelle' : 'Site'} · {scopeLabel}</span>
-      <div className="visual-toolbar-actions"><span className={authorization.persistable ? 'code-capability is-ready' : 'code-capability'}><i />{authorization.persistable ? 'Application directe' : 'Export CSS'}</span><button className="button button--quiet visual-lab-button" type="button" onClick={onOpenLab} aria-label="Ouvrir le Laboratoire" title="Ouvrir le Laboratoire"><Icon name="ruler" size={15} /><span>Laboratoire</span></button></div>
+      <div className="visual-scope-group" aria-label="Portée du changement"><span>Appliquer à</span><label className="visual-scope-select"><span>Tailles</span><select aria-label="Tailles concernées" value={selectedScope} onChange={(event) => { const next = event.target.value; onScope(next === 'all' || next === 'mobile' || next === 'tablet' ? { kind: next } : { kind: 'custom', minWidth: device.width, maxWidth: device.width }) }}><option value="all">Tous les écrans</option><option value="mobile">Mobile uniquement (≤ 767 px)</option><option value="tablet">Tablette uniquement (768–1024 px)</option><option value="custom">Plage personnalisée</option></select></label><label className="visual-scope-select"><span>Pages</span><select aria-label="Pages concernées" value={routeScope} onChange={(event) => onRouteScope(event.target.value === 'all' ? 'all' : 'current')}><option value="current" disabled={!currentRoutePersistent}>Cette page seulement</option><option value="all">Tout le site</option></select></label></div>
+      {scope.kind === 'custom' && <div className="custom-scope-fields"><label>Min <input aria-label="Largeur minimale concernée" type="number" min="240" max="3840" value={scope.minWidth ?? ''} onChange={(event) => onScope({ ...scope, minWidth: event.target.value ? Number(event.target.value) : null })} /></label><label>Max <input aria-label="Largeur maximale concernée" type="number" min="240" max="3840" value={scope.maxWidth ?? ''} onChange={(event) => onScope({ ...scope, maxWidth: event.target.value ? Number(event.target.value) : null })} /></label></div>}
     </div>
     <div className="visual-device-bar"><DeviceControls family={family} devices={familyDevices} selectedId={selectedDeviceId} width={width} height={height} onFamily={onFamily} onDevice={onDevice} onWidth={onWidth} onHeight={onHeight} onRotate={onRotate} /></div>
-    <div className="visual-workspace">
-      <section className={`visual-canvas visual-canvas--${mode}`}><header><span><i />{mode === 'compose' ? 'Page figée · glissez un bloc ou une poignée' : mode === 'select' ? 'Sélection et propriétés CSS' : mode === 'interact' ? 'Aperçu fonctionnel · interactions actives' : 'Source et proposition synchronisées'}</span><code>{path}</code></header><div className="visual-canvas-body">{remote
-        ? <RemotePreview projectId={project.id} device={device} visible={remotePreviewVisible} embedded automaticAudit={false} onResize={onResize} onAudit={() => undefined} onState={(state) => onPathChange(state.path)} onNotice={onNotice} />
-        : mode === 'compare' ? <div className="before-after-grid visual-before-after"><div className="comparison-pane"><header><span>Avant</span><strong>Source</strong></header><PreviewFrame compact zoomable project={project} origin={project.previewOrigin} device={device} path={path} label="Avant — Source" onPathChange={onPathChange} /></div><div className="comparison-pane comparison-pane--after"><header><span>Après</span><strong>{operations.length} ajustement{operations.length > 1 ? 's' : ''}</strong></header><PreviewFrame compact zoomable project={project} origin={project.previewOrigin} device={device} path={path} label="Après — Atelier" visualCss={visualCss} onPathChange={onPathChange} /></div></div>
-          : <PreviewFrame project={project} origin={project.previewOrigin} device={device} path={path} resizable zoomable inspectorEnabled={mode === 'select'} composerEnabled={mode === 'compose'} focusSelector={mode === 'compose' || mode === 'select' ? target?.selector : null} visualCss={visualCss} onInspectElement={onInspect} onInspectorStop={onInspectorStop} onComposerGesture={onGesture} onComposerNotice={onNotice} onResize={onResize} onPathChange={onPathChange} />}</div><footer><span className="source-badge"><i />Preview temporaire</span><small>{mode === 'compose' ? 'Page figée · flèches : 1 px · Maj : 10 px · Échap : annuler le geste.' : mode === 'select' ? 'Les clics sont capturés ; passez en mode Tester pour naviguer.' : mode === 'interact' ? 'Le vrai site fonctionne avec les changements temporaires.' : 'Aucun fichier n’est modifié pendant cette étape.'}</small></footer></section>
+    <div className={`visual-workspace${fullscreen ? ' is-fullscreen' : ''}`} role={fullscreen ? 'dialog' : undefined} aria-modal={fullscreen || undefined} aria-label={fullscreen ? 'Atelier visuel en plein écran' : undefined}>
+      <section className={`visual-canvas visual-canvas--${mode}`}><header><span><i />{mode === 'compose' ? 'Page figée · déplacez ou redimensionnez librement' : mode === 'select' ? 'Inspection active · cliquez un élément' : mode === 'interact' ? 'Aperçu fonctionnel · interactions actives' : 'Source et proposition synchronisées'}</span><div className="visual-canvas-actions"><code>{path}</code><button className={`stage-inspect${mode === 'select' ? ' is-active' : ''}`} type="button" onClick={() => onMode(mode === 'select' ? 'interact' : 'select')} aria-pressed={mode === 'select'} title="Inspecter un élément · F12"><Icon name="cursor" size={15} /><span>Inspecter</span></button><button ref={fullscreenButtonRef} className="stage-fullscreen" type="button" onClick={onFullscreen} aria-label={fullscreen ? 'Quitter le plein écran de l’Atelier' : 'Afficher l’Atelier en plein écran'} aria-pressed={fullscreen}><Icon name={fullscreen ? 'fullscreenExit' : 'fullscreen'} size={15} /><span>{fullscreen ? 'Réduire' : 'Plein écran'}</span></button></div></header><div className="visual-canvas-body">{remote
+        ? <RemotePreview projectId={project.id} device={device} visible={remotePreviewVisible} embedded automaticAudit={false} allowUpscale={fullscreen} onResize={onResize} onAudit={() => undefined} onState={(state) => onPathChange(state.path)} onNotice={onNotice} />
+        : mode === 'compare' ? <div className="before-after-grid visual-before-after"><div className="comparison-pane"><header><span>Avant</span><strong>Source</strong></header><PreviewFrame compact zoomable allowUpscale={fullscreen} project={project} origin={project.previewOrigin} device={device} path={path} label="Avant — Source" onPathChange={onPathChange} onEscape={() => fullscreen && onFullscreen()} /></div><div className="comparison-pane comparison-pane--after"><header><span>Après</span><strong>{operations.length} ajustement{operations.length > 1 ? 's' : ''}</strong></header><PreviewFrame compact zoomable allowUpscale={fullscreen} project={project} origin={project.previewOrigin} device={device} path={path} label="Après — Atelier" visualCss={visualCss} onPathChange={onPathChange} onEscape={() => fullscreen && onFullscreen()} /></div></div>
+          : <PreviewFrame project={project} origin={project.previewOrigin} device={device} path={path} resizable allowUpscale={fullscreen} zoomable inspectorEnabled={mode === 'select'} composerEnabled={mode === 'compose'} focusSelector={mode === 'compose' || mode === 'select' ? target?.selector : null} visualCss={visualCss} onInspectElement={onInspect} onInspectorStop={onInspectorStop} onInspectorShortcut={() => onMode(mode === 'select' ? 'interact' : 'select')} onComposerGesture={onGesture} onComposerVerified={onGestureVerified} onComposerRejected={onGestureRejected} onComposerNotice={onNotice} onResize={onResize} onPathChange={onPathChange} onEscape={() => fullscreen && onFullscreen()} />}</div><footer><span className="source-badge"><i />Preview temporaire</span><small>{mode === 'compose' ? 'Glisser : déplacer · Maj + glisser : réordonner · ⌥ + clic : cibler un élément imbriqué.' : mode === 'select' ? 'Les clics sont capturés ; repassez en mode Tester pour naviguer.' : mode === 'interact' ? 'Le vrai site fonctionne avec les changements temporaires.' : 'Aucun fichier n’est modifié pendant cette étape.'}</small></footer></section>
       <VisualPropertiesPanel target={target} scope={scope} routeScope={routeScope} multipleConfirmed={multipleConfirmed} operations={operations} authorization={authorization} onMultipleConfirmed={onMultipleConfirmed} onProperty={onProperty} onRemoveOperation={onRemoveOperation} onOpenCode={onOpenCode} />
     </div>
-    <footer className="visual-change-tray"><div className="visual-change-summary"><span className="visual-change-count">{operations.length}</span><span><strong>Changement{operations.length > 1 ? 's' : ''} dans l’Atelier</strong><small>{operations.length ? `${new Set(operations.map((operation) => operation.target.selector)).size} cible${new Set(operations.map((operation) => operation.target.selector)).size > 1 ? 's' : ''} · ${operationScopeSummary}` : 'Sélectionnez un élément pour commencer.'}</small></span></div><div className="visual-change-list">{operations.slice(-3).map((operation) => <span key={operation.id}><code>{operation.property}</code><b>{operation.after}</b><button onClick={() => onRemoveOperation(operation.id)} aria-label={`Retirer ${operation.property}`}><Icon name="close" size={11} /></button></span>)}{operations.length > 3 && <em>+{operations.length - 3}</em>}</div><div className="visual-tray-actions">{operations.length > 0 && <button className="text-button" type="button" onClick={onClear} disabled={busy}>Tout effacer</button>}<button className="button button--secondary" type="button" onClick={onPrepare} disabled={!operations.length || busy}><Icon name="changes" size={15} /> Préparer le code</button><button className="button button--primary" type="button" onClick={onApply} disabled={!operations.length || busy}><Icon name={authorization.persistable ? 'check' : 'export'} size={15} />{authorization.persistable ? 'Appliquer au projet' : 'Préparer l’export'}</button></div></footer>
+    <footer className="visual-change-tray"><div className="visual-change-summary"><span className="visual-change-count">{operations.length}</span><span><strong>Changement{operations.length > 1 ? 's' : ''} dans l’Atelier</strong><small>{operations.length ? `${new Set(operations.map((operation) => operation.target.selector)).size} cible${new Set(operations.map((operation) => operation.target.selector)).size > 1 ? 's' : ''} · ${operationScopeSummary}` : 'Sélectionnez un élément pour commencer.'}</small></span></div><div className="visual-change-list">{operations.slice(-3).map((operation) => <span key={operation.id}><code>{operation.property}</code><b>{operation.after}</b><button onClick={() => onRemoveOperation(operation.id)} aria-label={`Retirer ${operation.property}`}><Icon name="close" size={11} /></button></span>)}{operations.length > 3 && <em>+{operations.length - 3}</em>}</div><div className="visual-tray-actions">{operations.length > 0 && <button className="text-button" type="button" onClick={onClear} disabled={busy}>Tout effacer</button>}{authorization.persistable ? <><button className="button button--secondary visual-commit-action" type="button" onClick={onPrepare} disabled={!operations.length || busy} title="Prépare un aperçu et un diff sans modifier les fichiers."><Icon name="changes" size={15} /><span><strong>Réviser sans modifier</strong><small>Aperçu + diff · fichiers intacts</small></span></button><button className="button button--primary visual-commit-action" type="button" onClick={onApply} disabled={!operations.length || busy} title="Écrit les ajustements dans les fichiers, puis réanalyse le projet."><Icon name="check" size={15} /><span><strong>Appliquer aux fichiers</strong><small>Écrit puis réanalyse · annulable</small></span></button></> : <button className="button button--primary visual-commit-action" type="button" onClick={onApply} disabled={!operations.length || busy}><Icon name="export" size={15} /><span><strong>Préparer l’export CSS</strong><small>Aucune écriture dans le framework</small></span></button>}</div></footer>
   </div>
 }
 
@@ -2750,7 +3010,7 @@ function DeviceControls({ family, devices: choices, selectedId, width, height, o
   </div>
 }
 
-function Inspector({ project, allIssues, activeIssueCount, totalIssueCount, showAllIssues, onShowAllIssues, tab, onTab, selectedIssue, selectedIds, queuedIds, onPreviewIssue, onToggleIssue, onToggleQueued, detectedTheme, themeTarget, previewThemeTarget, onPreviewTheme, onRemoveTheme, proposal, proposalContext, previewBusy, staging, runtimeAudit, runtimeRenderStatus, instructions, onRemoveInstruction, messages, draft, onDraft, onSubmit, busy, onAcceptProposal, onAcceptAndApply, onRejectProposal, onApplySafe, undoAvailable, onUndo, directApplyAvailable, onBuild, onClear, assistantRoute, assistantViewport, assistantScreenshot, workspaceEnabled, onWorkspacePreviewOrigin, onNotice, onOpenCode }: {
+function Inspector({ project, allIssues, activeIssueCount, totalIssueCount, showAllIssues, onShowAllIssues, tab, onTab, selectedIssue, selectedIds, queuedIds, onPreviewIssue, onToggleIssue, onToggleQueued, runtimeTheme, themeTarget, previewThemeTarget, onPreviewTheme, onRemoveTheme, proposal, proposalContext, previewBusy, staging, runtimeAudit, runtimeRenderStatus, instructions, onRemoveInstruction, messages, draft, onDraft, onSubmit, busy, onAcceptProposal, onAcceptAndApply, onRejectProposal, onApplySafe, undoAvailable, onUndo, directApplyAvailable, onBuild, onClear, assistantRoute, assistantViewport, assistantScreenshot, workspaceEnabled, onWorkspacePreviewOrigin, onNotice, onOpenCode }: {
   project: ProjectSnapshot & ProjectExtra
   allIssues: ProjectIssue[]
   activeIssueCount: number
@@ -2765,7 +3025,7 @@ function Inspector({ project, allIssues, activeIssueCount, totalIssueCount, show
   onPreviewIssue: (issue: ProjectIssue) => void
   onToggleIssue: (id: string) => void
   onToggleQueued: (id: string) => void
-  detectedTheme: RuntimeTheme
+  runtimeTheme: RuntimeTheme
   themeTarget: ThemeTarget | null
   previewThemeTarget: ThemeTarget | null
   onPreviewTheme: (target: ThemeTarget) => void
@@ -2874,7 +3134,7 @@ function Inspector({ project, allIssues, activeIssueCount, totalIssueCount, show
         {staging && <div className="staging-summary"><span><i /> Staging prêt</span><strong>{staging.changes.length} changements · {staging.changedFiles.length} fichiers</strong><button className="text-button" onClick={onClear} disabled={busy}>Écarter</button></div>}
         <button className="button button--primary button--full inspector-action" onClick={onBuild} disabled={busy || previewBusy || !acceptedCount || !canStage}>{busy ? 'Construction…' : staging ? 'Reconstruire le staging' : 'Construire le staging'} <Icon name="arrow" /></button>
       </>}
-      {tab === 'theme' && <>{!canStage && <div className="manual-review"><Icon name="info" size={15} /><span>La variante de thème sera disponible après qu’un rendu exploitable aura été détecté.</span></div>}<ThemePanel project={project} detectedTheme={detectedTheme} acceptedTarget={themeTarget} previewTarget={previewThemeTarget} proposal={proposalContext?.kind === 'theme' ? proposal : null} busy={previewBusy} disabled={busy || !canStage} onPreview={onPreviewTheme} onAccept={onAcceptProposal} onReject={onRejectProposal} onRemoveAccepted={onRemoveTheme} /></>}
+      {tab === 'theme' && <>{!canStage && <div className="manual-review"><Icon name="info" size={15} /><span>La variante de thème sera disponible après qu’un rendu exploitable aura été détecté.</span></div>}<ThemePanel project={project} runtimeTheme={runtimeTheme} acceptedTarget={themeTarget} previewTarget={previewThemeTarget} proposal={proposalContext?.kind === 'theme' ? proposal : null} busy={previewBusy} disabled={busy || !canStage} onPreview={onPreviewTheme} onAccept={onAcceptProposal} onReject={onRejectProposal} onRemoveAccepted={onRemoveTheme} /></>}
       {tab === 'conversation' && <div className="assistant-stack">
         <LocalAssistant key={project.id} project={project} route={assistantRoute} viewport={assistantViewport} screenshotDataUrl={assistantScreenshot} workspaceEnabled={workspaceEnabled} onNotice={onNotice} onPreviewOrigin={onWorkspacePreviewOrigin} />
         <section className="deterministic-assistant"><header><div><span className="overline">Ajustements rapides</span><h3>Sans modèle</h3></div><span className="rule-chip">Hors ligne</span></header>{!canStage && <div className="manual-review"><Icon name="info" size={15} /><span>{linkedWorkspace ? 'Les ajustements automatiques ne ciblent pas encore les templates du framework. Le studio Code reste disponible avec aperçu CSS sur le localhost.' : 'Les ajustements déterministes exigent un projet local avec un rendu exploitable.'}</span></div>}<div className="conversation">{messages.map((message) => <div className={`message message--${message.author}`} key={message.id}><span>{message.author === 'user' ? 'Vous' : 'Responsiver'}</span><p>{message.text}</p></div>)}</div>{previewBusy && proposalContext?.kind === 'instruction' && <div className="proposal-pending" role="status"><span className="loading-mark" /> Interprétation locale…</div>}{instructionProposal && proposalContext?.instruction && <ProposalDecision title="Ajustement prévisualisé" accepted={instructions.includes(proposalContext.instruction)} changeCount={instructionProposal.changes.length} disabled={busy || !canStage} onAccept={onAcceptProposal} onReject={onRejectProposal} />}<form className="prompt-form" onSubmit={onSubmit}><label htmlFor="instruction">Nouvel ajustement</label><textarea id="instruction" value={draft} onChange={(event) => onDraft(event.target.value)} placeholder="Ex. Réduis les arrondis et utilise #b94d32 comme couleur d’accent." rows={4} disabled={!canStage} /><div><small>Couleur · espacement · rayon · texte · navigation</small><button className="button button--primary" disabled={busy || previewBusy || !draft.trim() || !canStage}>Prévisualiser</button></div></form></section>
@@ -2903,24 +3163,25 @@ function resolvableThemeRoles(variables: Array<{ name: string; value: string; ro
   return new Set(variables.filter((variable) => resolves(variable)).map((variable) => variable.role))
 }
 
-function ThemePanel({ project, detectedTheme, acceptedTarget, previewTarget, proposal, busy, disabled, onPreview, onAccept, onReject, onRemoveAccepted }: { project: ProjectSnapshot & ProjectExtra; detectedTheme: RuntimeTheme; acceptedTarget: ThemeTarget | null; previewTarget: ThemeTarget | null; proposal: StagingSnapshot | null; busy: boolean; disabled: boolean; onPreview: (target: ThemeTarget) => void; onAccept: () => void; onReject: () => void; onRemoveAccepted: () => void }): ReactElement {
+function ThemePanel({ project, runtimeTheme, acceptedTarget, previewTarget, proposal, busy, disabled, onPreview, onAccept, onReject, onRemoveAccepted }: { project: ProjectSnapshot & ProjectExtra; runtimeTheme: RuntimeTheme; acceptedTarget: ThemeTarget | null; previewTarget: ThemeTarget | null; proposal: StagingSnapshot | null; busy: boolean; disabled: boolean; onPreview: (target: ThemeTarget) => void; onAccept: () => void; onReject: () => void; onRemoveAccepted: () => void }): ReactElement {
   const hasDark = project.theme.hasDark || project.theme.detected === 'dual'
   const hasLight = project.theme.hasLight || project.theme.detected === 'dual'
   const semanticRoles = resolvableThemeRoles(project.theme.variables ?? [])
   const generationReady = project.theme.detected !== 'unknown' && semanticRoles.has('background') && semanticRoles.has('text')
-  const recommendation = hasDark && !hasLight ? 'light' : hasLight && !hasDark ? 'dark' : detectedTheme === 'dark' ? 'light' : 'dark'
+  const recommendation = hasDark && !hasLight ? 'light' : hasLight && !hasDark ? 'dark' : runtimeTheme === 'dark' ? 'light' : 'dark'
   const dual = hasDark && hasLight
   const analyzedTheme: RuntimeTheme = project.theme.detected === 'dark' ? 'dark' : project.theme.detected === 'light' ? 'light' : 'unknown'
-  const displayedTheme = analyzedTheme === 'unknown' ? detectedTheme : analyzedTheme
-  const diagnosis = dual
-    ? 'Deux thèmes déjà présents'
+  const displayedTheme = runtimeTheme !== 'unknown' ? runtimeTheme : analyzedTheme
+  const diagnosis = runtimeTheme !== 'unknown'
+    ? `Rendu ${runtimeTheme === 'dark' ? 'sombre' : 'clair'} sur la page active`
     : analyzedTheme !== 'unknown'
-      ? `Thème ${analyzedTheme === 'dark' ? 'sombre' : 'clair'} détecté`
-      : detectedTheme !== 'unknown'
-        ? `Rendu ${detectedTheme === 'dark' ? 'sombre' : 'clair'} sur la page active`
-        : 'Thème non classé'
-  return <><div className="inspector-heading"><div><span className="overline">Palette complémentaire</span><h2>Thème</h2></div><span className={`theme-chip theme-chip--${dual ? 'dual' : displayedTheme}`}>{dual ? 'Clair + sombre' : displayedTheme === 'dark' ? 'Sombre' : displayedTheme === 'light' ? 'Clair' : 'À confirmer'}</span></div>
-    <div className="theme-diagnosis"><div className={`theme-swatch theme-swatch--${displayedTheme}`}><span>Aa</span></div><div><strong>{diagnosis}</strong><p>{dual ? 'Responsiver n’ajoute aucune variante identique.' : generationReady ? `Cliquez sur la variante ${recommendation === 'light' ? 'claire' : 'sombre'} pour la voir immédiatement, avant toute validation.` : 'La génération reste suspendue tant que les rôles fond et texte ne sont pas identifiés avec assez de certitude.'}</p></div></div>
+      ? `Thème ${analyzedTheme === 'dark' ? 'sombre' : 'clair'} estimé depuis le code`
+      : 'Thème non classé'
+  const themeBadge = runtimeTheme !== 'unknown'
+    ? runtimeTheme === 'dark' ? 'Sombre actif' : 'Clair actif'
+    : analyzedTheme === 'dark' ? 'Sombre estimé' : analyzedTheme === 'light' ? 'Clair estimé' : 'À confirmer'
+  return <><div className="inspector-heading"><div><span className="overline">Palette complémentaire</span><h2>Thème</h2></div><span className={`theme-chip theme-chip--${displayedTheme}`}>{themeBadge}</span></div>
+    <div className="theme-diagnosis"><div className={`theme-swatch theme-swatch--${displayedTheme}`}><span>Aa</span></div><div><strong>{diagnosis}</strong><p>{dual ? 'Les variantes claire et sombre sont déclarées ; le badge décrit celle réellement visible sur cette page.' : generationReady ? `Cliquez sur la variante ${recommendation === 'light' ? 'claire' : 'sombre'} pour la voir immédiatement, avant toute validation.` : 'La génération reste suspendue tant que les rôles fond et texte ne sont pas identifiés avec assez de certitude.'}</p></div></div>
     {!generationReady && !dual && <div className="manual-review"><Icon name="shield" size={15} /><span>Palette automatique indisponible : Responsiver préfère ne rien produire plutôt qu’un thème illisible. Les variantes déjà présentes restent prévisualisables.</span></div>}
     <fieldset className="theme-options"><legend>Prévisualiser une variante</legend><label className={`${previewTarget === 'light' ? 'is-selected' : ''}${hasLight ? ' is-existing' : ''}`}><input type="radio" name="theme-preview" checked={previewTarget === 'light'} onChange={() => onPreview('light')} disabled={busy || disabled || (!hasLight && !generationReady)} /><span className="palette-preview palette-preview--light"><i /><i /><i /></span><span><strong>Clair {hasLight && <em>Déjà présent</em>}</strong><small>{hasLight ? 'Afficher la variante native, sans la dupliquer' : generationReady ? 'Fond minéral, texte graphite' : 'Rôles sémantiques insuffisants'}</small></span></label><label className={`${previewTarget === 'dark' ? 'is-selected' : ''}${hasDark ? ' is-existing' : ''}`}><input type="radio" name="theme-preview" checked={previewTarget === 'dark'} onChange={() => onPreview('dark')} disabled={busy || disabled || (!hasDark && !generationReady)} /><span className="palette-preview palette-preview--dark"><i /><i /><i /></span><span><strong>Sombre {hasDark && <em>Déjà présent</em>}</strong><small>{hasDark ? 'Afficher la variante native, sans la dupliquer' : generationReady ? 'Graphite profond, surfaces étagées' : 'Rôles sémantiques insuffisants'}</small></span></label></fieldset>
     {busy && <div className="proposal-pending" role="status"><span className="loading-mark" /> Génération locale de la palette…</div>}

@@ -184,26 +184,144 @@ const bridge = `<style data-responsiver-bridge-style>
     const reason = event.reason instanceof Error ? event.reason.message : event.reason;
     recordRuntimeError('promise', reason);
   });
-  const transparent = (value) => !value || value === 'transparent' || value === 'rgba(0, 0, 0, 0)';
+  const colorChannels = (value) => {
+    const match = String(value || '').match(/rgba?\\(\\s*([\\d.]+)[,\\s]+([\\d.]+)[,\\s]+([\\d.]+)(?:\\s*[,/]\\s*([\\d.]+)%?)?\\s*\\)/i);
+    if (!match) return null;
+    const alpha = match[4] === undefined ? 1 : Math.max(0, Math.min(1, Number(match[4]) / (String(match[0]).includes('%') ? 100 : 1)));
+    return { red: Number(match[1]), green: Number(match[2]), blue: Number(match[3]), alpha };
+  };
+  const transparent = (value) => {
+    if (!value || String(value).trim().toLowerCase() === 'transparent') return true;
+    const channels = colorChannels(value);
+    return channels ? channels.alpha <= .01 : false;
+  };
   const luminance = (value) => {
-    const match = value.match(/[\\d.]+/g);
-    if (!match || match.length < 3) return null;
-    const components = match.slice(0, 3).map((part) => Number(part) / 255).map((part) => part <= .03928 ? part / 12.92 : ((part + .055) / 1.055) ** 2.4);
+    const channels = colorChannels(value);
+    if (!channels) return null;
+    const components = [channels.red, channels.green, channels.blue].map((part) => part / 255).map((part) => part <= .03928 ? part / 12.92 : ((part + .055) / 1.055) ** 2.4);
     return .2126 * components[0] + .7152 * components[1] + .0722 * components[2];
+  };
+  const compositeColor = (foreground, background) => {
+    const alpha = foreground.alpha + background.alpha * (1 - foreground.alpha);
+    if (alpha <= .001) return { red: 255, green: 255, blue: 255, alpha: 1 };
+    return {
+      red: (foreground.red * foreground.alpha + background.red * background.alpha * (1 - foreground.alpha)) / alpha,
+      green: (foreground.green * foreground.alpha + background.green * background.alpha * (1 - foreground.alpha)) / alpha,
+      blue: (foreground.blue * foreground.alpha + background.blue * background.alpha * (1 - foreground.alpha)) / alpha,
+      alpha
+    };
+  };
+  const internalSurfaceSelector = '[data-responsiver-inspector-overlay], [data-responsiver-composer-active], [data-responsiver-bridge]';
+  const isResponsiverSurface = (element) => {
+    let current = element;
+    const visited = new Set();
+    while (current instanceof Element && !visited.has(current)) {
+      visited.add(current);
+      if (current.matches(internalSurfaceSelector)) return true;
+      const root = current.getRootNode();
+      current = current.parentElement || (root instanceof ShadowRoot ? root.host : null);
+    }
+    return false;
+  };
+  const paintedElementsAt = (x, y) => {
+    const result = [];
+    const seen = new Set();
+    const visit = (root, depth = 0) => {
+      if (depth > 8 || typeof root.elementsFromPoint !== 'function') return;
+      for (const element of root.elementsFromPoint(x, y)) {
+        if (!(element instanceof Element) || seen.has(element) || isResponsiverSurface(element)) continue;
+        if (element.shadowRoot) visit(element.shadowRoot, depth + 1);
+        if (!seen.has(element)) { seen.add(element); result.push(element); }
+      }
+    };
+    visit(document);
+    return result;
+  };
+  const sampledThemeSurface = (declaredScheme) => {
+    const width = Math.max(1, document.documentElement.clientWidth || innerWidth);
+    const height = Math.max(1, document.documentElement.clientHeight || innerHeight);
+    const exclusiveDark = /dark/i.test(declaredScheme) && !/light/i.test(declaredScheme);
+    const fallback = exclusiveDark
+      ? { red: 18, green: 18, blue: 18, alpha: 1 }
+      : { red: 255, green: 255, blue: 255, alpha: 1 };
+    const rootStyle = getComputedStyle(document.documentElement);
+    const bodyStyle = document.body ? getComputedStyle(document.body) : null;
+    const rootLayer = colorChannels(rootStyle.backgroundColor);
+    const rootImage = rootStyle.backgroundImage !== 'none';
+    const bodyLayer = bodyStyle ? colorChannels(bodyStyle.backgroundColor) : null;
+    const bodyImage = Boolean(bodyStyle && bodyStyle.backgroundImage !== 'none');
+    const bodyPropagates = !rootImage && (!rootLayer || rootLayer.alpha <= .01);
+    let canvasColor = { ...fallback };
+    let canvasUnresolved = false;
+    if (bodyPropagates) {
+      if (bodyLayer && bodyLayer.alpha > .01) canvasColor = compositeColor(bodyLayer, canvasColor);
+      canvasUnresolved = bodyImage;
+    } else {
+      if (rootLayer && rootLayer.alpha > .01) canvasColor = compositeColor(rootLayer, canvasColor);
+      canvasUnresolved = rootImage;
+    }
+    const samples = [];
+    for (let row = 0; row < 5; row += 1) {
+      for (let column = 0; column < 5; column += 1) {
+        const x = Math.min(width - 1, Math.max(0, (column + .5) * width / 5));
+        const y = Math.min(height - 1, Math.max(0, (row + .5) * height / 5));
+        const elements = paintedElementsAt(x, y);
+        let color = { ...canvasColor };
+        let unresolved = canvasUnresolved;
+        for (const element of [...elements].reverse()) {
+          if (!(element instanceof Element) || isResponsiverSurface(element) || element === document.documentElement || (bodyPropagates && element === document.body)) continue;
+          const style = getComputedStyle(element);
+          if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) <= .01) continue;
+          const layer = colorChannels(style.backgroundColor);
+          const opacity = Math.max(0, Math.min(1, Number(style.opacity) || 1));
+          const effectiveLayer = layer ? { ...layer, alpha: layer.alpha * opacity } : null;
+          if (effectiveLayer && effectiveLayer.alpha >= .99) unresolved = false;
+          if (effectiveLayer && effectiveLayer.alpha > .01) color = compositeColor(effectiveLayer, color);
+          if (style.backgroundImage !== 'none') unresolved = true;
+        }
+        samples.push({ color, unresolved });
+      }
+    }
+    const reliableSamples = samples.filter((sample) => !sample.unresolved);
+    const values = reliableSamples.map((sample) => luminance('rgb(' + Math.round(sample.color.red) + ', ' + Math.round(sample.color.green) + ', ' + Math.round(sample.color.blue) + ')')).filter((value) => value !== null);
+    const darkSamples = values.filter((value) => value < .42).length;
+    const lightSamples = values.filter((value) => value > .58).length;
+    const decisive = darkSamples + lightSamples;
+    const reliableCoverage = reliableSamples.length / 25;
+    const detected = reliableSamples.length >= 13 && decisive >= 13 && darkSamples >= Math.ceil(decisive * .56)
+      ? 'dark'
+      : reliableSamples.length >= 13 && decisive >= 13 && lightSamples >= Math.ceil(decisive * .56)
+        ? 'light'
+        : 'unknown';
+    const matching = reliableSamples.map((sample) => sample.color).filter((sample) => {
+      const value = luminance('rgb(' + Math.round(sample.red) + ', ' + Math.round(sample.green) + ', ' + Math.round(sample.blue) + ')');
+      return detected === 'dark' ? value !== null && value < .42 : detected === 'light' ? value !== null && value > .58 : value !== null;
+    });
+    const representative = matching.length ? matching.reduce((result, sample) => ({
+      red: result.red + sample.red / matching.length,
+      green: result.green + sample.green / matching.length,
+      blue: result.blue + sample.blue / matching.length
+    }), { red: 0, green: 0, blue: 0 }) : { red: 255, green: 255, blue: 255 };
+    return {
+      detected,
+      confidence: decisive ? Math.round(Math.abs(darkSamples - lightSamples) / decisive * reliableCoverage * 100) / 100 : 0,
+      darkSamples,
+      lightSamples,
+      unresolvedSamples: samples.length - reliableSamples.length,
+      background: 'rgb(' + Math.round(representative.red) + ', ' + Math.round(representative.green) + ', ' + Math.round(representative.blue) + ')'
+    };
   };
   const themeState = () => {
     const rootStyle = getComputedStyle(document.documentElement);
     const bodyStyle = document.body ? getComputedStyle(document.body) : null;
-    const bodyBackground = bodyStyle?.backgroundColor ?? '';
-    const background = transparent(bodyBackground) ? rootStyle.backgroundColor : bodyBackground;
     const declaredScheme = rootStyle.colorScheme || document.querySelector('meta[name="color-scheme"]')?.getAttribute('content') || '';
-    const surfaceLuminance = luminance(background);
+    const sampled = sampledThemeSurface(declaredScheme);
     const declaresDark = /dark/i.test(declaredScheme);
     const declaresLight = /light/i.test(declaredScheme);
-    const detected = surfaceLuminance !== null
-      ? surfaceLuminance < .42 ? 'dark' : surfaceLuminance > .58 ? 'light' : 'unknown'
-      : declaresDark && !declaresLight ? 'dark' : declaresLight && !declaresDark ? 'light' : 'unknown';
-    return { background, color: bodyStyle?.color ?? rootStyle.color, declaredScheme, detected };
+    const detected = sampled.detected === 'unknown'
+      ? declaresDark && !declaresLight ? 'dark' : declaresLight && !declaresDark ? 'light' : 'unknown'
+      : sampled.detected;
+    return { ...sampled, color: bodyStyle?.color ?? rootStyle.color, declaredScheme, detected };
   };
 	  const state = (requestId) => {
 	    const theme = themeState();
@@ -900,8 +1018,14 @@ const bridge = `<style data-responsiver-bridge-style>
       return;
     }
     target.setAttribute(revealAttribute, '');
-    target.scrollIntoView({ block: 'center', inline: 'center', behavior: reducedMotion ? 'auto' : 'smooth' });
-    const rectangle = target.getBoundingClientRect();
+    let rectangle = target.getBoundingClientRect();
+    const visibleWidth = Math.max(0, Math.min(innerWidth, rectangle.right) - Math.max(0, rectangle.left));
+    const visibleHeight = Math.max(0, Math.min(innerHeight, rectangle.bottom) - Math.max(0, rectangle.top));
+    const visibleRatio = visibleWidth * visibleHeight / Math.max(1, rectangle.width * rectangle.height);
+    if (visibleRatio < .75) {
+      target.scrollIntoView({ block: 'center', inline: 'center', behavior: reducedMotion ? 'auto' : 'smooth' });
+      rectangle = target.getBoundingClientRect();
+    }
     const result = {
       requestedSelector,
       resolvedSelector,
@@ -916,7 +1040,7 @@ const bridge = `<style data-responsiver-bridge-style>
   const inspectorStyleProperties = Object.freeze([
     'display', 'position', 'box-sizing', 'width', 'height', 'min-width', 'min-height', 'max-width', 'max-height',
     'margin-top', 'margin-right', 'margin-bottom', 'margin-left', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
-    'gap', 'row-gap', 'column-gap', 'flex-direction', 'flex-wrap', 'justify-content', 'align-items', 'align-self', 'justify-self', 'order',
+    'gap', 'row-gap', 'column-gap', 'flex-direction', 'flex-wrap', 'flex-grow', 'flex-shrink', 'flex-basis', 'justify-content', 'align-items', 'align-self', 'justify-self', 'order',
     'grid-template-columns', 'grid-template-rows', 'font-family', 'font-size', 'font-weight', 'line-height', 'letter-spacing',
     'text-align', 'white-space', 'color', 'background-color', 'border-top-width', 'border-top-style', 'border-top-color',
     'border-radius', 'overflow-x', 'overflow-y', 'opacity', 'visibility', 'z-index', 'transform', 'translate'
@@ -927,7 +1051,15 @@ const bridge = `<style data-responsiver-bridge-style>
   let inspectorHoverOverlay = null;
   let inspectorSelectedOverlay = null;
   let inspectorFrame = 0;
-  const inspectorClean = (value, limit) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, limit);
+  let interactionRevision = 0;
+  const acceptInteractionRevision = (value) => {
+    const revision = Number(value);
+    if (!Number.isSafeInteger(revision) || revision < 1) return true;
+    if (revision < interactionRevision) return false;
+    interactionRevision = revision;
+    return true;
+  };
+  const inspectorClean = (value, limit) => String(value || '').replace(/\\s+/g, ' ').trim().slice(0, limit);
   const inspectorRound = (value) => {
     const numeric = Number(value);
     if (!Number.isFinite(numeric)) return 0;
@@ -1126,34 +1258,90 @@ const bridge = `<style data-responsiver-bridge-style>
   let designSelected = null;
   let designGesture = null;
   let designPaintFrame = 0;
-  let designPendingRect = null;
+  const designPendingGestures = new Map();
+  const designSyncedRequests = new Set();
+  let designVisualRequestId = '';
   let designFreezeStyle = null;
   const DESIGN_PROTOCOL = 1;
   const DESIGN_MAX_PAYLOAD_BYTES = 32768;
   const designClean = (value, limit) => inspectorClean(value, limit);
   const designMessage = (type, payload = {}) => {
-    if (!designPort || !designSessionId) return;
+    if (!designPort || !designSessionId) return false;
     const data = { protocol: DESIGN_PROTOCOL, sessionId: designSessionId, documentId, revision: designRevision, type, ...payload };
     try {
-      if (nativeStringify(data).length > DESIGN_MAX_PAYLOAD_BYTES) return;
+      if (nativeStringify(data).length > DESIGN_MAX_PAYLOAD_BYTES) {
+        const rejected = { protocol: DESIGN_PROTOCOL, sessionId: designSessionId, documentId, revision: designRevision, type: 'design-rejected', reason: 'payload-too-large' };
+        nativeApply(nativeMessagePortPostMessage, designPort, [rejected]);
+        return false;
+      }
       nativeApply(nativeMessagePortPostMessage, designPort, [data]);
-    } catch {}
+      return true;
+    } catch { return false; }
+  };
+  const designSyncPayload = (value) => {
+    const requestId = designClean(value?.requestId, 80);
+    const gestureIds = Array.isArray(value?.gestureIds)
+      ? [...new Set(value.gestureIds.map((entry) => designClean(entry, 80)).filter(Boolean))].slice(0, 200)
+      : [];
+    return { requestId, gestureIds };
+  };
+  const latestDesignPendingGesture = (element) => {
+    let latest = null;
+    for (const pending of designPendingGestures.values()) {
+      if (pending.element === element) latest = pending;
+    }
+    return latest;
+  };
+  const splitDesignCssComponents = (value) => {
+    const parts = [];
+    let depth = 0;
+    let start = 0;
+    for (let index = 0; index < value.length; index += 1) {
+      const character = value[index];
+      if (character === '(') depth += 1;
+      if (character === ')') depth = Math.max(0, depth - 1);
+      if (/\\s/.test(character) && depth === 0) {
+        const part = value.slice(start, index).trim();
+        if (part) parts.push(part);
+        while (index + 1 < value.length && /\\s/.test(value[index + 1])) index += 1;
+        start = index + 1;
+      }
+    }
+    const tail = value.slice(start).trim();
+    if (tail) parts.push(tail);
+    return parts;
+  };
+  const parseTranslateComponent = (value) => {
+    const simple = value.match(/^(-?(?:\\d+\\.?\\d*|\\.\\d+))(px|%)$/i);
+    if (simple) return simple[2] === '%' ? { percent: Number.parseFloat(simple[1]), pixels: 0 } : { percent: 0, pixels: Number.parseFloat(simple[1]) };
+    const calculated = value.match(/^calc\\(\\s*(-?(?:\\d+\\.?\\d*|\\.\\d+))%\\s*([+-])\\s*((?:\\d+\\.?\\d*|\\.\\d+))px\\s*\\)$/i);
+    if (!calculated) return null;
+    return { percent: Number.parseFloat(calculated[1]), pixels: Number.parseFloat(calculated[3]) * (calculated[2] === '-' ? -1 : 1) };
   };
   const parseTranslate = (value) => {
     const normalized = String(value || '').trim();
-    if (!normalized || normalized === 'none') return { x: 0, y: 0 };
-    const match = normalized.match(/^(-?(?:\\d+\\.?\\d*|\\.\\d+)px)(?:\\s+(-?(?:\\d+\\.?\\d*|\\.\\d+)px))?$/i);
-    if (!match) return null;
-    return { x: Number.parseFloat(match[1]), y: Number.parseFloat(match[2] || '0') };
+    if (!normalized || normalized === 'none') return { x: { percent: 0, pixels: 0 }, y: { percent: 0, pixels: 0 } };
+    const parts = splitDesignCssComponents(normalized);
+    if (parts.length < 1 || parts.length > 2) return null;
+    const x = parseTranslateComponent(parts[0]);
+    const y = parseTranslateComponent(parts[1] || '0px');
+    return x && y ? { x, y } : null;
   };
-  const formatTranslate = (x, y) => {
-    const roundedX = Math.round(x);
-    const roundedY = Math.round(y);
-    return roundedX === 0 && roundedY === 0 ? 'none' : roundedX + 'px ' + roundedY + 'px';
+  const formatTranslateComponent = (axis, delta) => {
+    const percent = Math.round(axis.percent * 1000) / 1000;
+    const pixels = Math.round((axis.pixels + delta) * 1000) / 1000;
+    if (!percent) return pixels + 'px';
+    if (!pixels) return percent + '%';
+    return 'calc(' + percent + '% ' + (pixels < 0 ? '- ' + Math.abs(pixels) : '+ ' + pixels) + 'px)';
+  };
+  const formatTranslate = (base, deltaX, deltaY) => {
+    const x = formatTranslateComponent(base.x, deltaX);
+    const y = formatTranslateComponent(base.y, deltaY);
+    return x === '0px' && y === '0px' ? 'none' : x + ' ' + y;
   };
   const designSelectable = (element) => {
-    if (!isInspectable(element) || parent !== top || /^(?:html|body|iframe|object|embed|input|option|select|textarea)$/.test(element.tagName.toLowerCase())) return false;
-    if (element.closest('[contenteditable], input, select, textarea')) return false;
+    if (!isInspectable(element) || parent !== top || /^(?:html|body|iframe|object|embed|option)$/.test(element.tagName.toLowerCase())) return false;
+    if (element.closest('[contenteditable]')) return false;
     const rectangle = element.getBoundingClientRect();
     return rectangle.width >= 3 && rectangle.height >= 3 && rectangle.width <= 100000 && rectangle.height <= 100000;
   };
@@ -1164,6 +1352,16 @@ const bridge = `<style data-responsiver-bridge-style>
       if (node.nodeType === Node.TEXT_NODE && /\\S/.test(node.textContent || '')) return true;
     }
     return false;
+  };
+  const designMinimumTextHeight = (element, style) => {
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    const content = range.getBoundingClientRect();
+    range.detach();
+    const inset = ['paddingTop', 'paddingBottom', 'borderTopWidth', 'borderBottomWidth']
+      .reduce((total, property) => total + (Number.parseFloat(style[property]) || 0), 0);
+    const lineHeight = Number.parseFloat(style.lineHeight) || (Number.parseFloat(style.fontSize) || 16) * 1.2;
+    return Math.ceil(Math.max(content.height, lineHeight) + inset);
   };
   const nearbyDesignChildren = (parentElement, selectedElement, limit, includeSelected = false) => {
     if (!parentElement || !selectedElement || limit < 1) return [];
@@ -1184,11 +1382,50 @@ const bridge = `<style data-responsiver-bridge-style>
     }
     return result;
   };
+  const positionalDesignSelector = (element) => {
+    const parts = [];
+    let current = element;
+    while (current instanceof Element && parts.length < 16) {
+      if (current.id) {
+        parts.unshift('#' + CSS.escape(current.id));
+        break;
+      }
+      if (current === document.body) {
+        parts.unshift('body');
+        break;
+      }
+      const parentElement = current.parentElement;
+      if (!parentElement) break;
+      const siblings = [...parentElement.children];
+      const index = siblings.indexOf(current);
+      parts.unshift(current.tagName.toLowerCase() + (index >= 0 ? ':nth-child(' + (index + 1) + ')' : ''));
+      current = parentElement;
+    }
+    const selector = parts.join(' > ');
+    if (!selector || selector.length > VISUAL_MAX_SELECTOR_LENGTH) return null;
+    try { return document.querySelectorAll(selector).length === 1 ? selector : null; } catch { return null; }
+  };
   const designSnapshot = (element, detailed = true) => {
     if (!designSelectable(element)) return null;
-    const payload = inspectorPayload(element, true);
-    if (!payload || payload.occurrences !== 1 || payload.selector === '*' || payload.selector.includes(' >>> ')) return null;
+    let payload = inspectorPayload(element, true);
+    if (!payload || payload.selector === '*' || payload.selector.includes(' >>> ')) return null;
+    if (payload.occurrences !== 1) {
+      const selector = positionalDesignSelector(element);
+      if (!selector) return null;
+      payload = { ...payload, selector, occurrences: 1 };
+    }
     return { ...payload, route: designClean(location.pathname, VISUAL_MAX_ROUTE_LENGTH) || '/', styles: detailed ? payload.styles : { order: payload.styles.order || '0', translate: payload.styles.translate || 'none' }, text: '', role: null, ariaLabel: null, editable: true, insideFrame: false };
+  };
+  const preferredDesignTarget = (target, event) => {
+    if (!(target instanceof Element)) return null;
+    if (!event.altKey && designSelected?.isConnected && designSelected.contains(target)) return designSelected;
+    if (!event.altKey) {
+      const control = target.closest('button, a[href], [role="button"], [role="link"], input, select, textarea');
+      if (control && designSelectable(control)) return control;
+      const media = target.closest('img, video, canvas, svg');
+      if (media && designSelectable(media)) return media;
+    }
+    return target;
   };
   const designTargetFromEvent = (event) => {
     const path = typeof event.composedPath === 'function' ? event.composedPath() : [event.target];
@@ -1246,7 +1483,8 @@ const bridge = `<style data-responsiver-bridge-style>
       designHost.style.setProperty('pointer-events', 'auto', 'important');
       event.preventDefault();
       event.stopImmediatePropagation();
-      if (!target || !selectDesignTarget(target, true)) return;
+      const preferredTarget = preferredDesignTarget(target, event);
+      if (!preferredTarget || !selectDesignTarget(preferredTarget, true)) return;
       beginDesignGesture('move', '', event);
     }, true);
   };
@@ -1275,12 +1513,12 @@ const bridge = `<style data-responsiver-bridge-style>
     if (!designActive || !designSelected?.isConnected) {
       if (designSelected && !designSelected.isConnected) designMessage('design-invalidated', { reason: 'target-detached' });
       designSelected = null;
-      designPendingRect = null;
       paintDesignRect(null);
       return;
     }
+    const selectedPending = latestDesignPendingGesture(designSelected);
     if (designGesture) paintDesignRect(designGesture.previewRect, false);
-    else if (designPendingRect) paintDesignRect(designPendingRect, true);
+    else if (selectedPending) paintDesignRect(selectedPending.rect, true);
     else paintDesignRect(designSelected.getBoundingClientRect(), false);
   };
   const scheduleDesignPaint = () => {
@@ -1294,7 +1532,6 @@ const bridge = `<style data-responsiver-bridge-style>
       return false;
     }
     designSelected = element;
-    designPendingRect = null;
     scheduleDesignPaint();
     if (notify) designMessage('design-selection', { selection: snapshot });
     return true;
@@ -1313,7 +1550,6 @@ const bridge = `<style data-responsiver-bridge-style>
     try { designGesture.capture?.releasePointerCapture?.(designGesture.pointerId); } catch {}
     designGesture = null;
     clearDesignGuides();
-    if (cancelled) designPendingRect = null;
     scheduleDesignPaint();
   };
   const stopDesign = (reason = 'request') => {
@@ -1322,7 +1558,6 @@ const bridge = `<style data-responsiver-bridge-style>
     finishDesignGesture(true);
     designActive = false;
     designSelected = null;
-    designPendingRect = null;
     designHost?.remove();
     designFreezeStyle?.remove();
     designHost = null;
@@ -1377,12 +1612,13 @@ const bridge = `<style data-responsiver-bridge-style>
     if (!snapshot) return;
     event.preventDefault();
     event.stopImmediatePropagation();
-    const rectangle = designSelected.getBoundingClientRect();
+    const actualRectangle = designSelected.getBoundingClientRect();
+    const pendingRectangle = latestDesignPendingGesture(designSelected)?.rect;
+    const rectangle = pendingRectangle || actualRectangle;
     const parentElement = designSelected.parentElement;
     const parentRect = parentElement?.getBoundingClientRect() || { left: 0, top: 0, right: innerWidth, bottom: innerHeight, width: innerWidth, height: innerHeight };
     const capture = event.currentTarget instanceof Element ? event.currentTarget : designSelected;
     try { capture.setPointerCapture(event.pointerId); } catch {}
-    designPendingRect = null;
     designGesture = {
       id: 'gesture-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10),
       kind,
@@ -1391,6 +1627,7 @@ const bridge = `<style data-responsiver-bridge-style>
       capture,
       startX: event.clientX,
       startY: event.clientY,
+      actualStartRect: { left: actualRectangle.left, top: actualRectangle.top, right: actualRectangle.right, bottom: actualRectangle.bottom, width: actualRectangle.width, height: actualRectangle.height },
       startRect: { left: rectangle.left, top: rectangle.top, right: rectangle.right, bottom: rectangle.bottom, width: rectangle.width, height: rectangle.height },
       previewRect: { left: rectangle.left, top: rectangle.top, right: rectangle.right, bottom: rectangle.bottom, width: rectangle.width, height: rectangle.height },
       parentElement,
@@ -1411,10 +1648,12 @@ const bridge = `<style data-responsiver-bridge-style>
     gesture.moved = gesture.moved || Math.hypot(rawX, rawY) >= 2;
     const start = gesture.startRect;
     if (gesture.kind === 'move') {
-      const minimumX = gesture.parentRect.left - start.left;
-      const maximumX = gesture.parentRect.right - start.right;
-      const minimumY = gesture.parentRect.top - start.top;
-      const maximumY = gesture.parentRect.bottom - start.bottom;
+      const visibleX = Math.min(24, start.width / 2);
+      const visibleY = Math.min(24, start.height / 2);
+      const minimumX = visibleX - start.right;
+      const maximumX = innerWidth - visibleX - start.left;
+      const minimumY = visibleY - start.bottom;
+      const maximumY = innerHeight - visibleY - start.top;
       let deltaX = Math.min(maximumX, Math.max(minimumX, rawX));
       let deltaY = Math.min(maximumY, Math.max(minimumY, rawY));
       const snappedX = snapDesignAxis(start.left, start.width, deltaX, designSnapTargets(designSelected, gesture.parentElement, 'x'));
@@ -1431,11 +1670,9 @@ const bridge = `<style data-responsiver-bridge-style>
       let top = edge.includes('n') ? Math.min(start.bottom - 24, start.top + rawY) : start.top;
       let bottom = edge.includes('s') ? Math.max(start.top + 24, start.bottom + rawY) : start.bottom;
       const tag = designSelected.tagName.toLowerCase();
-      const textual = designTextual(designSelected);
       const replaced = /^(?:img|video|canvas|svg)$/.test(tag);
       const horizontal = edge.includes('e') || edge.includes('w');
       const vertical = edge.includes('n') || edge.includes('s');
-      if (textual && vertical) { top = start.top; bottom = start.bottom; }
       if (replaced && horizontal) {
         const ratio = start.width / Math.max(1, start.height);
         const height = (right - left) / ratio;
@@ -1480,8 +1717,11 @@ const bridge = `<style data-responsiver-bridge-style>
   };
   const sendDesignCommit = (kind, strategy, mutations, gestureId, warning, pendingRect) => {
     if (!mutations.length) return false;
-    designPendingRect = pendingRect || null;
-    designMessage('design-commit', { gestureId, kind, strategy, mutations, warning });
+    if (!designMessage('design-commit', { gestureId, kind, strategy, mutations, warning })) return false;
+    if (pendingRect && designSelected?.isConnected) {
+      designPendingGestures.set(gestureId, { rect: pendingRect, gestureId, kind, properties: mutations.map((mutation) => mutation.property), element: designSelected });
+      while (designPendingGestures.size > 200) designPendingGestures.delete(designPendingGestures.keys().next().value);
+    }
     scheduleDesignPaint();
     return true;
   };
@@ -1493,16 +1733,16 @@ const bridge = `<style data-responsiver-bridge-style>
     if (!gesture.moved || !designSelected?.isConnected) { finishDesignGesture(true); return; }
     const preview = gesture.previewRect;
     if (gesture.kind === 'move') {
-      const reordered = reorderDesignMutations(gesture, event);
+      const reordered = event.shiftKey ? reorderDesignMutations(gesture, event) : null;
       if (reordered) {
         sendDesignCommit('reorder', reordered.strategy, reordered.mutations, gesture.id, 'visual-order-only', preview);
       } else {
         const computed = getComputedStyle(designSelected);
         const base = parseTranslate(computed.translate);
         if (!base) { designMessage('design-rejected', { reason: 'existing-complex-transform' }); finishDesignGesture(true); return; }
-        const deltaX = Math.round(preview.left - gesture.startRect.left);
-        const deltaY = Math.round(preview.top - gesture.startRect.top);
-        const mutation = { target: gesture.snapshot, property: 'translate', before: computed.translate || 'none', after: formatTranslate(base.x + deltaX, base.y + deltaY) };
+        const deltaX = Math.round(preview.left - gesture.actualStartRect.left);
+        const deltaY = Math.round(preview.top - gesture.actualStartRect.top);
+        const mutation = { target: gesture.snapshot, property: 'translate', before: computed.translate || 'none', after: formatTranslate(base, deltaX, deltaY) };
         sendDesignCommit('move', 'flow-translate', [mutation], gesture.id, 'flow-preserved', preview);
       }
     } else {
@@ -1510,33 +1750,71 @@ const bridge = `<style data-responsiver-bridge-style>
       const base = parseTranslate(computed.translate);
       if (!base) { designMessage('design-rejected', { reason: 'existing-complex-transform' }); finishDesignGesture(true); return; }
       const tag = designSelected.tagName.toLowerCase();
-      const textual = designTextual(designSelected);
       const replaced = /^(?:img|video|canvas|svg)$/.test(tag);
+      const textual = designTextual(designSelected);
       const horizontal = gesture.edge.includes('e') || gesture.edge.includes('w');
       const vertical = gesture.edge.includes('n') || gesture.edge.includes('s');
-      if (textual && vertical && !horizontal) { designMessage('design-rejected', { reason: 'text-height-is-fluid' }); finishDesignGesture(true); return; }
+      const parentStyle = designSelected.parentElement ? getComputedStyle(designSelected.parentElement) : null;
+      const parentDisplay = parentStyle?.display || '';
+      const flexParent = /^(?:inline-)?flex$/.test(parentDisplay);
+      const flexColumn = flexParent && /^column/.test(parentStyle?.flexDirection || '');
+      const nextWidth = Math.round(preview.width);
+      const nextHeight = Math.round(preview.height);
+      if (vertical && textual && !replaced && nextHeight < designMinimumTextHeight(designSelected, computed)) {
+        designMessage('design-rejected', { reason: 'text-height-is-fluid', gestureId: gesture.id });
+        finishDesignGesture(true);
+        return;
+      }
       const mutations = [{ target: gesture.snapshot, property: 'box-sizing', before: computed.boxSizing, after: 'border-box' }];
-      if (horizontal || (replaced && vertical)) mutations.push({ target: gesture.snapshot, property: 'width', before: computed.width, after: 'min(' + Math.round(preview.width) + 'px, 100%)' });
-      if (vertical && !textual) mutations.push({ target: gesture.snapshot, property: 'height', before: computed.height, after: replaced ? 'auto' : Math.round(preview.height) + 'px' });
-      const shiftX = Math.round(preview.left - gesture.startRect.left);
-      const shiftY = textual ? 0 : Math.round(preview.top - gesture.startRect.top);
-      if (shiftX || shiftY) mutations.push({ target: gesture.snapshot, property: 'translate', before: computed.translate || 'none', after: formatTranslate(base.x + shiftX, base.y + shiftY) });
-      if (mutations.length === 1) { designMessage('design-rejected', { reason: 'text-height-is-fluid' }); finishDesignGesture(true); return; }
-      sendDesignCommit('resize', 'responsive-size', mutations, gesture.id, replaced ? undefined : 'fixed-height', preview);
+      if (computed.display === 'inline') mutations.push({ target: gesture.snapshot, property: 'display', before: computed.display, after: 'inline-block' });
+      if (horizontal || (replaced && vertical)) {
+        const minWidth = Number.parseFloat(computed.minWidth);
+        const maxWidth = Number.parseFloat(computed.maxWidth);
+        if (Number.isFinite(minWidth) && minWidth > nextWidth) mutations.push({ target: gesture.snapshot, property: 'min-width', before: computed.minWidth, after: '0' });
+        if (computed.maxWidth !== 'none' && Number.isFinite(maxWidth) && maxWidth < nextWidth) mutations.push({ target: gesture.snapshot, property: 'max-width', before: computed.maxWidth, after: 'none' });
+        mutations.push({ target: gesture.snapshot, property: 'width', before: computed.width, after: 'min(' + nextWidth + 'px, calc(100vw - 24px))' });
+      }
+      if (vertical) {
+        const minHeight = Number.parseFloat(computed.minHeight);
+        const maxHeight = Number.parseFloat(computed.maxHeight);
+        if (computed.maxHeight !== 'none' && Number.isFinite(maxHeight) && maxHeight < nextHeight) mutations.push({ target: gesture.snapshot, property: 'max-height', before: computed.maxHeight, after: 'none' });
+        if (textual && !replaced) {
+          mutations.push({ target: gesture.snapshot, property: 'height', before: computed.height, after: 'auto' });
+          mutations.push({ target: gesture.snapshot, property: 'min-height', before: computed.minHeight, after: nextHeight + 'px' });
+        } else {
+          if (Number.isFinite(minHeight) && minHeight > nextHeight) mutations.push({ target: gesture.snapshot, property: 'min-height', before: computed.minHeight, after: '0' });
+          mutations.push({ target: gesture.snapshot, property: 'height', before: computed.height, after: replaced ? 'auto' : nextHeight + 'px' });
+        }
+      }
+      const changesFlexMainSize = flexParent && (flexColumn ? vertical : horizontal || (replaced && vertical));
+      if (changesFlexMainSize) {
+        const flexBasis = flexColumn ? nextHeight + 'px' : 'min(' + nextWidth + 'px, calc(100vw - 24px))';
+        mutations.push({ target: gesture.snapshot, property: 'flex-basis', before: computed.flexBasis, after: flexBasis });
+        if (Number.parseFloat(computed.flexGrow) !== 0) mutations.push({ target: gesture.snapshot, property: 'flex-grow', before: computed.flexGrow, after: '0' });
+        if (Number.parseFloat(computed.flexShrink) !== 0) mutations.push({ target: gesture.snapshot, property: 'flex-shrink', before: computed.flexShrink, after: '0' });
+      }
+      const shiftX = Math.round(preview.left - gesture.actualStartRect.left);
+      const shiftY = Math.round(preview.top - gesture.actualStartRect.top);
+      if (shiftX || shiftY) mutations.push({ target: gesture.snapshot, property: 'translate', before: computed.translate || 'none', after: formatTranslate(base, shiftX, shiftY) });
+      sendDesignCommit('resize', 'responsive-size', mutations, gesture.id, replaced || textual ? undefined : 'fixed-height', preview);
     }
     finishDesignGesture(false);
   };
   const nudgeDesign = (event) => {
     if (!designActive || !designSelected || !/^Arrow/.test(event.key)) return false;
     const computed = getComputedStyle(designSelected);
+    const rectangle = designSelected.getBoundingClientRect();
+    const pendingRectangle = latestDesignPendingGesture(designSelected)?.rect || rectangle;
     const base = parseTranslate(computed.translate);
     const snapshot = designSnapshot(designSelected);
     if (!base || !snapshot) return false;
     const step = event.shiftKey ? 10 : 1;
     const deltaX = event.key === 'ArrowLeft' ? -step : event.key === 'ArrowRight' ? step : 0;
     const deltaY = event.key === 'ArrowUp' ? -step : event.key === 'ArrowDown' ? step : 0;
-    const rectangle = designSelected.getBoundingClientRect();
-    sendDesignCommit('nudge', 'flow-translate', [{ target: snapshot, property: 'translate', before: computed.translate || 'none', after: formatTranslate(base.x + deltaX, base.y + deltaY) }], 'gesture-key-' + Date.now().toString(36), 'flow-preserved', { left: rectangle.left + deltaX, top: rectangle.top + deltaY, right: rectangle.right + deltaX, bottom: rectangle.bottom + deltaY, width: rectangle.width, height: rectangle.height });
+    const pendingOffsetX = Math.round(pendingRectangle.left - rectangle.left);
+    const pendingOffsetY = Math.round(pendingRectangle.top - rectangle.top);
+    const after = formatTranslate(base, pendingOffsetX + deltaX, pendingOffsetY + deltaY);
+    sendDesignCommit('nudge', 'flow-translate', [{ target: snapshot, property: 'translate', before: computed.translate || 'none', after }], 'gesture-key-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8), 'flow-preserved', { left: pendingRectangle.left + deltaX, top: pendingRectangle.top + deltaY, right: pendingRectangle.right + deltaX, bottom: pendingRectangle.bottom + deltaY, width: pendingRectangle.width, height: pendingRectangle.height });
     return true;
   };
   addEventListener('message', (event) => {
@@ -1545,6 +1823,9 @@ const bridge = `<style data-responsiver-bridge-style>
     if (!event.isTrusted || readMessageEventSource(event) !== parent || !data || data.channel !== channel || data.type !== 'design-connect' || data.protocol !== DESIGN_PROTOCOL || typeof data.sessionId !== 'string' || !transferredPorts?.[0]) return;
     nativeApply(nativeEventStopImmediatePropagation, event, []);
     if (designPort) nativeApply(nativeMessagePortClose, designPort, []);
+    designPendingGestures.clear();
+    designSyncedRequests.clear();
+    designVisualRequestId = '';
     designPort = transferredPorts[0];
     designSessionId = designClean(data.sessionId, 80);
     designRevision = 0;
@@ -1552,10 +1833,45 @@ const bridge = `<style data-responsiver-bridge-style>
       const command = readMessageEventData(portEvent);
       if (!command || command.protocol !== DESIGN_PROTOCOL || command.sessionId !== designSessionId || !Number.isSafeInteger(command.revision) || command.revision < designRevision) return;
       designRevision = command.revision;
-      if (command.type === 'design-start') startDesign();
-      if (command.type === 'design-stop') stopDesign('request');
+      if (command.type === 'design-start' && acceptInteractionRevision(command.interactionRevision)) startDesign();
+      if (command.type === 'design-stop' && acceptInteractionRevision(command.interactionRevision)) stopDesign('request');
       if (command.type === 'design-select') selectDesignSelector(command.selector);
-      if (command.type === 'design-sync') { designPendingRect = null; scheduleDesignPaint(); }
+      if (command.type === 'design-discard') {
+        const discarded = designSyncPayload(command);
+        for (const gestureId of discarded.gestureIds) designPendingGestures.delete(gestureId);
+        scheduleDesignPaint();
+      }
+      if (command.type === 'design-sync') {
+        const sync = designSyncPayload(command);
+        if (!sync.requestId || sync.requestId !== designVisualRequestId || designSyncedRequests.has(sync.requestId)) return;
+        designSyncedRequests.add(sync.requestId);
+        while (designSyncedRequests.size > 200) designSyncedRequests.delete(designSyncedRequests.values().next().value);
+        const pending = sync.gestureIds.map((gestureId) => designPendingGestures.get(gestureId)).filter(Boolean);
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          if (sync.requestId !== designVisualRequestId) return;
+          for (const entry of pending) {
+            if (designPendingGestures.get(entry.gestureId) !== entry) continue;
+            if (!entry.element?.isConnected) {
+              designMessage('design-rejected', { reason: 'target-detached', gestureId: entry.gestureId, requestId: sync.requestId });
+              designPendingGestures.delete(entry.gestureId);
+              continue;
+            }
+            const actual = entry.element.getBoundingClientRect();
+            const expected = entry.rect;
+            const changedWidth = entry.properties.some((property) => property === 'width' || property === 'min-width' || property === 'max-width' || property === 'flex-basis');
+            const changedHeight = entry.properties.some((property) => property === 'height' || property === 'min-height' || property === 'max-height');
+            const changedPosition = entry.kind !== 'resize' || entry.properties.includes('translate');
+            const mismatch = changedPosition && (Math.abs(actual.left - expected.left) > 5 || Math.abs(actual.top - expected.top) > 5) ||
+              (entry.kind !== 'resize' || changedWidth) && Math.abs(actual.width - expected.width) > 5 ||
+              (entry.kind !== 'resize' || changedHeight) && Math.abs(actual.height - expected.height) > 5;
+            designMessage(mismatch ? 'design-rejected' : 'design-verified', mismatch
+              ? { reason: 'layout-still-constrained', gestureId: entry.gestureId, requestId: sync.requestId }
+              : { gestureId: entry.gestureId, requestId: sync.requestId });
+            designPendingGestures.delete(entry.gestureId);
+          }
+          scheduleDesignPaint();
+        }));
+      }
       if (command.type === 'design-cancel') finishDesignGesture(true);
     }]);
     nativeApply(nativeMessagePortStart, designPort, []);
@@ -1568,7 +1884,8 @@ const bridge = `<style data-responsiver-bridge-style>
     const target = designTargetFromEvent(event);
     event.preventDefault();
     event.stopImmediatePropagation();
-    if (!target || !selectDesignTarget(target, true)) return;
+    const preferredTarget = preferredDesignTarget(target, event);
+    if (!preferredTarget || !selectDesignTarget(preferredTarget, true)) return;
     beginDesignGesture('move', '', event);
   }, true);
   document.addEventListener('pointermove', updateDesignGesture, true);
@@ -1588,15 +1905,16 @@ const bridge = `<style data-responsiver-bridge-style>
   }
   addEventListener('scroll', scheduleDesignPaint, true);
   addEventListener('blur', () => { if (designGesture) finishDesignGesture(true); });
-  const applyVisualStylePreview = (value) => {
+  const applyVisualStylePreview = (value, request) => {
+    const sync = designSyncPayload(request);
     if (typeof value !== 'string') {
-      message('visual-style-preview-result', { applied: false, reason: 'invalid-css' });
+      message('visual-style-preview-result', { applied: false, reason: 'invalid-css', ...sync });
       return;
     }
     let byteLength = VISUAL_MAX_CSS_BYTES + 1;
     if (value.length <= VISUAL_MAX_CSS_BYTES) byteLength = new TextEncoder().encode(value).byteLength;
     if (byteLength > VISUAL_MAX_CSS_BYTES) {
-      message('visual-style-preview-result', { applied: false, reason: 'css-too-large', maxBytes: VISUAL_MAX_CSS_BYTES });
+      message('visual-style-preview-result', { applied: false, reason: 'css-too-large', maxBytes: VISUAL_MAX_CSS_BYTES, ...sync });
       return;
     }
     let style = document.querySelector('style[data-responsiver-visual-preview]');
@@ -1606,15 +1924,16 @@ const bridge = `<style data-responsiver-bridge-style>
       (document.head || document.documentElement).append(style);
     }
     style.textContent = value;
-    designPendingRect = null;
+    designVisualRequestId = sync.requestId;
     requestAnimationFrame(() => { schedule(); scheduleInspectorHighlights(); scheduleDesignPaint(); });
-    message('visual-style-preview-result', { applied: true, bytes: byteLength });
+    message('visual-style-preview-result', { applied: true, bytes: byteLength, ...sync });
   };
-  const clearVisualStylePreview = () => {
+  const clearVisualStylePreview = (request) => {
+    const sync = designSyncPayload(request);
     document.querySelector('style[data-responsiver-visual-preview]')?.remove();
-    designPendingRect = null;
+    designVisualRequestId = sync.requestId;
     requestAnimationFrame(() => { schedule(); scheduleInspectorHighlights(); scheduleDesignPaint(); });
-    message('visual-style-clear-result', { cleared: true });
+    message('visual-style-clear-result', { cleared: true, ...sync });
   };
   document.addEventListener('pointermove', (event) => {
     if (!inspectorActive) return;
@@ -1673,10 +1992,10 @@ const bridge = `<style data-responsiver-bridge-style>
     if (data.type === 'audit') audit();
     if (data.type === 'set-theme-preview') applyThemePreview(data.theme);
     if (data.type === 'clear-theme-preview') clearThemePreview();
-    if (data.type === 'inspector-start') startInspector();
-    if (data.type === 'inspector-stop') stopInspector();
-    if (data.type === 'visual-style-preview') applyVisualStylePreview(data.css);
-    if (data.type === 'visual-style-clear') clearVisualStylePreview();
+    if (data.type === 'inspector-start' && acceptInteractionRevision(data.interactionRevision)) startInspector();
+    if (data.type === 'inspector-stop' && acceptInteractionRevision(data.interactionRevision)) stopInspector();
+    if (data.type === 'visual-style-preview') applyVisualStylePreview(data.css, data);
+    if (data.type === 'visual-style-clear') clearVisualStylePreview(data);
     if (data.type === 'reveal' || data.type === 'focus-selector') {
       reveal(data.selector);
       if (data.type === 'focus-selector') selectInspectorTarget(data.selector);
@@ -1694,7 +2013,8 @@ const bridge = `<style data-responsiver-bridge-style>
   history.replaceState = (...args) => { replaceState(...args); schedule(); };
   addEventListener('popstate', schedule);
   addEventListener('hashchange', schedule);
-  addEventListener('resize', schedule);
+  addEventListener('resize', () => { schedule(); scheduleDesignPaint(); });
+  addEventListener('load', scheduleDesignPaint, true);
   addEventListener('keydown', (event) => {
     const key = event.key.toLowerCase();
     const inspectorShortcut = event.key === 'F12' || ((event.metaKey || event.ctrlKey) && event.altKey && key === 'i') || ((event.metaKey || event.ctrlKey) && event.shiftKey && key === 'c');
@@ -1722,7 +2042,6 @@ const bridge = `<style data-responsiver-bridge-style>
       if (designGesture) finishDesignGesture(true);
       else {
         designSelected = null;
-        designPendingRect = null;
         paintDesignRect(null);
         designMessage('design-selection-cleared');
       }

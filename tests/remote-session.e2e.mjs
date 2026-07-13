@@ -98,7 +98,7 @@ try {
   await page.waitForFunction((expected) => document.querySelector('[aria-label="Adresse de la page distante"]')?.value === expected, `${origin}/form`)
   await page.getByText('2 routes auditées').waitFor({ state: 'visible', timeout: 30_000 })
 
-  await page.getByRole('button', { name: 'Toutes les pages' }).click()
+  await page.getByRole('group', { name: 'Portée des constats' }).getByRole('button', { name: /Toutes les pages/ }).click()
   await page.locator('.issue-item').filter({ hasText: 'Texte difficile à lire sur mobile' }).first().click()
   await page.waitForFunction((expected) => document.querySelector('[aria-label="Adresse de la page distante"]')?.value === expected, `${origin}/home?mode=mobile#copy`)
   await page.getByText(/élément mesuré est mis en évidence/i).waitFor({ state: 'visible' })

@@ -11,11 +11,17 @@ const allowedKinds = new Set<VisualGestureKind>(['move', 'resize', 'reorder', 'n
 const allowedStrategies = new Set<VisualGestureStrategy>(['flow-translate', 'responsive-size', 'flex-order', 'grid-order'])
 const propertiesByStrategy: Record<VisualGestureStrategy, ReadonlySet<string>> = {
   'flow-translate': new Set(['translate']),
-  'responsive-size': new Set(['box-sizing', 'width', 'height', 'min-height', 'max-width', 'translate']),
+  'responsive-size': new Set(['display', 'box-sizing', 'width', 'min-width', 'max-width', 'height', 'min-height', 'max-height', 'flex-basis', 'flex-grow', 'flex-shrink', 'translate']),
   'flex-order': new Set(['order']),
   'grid-order': new Set(['order'])
 }
 const maximumMutations = 60
+
+export interface VisualGestureOperationChange {
+  key: string
+  before: VisualEditOperation | null
+  after: VisualEditOperation | null
+}
 
 function clean(value: unknown, maximum: number): string {
   return typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, maximum) : ''
@@ -164,4 +170,73 @@ export function mergeVisualGestureOperations(current: readonly VisualEditOperati
     if (replacement && !noOp(replacement)) next.push(replacement)
   }
   return next
+}
+
+function sameVisualOperation(left: VisualEditOperation | null | undefined, right: VisualEditOperation | null | undefined): boolean {
+  if (!left || !right) return left === right
+  return visualEditOperationKey(left) === visualEditOperationKey(right) && left.before === right.before && left.after === right.after
+}
+
+/**
+ * Conserve uniquement le delta porté par un geste. Ce format permet de retirer
+ * plus tard un geste refusé sans restaurer tout un instantané devenu obsolète.
+ */
+export function visualGestureOperationChanges(
+  before: readonly VisualEditOperation[],
+  after: readonly VisualEditOperation[],
+  batch: readonly VisualEditOperation[]
+): VisualGestureOperationChange[] {
+  const beforeByKey = new Map(before.map((operation) => [visualEditOperationKey(operation), operation]))
+  const afterByKey = new Map(after.map((operation) => [visualEditOperationKey(operation), operation]))
+  const keys = [...new Set(batch.map((operation) => visualEditOperationKey(operation)))]
+  return keys
+    .map((key) => ({ key, before: beforeByKey.get(key) ?? null, after: afterByKey.get(key) ?? null }))
+    .filter((change) => !sameVisualOperation(change.before, change.after))
+}
+
+/**
+ * Si un geste intermédiaire est refusé, les gestes encore en attente ne
+ * doivent plus le considérer comme base valide. La chaîne revient ainsi à la
+ * dernière valeur antérieure au geste rejeté si les rejets arrivent en retard.
+ */
+export function rebaseVisualGestureChangesAfterRejection(
+  changes: readonly VisualGestureOperationChange[],
+  rejected: readonly VisualGestureOperationChange[]
+): VisualGestureOperationChange[] {
+  const rejectedByKey = new Map(rejected.map((change) => [change.key, change]))
+  return changes.map((change) => {
+    const rejectedChange = rejectedByKey.get(change.key)
+    return rejectedChange && sameVisualOperation(change.before, rejectedChange.after)
+      ? { ...change, before: rejectedChange.before }
+      : change
+  })
+}
+
+/**
+ * Annule uniquement les valeurs encore identiques à celles produites par le
+ * geste. Une valeur plus récente sur la même clé est donc toujours préservée.
+ */
+export function rollbackVisualGestureOperations(
+  plan: readonly VisualEditOperation[],
+  changes: readonly VisualGestureOperationChange[]
+): VisualEditOperation[] {
+  if (!changes.length) return [...plan]
+  const changesByKey = new Map(changes.map((change) => [change.key, change]))
+  const result: VisualEditOperation[] = []
+  for (const operation of plan) {
+    const key = visualEditOperationKey(operation)
+    const change = changesByKey.get(key)
+    if (!change || !sameVisualOperation(operation, change.after)) {
+      result.push(operation)
+      continue
+    }
+    if (change.before) result.push(change.before)
+  }
+  const resultKeys = new Set(result.map((operation) => visualEditOperationKey(operation)))
+  for (const change of changes) {
+    if (change.after || !change.before || resultKeys.has(change.key)) continue
+    result.push(change.before)
+    resultKeys.add(change.key)
+  }
+  return result
 }

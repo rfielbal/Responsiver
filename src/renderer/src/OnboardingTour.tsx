@@ -58,9 +58,9 @@ const steps: TourStep[] = [
     title: 'Corrigez aussi vite que le problème le demande.',
     summary: 'Une navbar mobile peut se régler visuellement. Une règle précise peut s’éditer dans le code. Dans les deux cas, le rendu reste visible.',
     points: [
-      { title: 'Composer', detail: 'Déplacez et redimensionnez les blocs à la souris.' },
-      { title: 'Inspecter', detail: 'Reliez un élément rendu à sa structure avec F12.' },
-      { title: 'Éditer', detail: 'Travaillez dans un overlay avant toute écriture disque.' }
+      { title: 'Composer', detail: 'Glissez librement ; Maj + glisser réordonne les blocs.' },
+      { title: 'Inspecter', detail: 'Reliez le rendu à sa structure avec F12, jusque dans l’Atelier.' },
+      { title: 'Contrôler', detail: 'Plein écran, Tester et Avant / après gardent le rendu lisible.' }
     ]
   },
   {
@@ -70,8 +70,8 @@ const steps: TourStep[] = [
     title: 'Le projet ne change que lorsque vous le décidez.',
     summary: 'Sélectionnez une correction rapide ou regroupez plusieurs propositions. Responsiver montre ce qui va changer et bloque les conflits.',
     points: [
-      { title: 'Sélection libre', detail: 'Appliquez un correctif seul ou un lot cohérent.' },
-      { title: 'Diff lisible', detail: 'Contrôlez les fichiers et les règles générées.' },
+      { title: 'Réviser sans modifier', detail: 'Ouvrez l’aperçu et le diff en gardant les fichiers intacts.' },
+      { title: 'Appliquer aux fichiers', detail: 'Écrivez les choix validés, puis réanalysez le projet.' },
       { title: 'Retour possible', detail: 'La dernière application reste annulable.' }
     ]
   },
@@ -165,7 +165,7 @@ function ReviewScene(): ReactElement {
     <div className="tour-change-row"><i><TourGlyph name="check" size={13} /></i><div><b>Navigation mobile</b><small>responsiver.generated.css</small></div><em>VISUEL</em></div>
     <div className="tour-change-row"><i><TourGlyph name="check" size={13} /></i><div><b>Retour à la ligne sûr</b><small>styles/components.css</small></div><em>CODE</em></div>
     <div className="tour-diff"><code><span>−</span> white-space: nowrap;</code><code><b>+</b> white-space: normal;</code></div>
-    <div className="tour-apply-bar"><span><TourGlyph name="shield" size={15} /> Écriture contrôlée</span><span className="tour-demo-apply">Appliquer au projet</span></div>
+    <div className="tour-apply-bar"><span><TourGlyph name="shield" size={15} /> Écriture contrôlée</span><span className="tour-demo-apply">Appliquer aux fichiers</span></div>
   </div>
 }
 

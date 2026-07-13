@@ -3,7 +3,14 @@ import test from 'node:test'
 
 import type { VisualGestureCommit } from '../src/shared/contracts'
 import { compileVisualEditCss } from '../src/shared/visual-editor'
-import { mergeVisualGestureOperations, sanitizeVisualGestureCommit, visualGestureOperations } from '../src/shared/visual-manipulation'
+import {
+  mergeVisualGestureOperations,
+  rebaseVisualGestureChangesAfterRejection,
+  rollbackVisualGestureOperations,
+  sanitizeVisualGestureCommit,
+  visualGestureOperationChanges,
+  visualGestureOperations
+} from '../src/shared/visual-manipulation'
 
 function target(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -59,15 +66,23 @@ test('convertit un redimensionnement en un lot unique de règles bornées', () =
     kind: 'resize',
     strategy: 'responsive-size',
     mutations: [
+      { target: target(), property: 'display', before: 'inline', after: 'inline-block' },
       { target: target(), property: 'box-sizing', before: 'content-box', after: 'border-box' },
-      { target: target(), property: 'width', before: '320px', after: 'min(280px, 100%)' },
+      { target: target(), property: 'min-width', before: '340px', after: '0' },
+      { target: target(), property: 'max-width', before: '260px', after: 'none' },
+      { target: target(), property: 'width', before: '320px', after: 'min(280px, calc(100vw - 24px))' },
+      { target: target(), property: 'flex-basis', before: '0%', after: 'min(280px, calc(100vw - 24px))' },
+      { target: target(), property: 'flex-grow', before: '1', after: '0' },
+      { target: target(), property: 'flex-shrink', before: '1', after: '0' },
+      { target: target(), property: 'max-height', before: '200px', after: 'none' },
+      { target: target(), property: 'min-height', before: '0', after: '220px' },
       { target: target(), property: 'height', before: '180px', after: '220px' }
     ],
     warning: 'fixed-height'
   }))
   assert.ok(result)
   const operations = visualGestureOperations(result, { scope: { kind: 'tablet' }, route: { kind: 'all' } })
-  assert.deepEqual(operations.map((entry) => entry.property), ['box-sizing', 'width', 'height'])
+  assert.deepEqual(operations.map((entry) => entry.property), ['display', 'box-sizing', 'min-width', 'max-width', 'width', 'flex-basis', 'flex-grow', 'flex-shrink', 'max-height', 'min-height', 'height'])
   assert.match(compileVisualEditCss(operations).css, /min-width: 768px.*max-width: 1024px/s)
 })
 
@@ -107,4 +122,63 @@ test('retire une ancienne surcharge lorsqu’un geste revient exactement à la v
   assert.strictEqual(unchanged[1], unrelated[0])
   const batch = visualGestureOperations(reset, context)
   assert.equal(mergeVisualGestureOperations(current, batch).length, 0)
+})
+
+test('annule un geste rejeté sans perdre une modification ultérieure indépendante', () => {
+  const context = { scope: { kind: 'mobile' } as const, route: { kind: 'current', path: '/index.html' } as const }
+  const initial = visualGestureOperations(sanitizeVisualGestureCommit(gesture())!, context)
+  const resize = visualGestureOperations(sanitizeVisualGestureCommit(gesture({
+    kind: 'resize',
+    strategy: 'responsive-size',
+    gestureId: 'gesture-rejected-12345678',
+    mutations: [{ target: target(), property: 'width', before: '320px', after: 'min(280px, 100%)' }]
+  }))!, context)
+  const afterRejectedGesture = mergeVisualGestureOperations(initial, resize)
+  const changes = visualGestureOperationChanges(initial, afterRejectedGesture, resize)
+  const later = visualGestureOperations(sanitizeVisualGestureCommit(gesture({
+    gestureId: 'gesture-later-12345678',
+    mutations: [{ target: target({ selector: '.footer' }), property: 'translate', before: 'none', after: '4px 0px' }]
+  }))!, context)
+  const withLaterChange = mergeVisualGestureOperations(afterRejectedGesture, later)
+  const rolledBack = rollbackVisualGestureOperations(withLaterChange, changes)
+  assert.deepEqual(rolledBack.map((operation) => [operation.target.selector, operation.property, operation.after]), [
+    ['.hero > .hero-copy', 'translate', '18px -6px'],
+    ['.footer', 'translate', '4px 0px']
+  ])
+})
+
+test('préserve une valeur plus récente sur la même propriété lors d’un rejet tardif', () => {
+  const context = { scope: { kind: 'mobile' } as const, route: { kind: 'current', path: '/index.html' } as const }
+  const initial = visualGestureOperations(sanitizeVisualGestureCommit(gesture())!, context)
+  const rejected = visualGestureOperations(sanitizeVisualGestureCommit(gesture({
+    gestureId: 'gesture-rejected-12345678',
+    mutations: [{ target: target(), property: 'translate', before: '18px -6px', after: '24px -6px' }]
+  }))!, context)
+  const afterRejectedGesture = mergeVisualGestureOperations(initial, rejected)
+  const changes = visualGestureOperationChanges(initial, afterRejectedGesture, rejected)
+  const newer = visualGestureOperations(sanitizeVisualGestureCommit(gesture({
+    gestureId: 'gesture-newer-12345678',
+    mutations: [{ target: target(), property: 'translate', before: '24px -6px', after: '32px 2px' }]
+  }))!, context)
+  const latest = mergeVisualGestureOperations(afterRejectedGesture, newer)
+  assert.deepEqual(rollbackVisualGestureOperations(latest, changes), latest)
+})
+
+test('deux rejets tardifs successifs reviennent à la dernière base validée', () => {
+  const context = { scope: { kind: 'mobile' } as const, route: { kind: 'current', path: '/index.html' } as const }
+  const source: ReturnType<typeof visualGestureOperations> = []
+  const firstBatch = visualGestureOperations(sanitizeVisualGestureCommit(gesture({
+    gestureId: 'gesture-first-pending',
+    mutations: [{ target: target(), property: 'translate', before: 'none', after: '10px 0px' }]
+  }))!, context)
+  const afterFirst = mergeVisualGestureOperations(source, firstBatch)
+  const firstChanges = visualGestureOperationChanges(source, afterFirst, firstBatch)
+  const secondBatch = visualGestureOperations(sanitizeVisualGestureCommit(gesture({
+    gestureId: 'gesture-second-pending',
+    mutations: [{ target: target(), property: 'translate', before: '10px 0px', after: '20px 0px' }]
+  }))!, context)
+  const afterSecond = mergeVisualGestureOperations(afterFirst, secondBatch)
+  const secondChanges = visualGestureOperationChanges(afterFirst, afterSecond, secondBatch)
+  const rebasedSecond = rebaseVisualGestureChangesAfterRejection(secondChanges, firstChanges)
+  assert.deepEqual(rollbackVisualGestureOperations(afterSecond, rebasedSecond), source)
 })

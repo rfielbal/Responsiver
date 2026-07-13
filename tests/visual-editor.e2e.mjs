@@ -48,6 +48,62 @@ try {
   await composer.waitFor({ state: 'visible' })
   assert.equal(await composer.getAttribute('aria-pressed'), 'true')
   const visualFrame = page.frameLocator('.visual-canvas iframe').first()
+  const revealInCanvas = async (locator) => {
+    await locator.scrollIntoViewIfNeeded()
+    const stage = page.locator('.visual-canvas .preview-stage').first()
+    const stageBox = await stage.boundingBox()
+    let targetBox = await locator.boundingBox()
+    assert.ok(stageBox)
+    assert.ok(targetBox)
+    const inset = 24
+    const deltaX = targetBox.x < stageBox.x + inset ? targetBox.x - stageBox.x - inset : targetBox.x + targetBox.width > stageBox.x + stageBox.width - inset ? targetBox.x + targetBox.width - stageBox.x - stageBox.width + inset : 0
+    const deltaY = targetBox.y < stageBox.y + inset ? targetBox.y - stageBox.y - inset : targetBox.y + targetBox.height > stageBox.y + stageBox.height - inset ? targetBox.y + targetBox.height - stageBox.y - stageBox.height + inset : 0
+    if (deltaX || deltaY) {
+      await stage.evaluate((element, delta) => { element.scrollLeft += delta.x; element.scrollTop += delta.y }, { x: deltaX, y: deltaY })
+      await page.waitForTimeout(80)
+      targetBox = await locator.boundingBox()
+      assert.ok(targetBox)
+    }
+    return targetBox
+  }
+  await visualFrame.locator('[data-responsiver-composer-active]').waitFor({ state: 'attached' })
+  assert.equal(await page.getByLabel('Tailles concernées').inputValue(), 'mobile')
+  assert.equal(await page.getByLabel('Pages concernées').inputValue(), 'current')
+  assert.equal(await page.locator('.visual-scope-summary, .visual-toolbar .code-capability').count(), 0)
+  const earlyGapField = page.locator('.visual-control-scroll details').filter({ hasText: 'Mise en page' }).locator('label').filter({ hasText: 'Espacement' }).locator('input')
+  await earlyGapField.fill('url(http://valeur-refusee.test)')
+  await earlyGapField.press('Enter')
+  const activeToast = page.locator('.toast')
+  await activeToast.waitFor({ state: 'visible' })
+  await page.getByRole('button', { name: 'Afficher l’Atelier en plein écran' }).click()
+  const visualFullscreen = page.getByRole('dialog', { name: 'Atelier visuel en plein écran' })
+  await visualFullscreen.waitFor({ state: 'visible' })
+  assert.equal(await visualFullscreen.getAttribute('aria-modal'), 'true')
+  assert.equal(await activeToast.evaluate((element) => element.inert), true)
+  assert.equal(await activeToast.getAttribute('aria-hidden'), 'true')
+  await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === 'Quitter le plein écran de l’Atelier')
+  await page.evaluate(() => {
+    const dialog = document.querySelector('.visual-workspace.is-fullscreen')
+    const focusable = dialog ? [...dialog.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), iframe, [tabindex]:not([tabindex="-1"]), [contenteditable="true"]')].filter((element) => element instanceof HTMLElement && !element.closest('[inert]') && element.getClientRects().length > 0) : []
+    focusable.at(-1)?.focus()
+  })
+  await page.keyboard.press('Tab')
+  assert.equal(await page.evaluate(() => Boolean(document.querySelector('.visual-workspace.is-fullscreen')?.contains(document.activeElement))), true)
+  await page.evaluate(() => {
+    const dialog = document.querySelector('.visual-workspace.is-fullscreen')
+    const focusable = dialog ? [...dialog.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), iframe, [tabindex]:not([tabindex="-1"]), [contenteditable="true"]')].filter((element) => element instanceof HTMLElement && !element.closest('[inert]') && element.getClientRects().length > 0) : []
+    focusable[0]?.focus()
+  })
+  await page.keyboard.press('Shift+Tab')
+  assert.equal(await page.evaluate(() => Boolean(document.querySelector('.visual-workspace.is-fullscreen')?.contains(document.activeElement))), true)
+  await page.keyboard.press('Escape')
+  await visualFullscreen.waitFor({ state: 'detached' })
+  await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === 'Afficher l’Atelier en plein écran')
+  assert.equal(await activeToast.evaluate((element) => element.inert), false)
+  await activeToast.getByRole('button', { name: 'Fermer' }).click()
+  await page.keyboard.press('F12')
+  await page.waitForFunction(() => document.querySelector('.visual-mode-switch button[aria-pressed="true"]')?.textContent?.includes('Inspecter'))
+  await page.getByRole('button', { name: 'Composer' }).click()
   await visualFrame.locator('[data-responsiver-composer-active]').waitFor({ state: 'attached' })
   await page.getByRole('button', { name: /Afficher à 100 %/ }).click()
 
@@ -77,9 +133,8 @@ try {
   assert.equal(await page.locator('.visual-change-count').textContent(), '0')
 
   const heroCopy = visualFrame.locator('.hero-copy')
-  // Ce scénario couvre volontairement le déplacement dans un flux block ;
-  // la réorganisation Flex/Grid possède sa propre stratégie atomique.
-  await heroCopy.evaluate((element) => { if (element.parentElement) element.parentElement.style.display = 'block' })
+  // Le déplacement libre reste une translation même dans une grille ; Maj est
+  // désormais requis pour demander explicitement une réorganisation du flux.
   await heroCopy.scrollIntoViewIfNeeded()
   const moveBox = await heroCopy.boundingBox()
   assert.ok(moveBox)
@@ -98,22 +153,55 @@ try {
     return getComputedStyle(element).translate
   })
   assert.notEqual(translated, 'none')
+  const rapidNudgeBefore = await heroCopy.evaluate((element) => {
+    const rectangle = element.getBoundingClientRect()
+    return { left: rectangle.left, top: rectangle.top }
+  })
+  await heroCopy.evaluate(() => {
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'F12', bubbles: true }))
+  })
+  await page.waitForFunction(() => document.querySelector('.visual-mode-switch button[aria-pressed="true"]')?.textContent?.includes('Inspecter'))
+  await visualFrame.locator('[data-responsiver-composer-active]').waitFor({ state: 'detached' })
+  const rapidNudgeAfter = await heroCopy.evaluate(async (element, before) => {
+    for (let index = 0; index < 60; index += 1) {
+      const rectangle = element.getBoundingClientRect()
+      if (rectangle.left > before.left + .5 && rectangle.top > before.top + .5) return { left: rectangle.left, top: rectangle.top }
+      await new Promise((resolve) => requestAnimationFrame(resolve))
+    }
+    const rectangle = element.getBoundingClientRect()
+    return { left: rectangle.left, top: rectangle.top }
+  }, rapidNudgeBefore)
+  assert.ok(rapidNudgeAfter.left > rapidNudgeBefore.left + .5, JSON.stringify({ rapidNudgeBefore, rapidNudgeAfter }))
+  assert.ok(rapidNudgeAfter.top > rapidNudgeBefore.top + .5, JSON.stringify({ rapidNudgeBefore, rapidNudgeAfter }))
+  await page.getByRole('button', { name: 'Composer' }).click()
+  await visualFrame.locator('[data-responsiver-composer-active]').waitFor({ state: 'attached' })
   await page.keyboard.press('Enter')
   assert.equal(await visualFrame.locator('body').evaluate(() => window.__responsiverComposerKeyEvents), 0)
   await heroCopy.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+  await page.waitForTimeout(350)
+  const rapidNudgeSettled = await heroCopy.evaluate((element) => {
+    const rectangle = element.getBoundingClientRect()
+    return { left: rectangle.left, top: rectangle.top }
+  })
+  assert.ok(Math.abs(rapidNudgeSettled.left - rapidNudgeAfter.left) < .5, JSON.stringify({ rapidNudgeAfter, rapidNudgeSettled }))
+  assert.ok(Math.abs(rapidNudgeSettled.top - rapidNudgeAfter.top) < .5, JSON.stringify({ rapidNudgeAfter, rapidNudgeSettled }))
 
   const widthBefore = await heroCopy.evaluate((element) => element.getBoundingClientRect().width)
   const eastHandle = visualFrame.locator('[data-responsiver-composer-handle="e"]')
-  const handleRect = await eastHandle.evaluate((element) => element.getBoundingClientRect().toJSON())
   const iframeBox = await page.locator('.visual-canvas iframe').first().boundingBox()
   const frameViewport = await visualFrame.locator('html').evaluate(() => ({ width: innerWidth, height: innerHeight }))
   assert.ok(iframeBox)
   const scaleX = iframeBox.width / frameViewport.width
   const scaleY = iframeBox.height / frameViewport.height
-  const handlePoint = { x: iframeBox.x + Math.min(frameViewport.width - 3, handleRect.left + 3) * scaleX, y: iframeBox.y + (handleRect.top + handleRect.height / 2) * scaleY }
   await eastHandle.hover()
+  const eastHandleBox = await eastHandle.boundingBox()
+  assert.ok(eastHandleBox)
+  const eastStart = { x: eastHandleBox.x + eastHandleBox.width / 2, y: eastHandleBox.y + eastHandleBox.height / 2 }
+  await page.mouse.move(eastStart.x, eastStart.y)
   await page.mouse.down()
-  await page.mouse.move(handlePoint.x - 48 * scaleX, handlePoint.y, { steps: 8 })
+  await page.mouse.move(eastStart.x - 48 * scaleX, eastStart.y, { steps: 8 })
   await page.mouse.up()
   await page.waitForFunction(() => Number(document.querySelector('.visual-change-count')?.textContent) >= 2)
   const widthAfter = await heroCopy.evaluate(async (element, before) => {
@@ -127,29 +215,40 @@ try {
   assert.ok(widthAfter < widthBefore - 10, JSON.stringify({ widthBefore, widthAfter }))
 
   const countBeforeTextHeight = Number(await page.locator('.visual-change-count').textContent())
+  const heightBefore = await heroCopy.evaluate((element) => element.getBoundingClientRect().height)
   const southTextHandle = visualFrame.locator('[data-responsiver-composer-handle="s"]')
-  const southTextRect = await southTextHandle.evaluate((element) => element.getBoundingClientRect().toJSON())
-  const southTextPoint = { x: iframeBox.x + (southTextRect.left + southTextRect.width / 2) * scaleX, y: iframeBox.y + (southTextRect.top + southTextRect.height / 2) * scaleY }
   await southTextHandle.hover()
+  const southTextBox = await southTextHandle.boundingBox()
+  assert.ok(southTextBox)
+  const southTextStart = { x: southTextBox.x + southTextBox.width / 2, y: southTextBox.y + southTextBox.height / 2 }
+  await page.mouse.move(southTextStart.x, southTextStart.y)
   await page.mouse.down()
-  await page.mouse.move(southTextPoint.x, southTextPoint.y + 36 * scaleY, { steps: 8 })
+  await page.mouse.move(southTextStart.x, southTextStart.y + 36 * scaleY, { steps: 8 })
   await page.mouse.up()
-  await page.locator('.toast').filter({ hasText: 'hauteur d’un texte reste fluide' }).waitFor({ state: 'visible' })
-  assert.equal(Number(await page.locator('.visual-change-count').textContent()), countBeforeTextHeight)
-
-  await page.getByRole('button', { name: 'Annuler la dernière modification' }).click()
-  await page.waitForFunction(() => document.querySelector('.visual-change-count')?.textContent === '1')
-  const restoredWidth = await heroCopy.evaluate(async (element, expected) => {
+  await page.waitForFunction((before) => Number(document.querySelector('.visual-change-count')?.textContent) > before, countBeforeTextHeight)
+  const heightAfter = await heroCopy.evaluate(async (element, before) => {
     for (let index = 0; index < 30; index += 1) {
-      const width = element.getBoundingClientRect().width
-      if (Math.abs(width - expected) < 2) return width
+      const height = element.getBoundingClientRect().height
+      if (height > before + 10) return height
       await new Promise((resolve) => requestAnimationFrame(resolve))
     }
-    return element.getBoundingClientRect().width
-  }, widthBefore)
-  assert.ok(Math.abs(restoredWidth - widthBefore) < 2)
+    return element.getBoundingClientRect().height
+  }, heightBefore)
+  assert.ok(heightAfter > heightBefore + 10, JSON.stringify({ heightBefore, heightAfter }))
+
+  await page.getByRole('button', { name: 'Annuler la dernière modification' }).click()
+  await page.waitForFunction((expected) => Number(document.querySelector('.visual-change-count')?.textContent) === expected, countBeforeTextHeight)
+  const restoredHeight = await heroCopy.evaluate(async (element, expected) => {
+    for (let index = 0; index < 30; index += 1) {
+      const height = element.getBoundingClientRect().height
+      if (Math.abs(height - expected) < 2) return height
+      await new Promise((resolve) => requestAnimationFrame(resolve))
+    }
+    return element.getBoundingClientRect().height
+  }, heightBefore)
+  assert.ok(Math.abs(restoredHeight - heightBefore) < 2)
   await page.getByRole('button', { name: 'Rétablir la modification' }).click()
-  await page.waitForFunction(() => Number(document.querySelector('.visual-change-count')?.textContent) >= 2)
+  await page.waitForFunction((before) => Number(document.querySelector('.visual-change-count')?.textContent) > before, countBeforeTextHeight)
   await page.locator('.visual-editor-page').screenshot({ path: join(root, 'output', 'playwright', 'electron-visual-composer.png'), animations: 'disabled' })
 
   const directTextProbe = visualFrame.locator('.composer-direct-text-probe')
@@ -167,36 +266,49 @@ try {
     element.after(directText, image)
   })
   await directTextProbe.waitFor({ state: 'visible' })
-  await directTextProbe.scrollIntoViewIfNeeded()
-  const directTextBox = await directTextProbe.boundingBox()
-  assert.ok(directTextBox)
+  const directTextBox = await revealInCanvas(directTextProbe)
   await page.mouse.click(directTextBox.x + directTextBox.width / 2, directTextBox.y + directTextBox.height / 2)
   await page.locator('.visual-target-card code').filter({ hasText: 'composer-direct-text-probe' }).waitFor({ state: 'visible' })
   const directTextCount = Number(await page.locator('.visual-change-count').textContent())
+  const directTextHeightBefore = await directTextProbe.evaluate((element) => element.getBoundingClientRect().height)
   const southDirectTextHandle = visualFrame.locator('[data-responsiver-composer-handle="s"]')
-  const southDirectTextRect = await southDirectTextHandle.evaluate((element) => element.getBoundingClientRect().toJSON())
-  const southDirectTextPoint = { x: iframeBox.x + (southDirectTextRect.left + southDirectTextRect.width / 2) * scaleX, y: iframeBox.y + (southDirectTextRect.top + southDirectTextRect.height / 2) * scaleY }
   await southDirectTextHandle.hover()
+  const southDirectTextBox = await southDirectTextHandle.boundingBox()
+  assert.ok(southDirectTextBox)
+  const southDirectTextStart = { x: southDirectTextBox.x + southDirectTextBox.width / 2, y: southDirectTextBox.y + southDirectTextBox.height / 2 }
+  await page.mouse.move(southDirectTextStart.x, southDirectTextStart.y)
   await page.mouse.down()
-  await page.mouse.move(southDirectTextPoint.x, southDirectTextPoint.y + 24 * scaleY, { steps: 8 })
+  await page.mouse.move(southDirectTextStart.x, southDirectTextStart.y + 24 * scaleY, { steps: 8 })
   await page.mouse.up()
-  await page.locator('.toast').filter({ hasText: 'hauteur d’un texte reste fluide' }).waitFor({ state: 'visible' })
-  assert.equal(Number(await page.locator('.visual-change-count').textContent()), directTextCount)
+  await page.waitForFunction((before) => Number(document.querySelector('.visual-change-count')?.textContent) > before, directTextCount)
+  const directTextHeightAfter = await directTextProbe.evaluate(async (element, before) => {
+    for (let index = 0; index < 30; index += 1) {
+      const height = element.getBoundingClientRect().height
+      if (height > before + 10) return height
+      await new Promise((resolve) => requestAnimationFrame(resolve))
+    }
+    return element.getBoundingClientRect().height
+  }, directTextHeightBefore)
+  assert.ok(directTextHeightAfter > directTextHeightBefore + 10, JSON.stringify({ directTextHeightBefore, directTextHeightAfter }))
 
   await imageProbe.waitFor({ state: 'visible' })
-  await imageProbe.scrollIntoViewIfNeeded()
-  const imageBox = await imageProbe.boundingBox()
-  assert.ok(imageBox)
+  const imageBox = await revealInCanvas(imageProbe)
   await page.mouse.click(imageBox.x + imageBox.width / 2, imageBox.y + imageBox.height / 2)
   await page.locator('.visual-target-card code').filter({ hasText: 'composer-image-probe' }).waitFor({ state: 'visible' })
+  await imageProbe.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+  await page.waitForTimeout(250)
+  const imageChangeCount = Number(await page.locator('.visual-change-count').textContent())
   const imageWidthBefore = await imageProbe.evaluate((element) => element.getBoundingClientRect().width)
   const southImageHandle = visualFrame.locator('[data-responsiver-composer-handle="s"]')
-  const southImageRect = await southImageHandle.evaluate((element) => element.getBoundingClientRect().toJSON())
-  const southImagePoint = { x: iframeBox.x + (southImageRect.left + southImageRect.width / 2) * scaleX, y: iframeBox.y + (southImageRect.top + southImageRect.height / 2) * scaleY }
   await southImageHandle.hover()
+  const southImageBox = await southImageHandle.boundingBox()
+  assert.ok(southImageBox)
+  const southImageStart = { x: southImageBox.x + southImageBox.width / 2, y: southImageBox.y + southImageBox.height / 2 }
+  await page.mouse.move(southImageStart.x, southImageStart.y)
   await page.mouse.down()
-  await page.mouse.move(southImagePoint.x, southImagePoint.y + 24 * scaleY, { steps: 8 })
+  await page.mouse.move(southImageStart.x, southImageStart.y + 24 * scaleY, { steps: 8 })
   await page.mouse.up()
+  await page.waitForFunction((before) => Number(document.querySelector('.visual-change-count')?.textContent) > before, imageChangeCount)
   const imageWidthAfter = await imageProbe.evaluate(async (element, before) => {
     for (let index = 0; index < 30; index += 1) {
       const width = element.getBoundingClientRect().width
@@ -208,9 +320,8 @@ try {
   assert.ok(imageWidthAfter > imageWidthBefore + 10, JSON.stringify({ imageWidthBefore, imageWidthAfter }))
 
   const frozenAction = visualFrame.locator('.product > button').first()
-  await frozenAction.scrollIntoViewIfNeeded()
-  const frozenRect = await frozenAction.evaluate((element) => element.getBoundingClientRect().toJSON())
-  await page.mouse.click(iframeBox.x + (frozenRect.left + frozenRect.width / 2) * scaleX, iframeBox.y + (frozenRect.top + frozenRect.height / 2) * scaleY)
+  const frozenBox = await revealInCanvas(frozenAction)
+  await page.mouse.click(frozenBox.x + frozenBox.width / 2, frozenBox.y + frozenBox.height / 2)
   assert.equal(await visualFrame.locator('[data-bag-panel]').getAttribute('aria-hidden'), 'true')
   await page.getByRole('button', { name: 'Tester' }).click()
   await visualFrame.locator('[data-responsiver-composer-active]').waitFor({ state: 'detached' })
@@ -233,7 +344,7 @@ try {
   assert.equal(beforeTranslate, 'none')
   assert.notEqual(afterTranslate, 'none')
 
-  await page.getByRole('button', { name: 'Propriétés' }).click()
+  await page.getByRole('button', { name: 'Inspecter', exact: true }).first().click()
   const propertyFrame = page.frameLocator('.visual-canvas iframe').first()
   await propertyFrame.locator('.site-nav').click({ position: { x: 2, y: 2 } })
   await page.locator('.visual-target-card code').filter({ hasText: 'site-nav' }).waitFor({ state: 'visible' })
@@ -241,9 +352,16 @@ try {
   await gapField.fill('24px')
   await gapField.press('Enter')
   await page.waitForFunction(() => Number(document.querySelector('.visual-change-count')?.textContent) >= 3)
-  await page.getByRole('button', { name: 'Appliquer au projet' }).click()
+  const generatedCssPath = join(projectRoot, '.responsiver', 'responsiver.generated.css')
+  await page.getByRole('button', { name: 'Réviser sans modifier' }).click()
+  await page.getByRole('heading', { name: 'Révision' }).waitFor({ state: 'visible' })
+  assert.equal(await page.locator('.review-summary > div').filter({ hasText: 'Sources modifiées' }).locator('strong').textContent(), '0')
+  await assert.rejects(readFile(generatedCssPath, 'utf8'), { code: 'ENOENT' })
+  await page.getByRole('button', { name: 'Atelier visuel', exact: true }).click()
+  await page.locator('.visual-editor-page').waitFor({ state: 'visible' })
+  await page.getByRole('button', { name: 'Appliquer aux fichiers' }).click()
   await page.locator('.toast').filter({ hasText: /ajustement.*visuel.*appliqué/i }).waitFor({ state: 'visible' })
-  const generatedCss = await readFile(join(projectRoot, '.responsiver', 'responsiver.generated.css'), 'utf8')
+  const generatedCss = await readFile(generatedCssPath, 'utf8')
   const appliedState = await page.frameLocator('.stage-canvas iframe').first().locator('html').evaluate(async () => {
     const route = document.documentElement.getAttribute('data-responsiver-route')
     const selector = `html[data-responsiver-route="${route}"] > body > header.site-header > nav.site-nav`

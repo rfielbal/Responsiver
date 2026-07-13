@@ -4,7 +4,7 @@ export const VISUAL_EDIT_ALLOWED_PROPERTIES = Object.freeze([
   'margin', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left', 'margin-inline', 'margin-block',
   'padding', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left', 'padding-inline', 'padding-block',
   'gap', 'row-gap', 'column-gap',
-  'flex-direction', 'flex-wrap', 'justify-content', 'align-items', 'align-self', 'justify-self', 'order',
+  'flex-direction', 'flex-wrap', 'flex-basis', 'flex-grow', 'flex-shrink', 'justify-content', 'align-items', 'align-self', 'justify-self', 'order',
   'grid-template-columns', 'grid-template-rows', 'grid-column', 'grid-row',
   'font-size', 'font-weight', 'line-height', 'letter-spacing', 'text-align',
   'color', 'background-color',
