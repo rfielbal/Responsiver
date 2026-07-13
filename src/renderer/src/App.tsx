@@ -1,9 +1,10 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactElement } from 'react'
 
-import type { ProjectPreparationProgress, RecentProjectSummary, RemoteAuditResult, RemoteInspectorSelection, RemotePageState, RemoteViewport, RuntimeAudit, VisualElementSnapshot } from '../../shared/contracts'
+import type { ProjectPreparationProgress, RecentProjectSummary, RemoteAuditResult, RemoteInspectorSelection, RemotePageState, RemoteViewport, RuntimeAudit, VisualElementSnapshot, VisualGestureCommit } from '../../shared/contracts'
 import { classifyProjectIssue, consolidateProjectIssues, deterministicVisualTarget, type FindingGroup, type FindingPolicy } from '../../shared/finding-policy'
 import { frameworkSupportFor } from '../../shared/framework-support'
 import { authorizeVisualEditor, compileVisualEditCss, createVisualEditOperation, visualEditOperationKey, type VisualEditOperation, type VisualEditProperty, type VisualEditScope } from '../../shared/visual-editor'
+import { mergeVisualGestureOperations, sanitizeVisualGestureCommit, visualGestureOperations } from '../../shared/visual-manipulation'
 import LocalAssistant from './LocalAssistant'
 import PreviewZoomControls from './PreviewZoomControls'
 import RemotePreview from './RemotePreview'
@@ -19,7 +20,7 @@ type PreviewMode = 'source' | 'proposal' | 'before-after' | 'staging'
 type RuntimeTheme = 'dark' | 'light' | 'unknown'
 type ThemeTarget = 'dark' | 'light'
 type ResizeEdge = 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w' | 'nw'
-type VisualEditorMode = 'select' | 'interact' | 'compare'
+type VisualEditorMode = 'compose' | 'select' | 'interact' | 'compare'
 type InspectorLocation = 'lab' | 'code' | null
 type InspectorPhase = 'idle' | 'starting' | 'active'
 
@@ -215,6 +216,7 @@ function Icon({ name, size = 18 }: { name: string; size?: number }): ReactElemen
     info: <><circle cx="12" cy="12" r="9" /><path d="M12 11v5M12 8h.01" /></>,
     help: <><circle cx="12" cy="12" r="9" /><path d="M9.8 9a2.35 2.35 0 1 1 3.4 2.1c-.8.42-1.2.92-1.2 1.9M12 16.5h.01" /></>,
     cursor: <><path d="m5 3 14 8-6 2-3 6Z" /><path d="m13 13 5 5" /></>,
+    compose: <><rect x="7" y="7" width="10" height="10" rx="1" /><path d="M12 2v5m0-5-2 2m2-2 2 2M12 22v-5m0 5-2-2m2 2 2-2M2 12h5m-5 0 2-2m-2 2 2 2M22 12h-5m5 0-2-2m2 2-2 2" /></>,
     undo: <><path d="M9 7 4 12l5 5" /><path d="M4 12h9a6 6 0 0 1 6 6" /></>,
     redo: <><path d="m15 7 5 5-5 5" /><path d="M20 12h-9a6 6 0 0 0-6 6" /></>,
     play: <path d="m8 5 11 7-11 7Z" />
@@ -262,9 +264,9 @@ function PageGuide({ page, onOpenChange }: { page: 'code' | 'visual'; onOpenChan
     {open && <section id={`${titleId}-panel`} className="page-guide-panel" role="dialog" aria-modal="false" aria-labelledby={titleId}>
       <header><div><span className="overline">Guide rapide</span><h2 id={titleId}>{visual ? 'Atelier visuel' : 'Espace Code'}</h2></div><button className="icon-button" type="button" onClick={() => { onOpenChange(false); setOpen(false); window.requestAnimationFrame(() => trigger.current?.focus()) }} aria-label="Fermer le guide"><Icon name="close" size={14} /></button></header>
       {visual ? <ol>
-        <li><b>Sélectionnez</b><span>Cliquez un élément du vrai rendu, ou passez en mode Interagir pour naviguer.</span></li>
+        <li><b>Composez</b><span>La page est figée : glissez un bloc, redimensionnez-le avec ses poignées ou ajustez ses propriétés.</span></li>
         <li><b>Définissez la portée</b><span>Choisissez l’écran et la page auxquels le réglage doit s’appliquer.</span></li>
-        <li><b>Vérifiez</b><span>Comparez l’avant/après, puis préparez le CSS ou appliquez-le explicitement.</span></li>
+        <li><b>Testez puis comparez</b><span>Réactivez le vrai site dans Tester, ouvrez l’avant/après, puis appliquez explicitement.</span></li>
       </ol> : <ol>
         <li><b>Choisissez un fichier</b><span>L’éditeur conserve d’abord chaque modification dans un overlay en mémoire.</span></li>
         <li><b>Contrôlez le rendu</b><span>La preview se met à jour pour le CSS ; utilisez Inspecter pour relier rendu et DOM.</span></li>
@@ -569,10 +571,10 @@ export function consolidatedRuntimeIssues(audits: RuntimeAudit[]): ProjectIssue[
 }
 
 const inspectableStyleProperties = new Set([
-  'display', 'position', 'width', 'height', 'min-width', 'max-width', 'min-height', 'max-height',
+  'display', 'position', 'box-sizing', 'width', 'height', 'min-width', 'max-width', 'min-height', 'max-height', 'translate',
   'margin-top', 'margin-right', 'margin-bottom', 'margin-left', 'margin-inline', 'margin-block',
   'padding-top', 'padding-right', 'padding-bottom', 'padding-left', 'padding-inline', 'padding-block',
-  'gap', 'row-gap', 'column-gap', 'flex-direction', 'flex-wrap', 'justify-content', 'align-items', 'align-self',
+  'gap', 'row-gap', 'column-gap', 'flex-direction', 'flex-wrap', 'justify-content', 'align-items', 'align-self', 'justify-self', 'order',
   'grid-template-columns', 'grid-template-rows', 'font-family', 'font-size', 'font-weight', 'line-height',
   'letter-spacing', 'text-align', 'color', 'background-color', 'border-color', 'border-width', 'border-style',
   'border-radius', 'box-shadow', 'opacity', 'overflow', 'object-fit', 'visibility'
@@ -651,7 +653,7 @@ function previewOwnsMessageSource(frame: HTMLIFrameElement | null, source: Messa
   return false
 }
 
-function PreviewFrame({ project, origin, device, path, compact = false, label, focusSelector, themeOverride, resizable = false, allowUpscale = false, zoomable = false, inspectorEnabled = false, visualCss = '', onResize, onPathChange, onThemeChange, onExternal, onAudit, onRenderStatus, onEscape, onInspectElement, onInspectorReady, onInspectorStop, onInspectorShortcut }: {
+function PreviewFrame({ project, origin, device, path, compact = false, label, focusSelector, themeOverride, resizable = false, allowUpscale = false, zoomable = false, inspectorEnabled = false, composerEnabled = false, visualCss = '', onResize, onPathChange, onThemeChange, onExternal, onAudit, onRenderStatus, onEscape, onInspectElement, onInspectorReady, onInspectorStop, onInspectorShortcut, onComposerGesture, onComposerNotice }: {
   project: ProjectSnapshot & ProjectExtra
   origin: string | null
   device: Device
@@ -664,6 +666,7 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
   allowUpscale?: boolean
   zoomable?: boolean
   inspectorEnabled?: boolean
+  composerEnabled?: boolean
   visualCss?: string
   onResize?: (width: number, height: number) => void
   onPathChange?: (path: string) => void
@@ -676,6 +679,8 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
   onInspectorReady?: () => void
   onInspectorStop?: () => void
   onInspectorShortcut?: () => void
+  onComposerGesture?: (gesture: VisualGestureCommit) => void
+  onComposerNotice?: (message: string) => void
 }): ReactElement {
   const stageRef = useRef<HTMLDivElement>(null)
   const spaceRef = useRef<HTMLDivElement>(null)
@@ -693,7 +698,15 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
   const focusSelectorRef = useRef(focusSelector)
   const themeOverrideRef = useRef(themeOverride)
   const inspectorEnabledRef = useRef(inspectorEnabled)
+  const composerEnabledRef = useRef(composerEnabled)
   const visualCssRef = useRef(visualCss)
+  const composerGestureRef = useRef(onComposerGesture)
+  const composerNoticeRef = useRef(onComposerNotice)
+  const inspectElementRef = useRef(onInspectElement)
+  const composerPortRef = useRef<MessagePort | null>(null)
+  const composerSessionRef = useRef('')
+  const composerDocumentRef = useRef('')
+  const composerRevisionRef = useRef(0)
   const pendingPathRef = useRef<string | null>(null)
   const pendingPathLoadedRef = useRef(false)
   const stateRequestSequenceRef = useRef(0)
@@ -707,7 +720,11 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
   focusSelectorRef.current = focusSelector
   themeOverrideRef.current = themeOverride
   inspectorEnabledRef.current = inspectorEnabled
+  composerEnabledRef.current = composerEnabled
   visualCssRef.current = visualCss
+  composerGestureRef.current = onComposerGesture
+  composerNoticeRef.current = onComposerNotice
+  inspectElementRef.current = onInspectElement
   scaleRef.current = scale
   const [runtimeRender, setRuntimeRender] = useState<RuntimeRenderState | null>(null)
   const safeRoutes = project.routes.length ? project.routes : [{ path: project.entryPath ?? '/', label: 'Page principale' }]
@@ -773,6 +790,10 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
   }, [onRenderStatus, origin, path, project.id])
 
   useEffect(() => () => resizeCleanupRef.current?.(), [])
+  useEffect(() => () => {
+    composerPortRef.current?.close()
+    composerPortRef.current = null
+  }, [])
   useEffect(() => () => {
     if (frameLoadTimerRef.current) window.clearTimeout(frameLoadTimerRef.current)
   }, [])
@@ -889,7 +910,64 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
   const outerWidth = Math.round((device.width + 14) * scale)
   const outerHeight = Math.round((device.height + 14) * scale)
 
+  function sendComposerCommand(type: string, payload: Record<string, unknown> = {}): void {
+    const port = composerPortRef.current
+    const sessionId = composerSessionRef.current
+    if (!port || !sessionId || !composerDocumentRef.current) return
+    const revision = ++composerRevisionRef.current
+    port.postMessage({ protocol: 1, sessionId, revision, type, ...payload })
+  }
+
+  function composerNotice(reason: unknown): void {
+    const messages: Record<string, string> = {
+      'unstable-or-sensitive-target': 'Cet élément ne peut pas être déplacé sûrement. Sélectionnez son conteneur.',
+      'existing-complex-transform': 'Ce bloc utilise déjà une transformation complexe. Responsiver refuse de l’écraser.',
+      'text-height-is-fluid': 'La hauteur d’un texte reste fluide pour préserver sa lisibilité. Utilisez une poignée latérale.',
+      'target-detached': 'Le site a recréé cet élément ; sélectionnez-le de nouveau.'
+    }
+    composerNoticeRef.current?.(messages[String(reason)] ?? 'Ce geste ne peut pas être converti en CSS responsive sûr.')
+  }
+
+  function connectComposerBridge(): void {
+    composerPortRef.current?.close()
+    composerPortRef.current = null
+    composerDocumentRef.current = ''
+    composerRevisionRef.current = 0
+    const frameWindow = frameRef.current?.contentWindow
+    if (!frameWindow || !origin || !composerGestureRef.current) return
+    const bridgeChannel = new MessageChannel()
+    const sessionId = window.crypto.randomUUID?.() ?? `composer-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+    composerSessionRef.current = sessionId
+    composerPortRef.current = bridgeChannel.port1
+    bridgeChannel.port1.onmessage = (event: MessageEvent): void => {
+      const data = event.data as Record<string, unknown>
+      if (!data || data.protocol !== 1 || data.sessionId !== composerSessionRef.current || typeof data.type !== 'string') return
+      if (data.type === 'design-ready') {
+        const documentId = cleanInspectionText(data.documentId, 80)
+        if (!documentId) return
+        composerDocumentRef.current = documentId
+        sendComposerCommand(composerEnabledRef.current ? 'design-start' : 'design-stop')
+        if (composerEnabledRef.current && focusSelectorRef.current) sendComposerCommand('design-select', { selector: focusSelectorRef.current })
+        return
+      }
+      if (data.documentId !== composerDocumentRef.current || data.revision !== composerRevisionRef.current) return
+      if (data.type === 'design-selection') {
+        const selection = sanitizeVisualElement(data.selection)
+        if (selection) inspectElementRef.current?.(selection, 'selected')
+      }
+      if (data.type === 'design-commit') {
+        const gesture = sanitizeVisualGestureCommit(data)
+        if (gesture) composerGestureRef.current?.(gesture)
+        else composerNoticeRef.current?.('Le geste reçu n’a pas passé les contrôles de sécurité.')
+      }
+      if (data.type === 'design-rejected' || data.type === 'design-invalidated') composerNotice(data.reason)
+    }
+    bridgeChannel.port1.start()
+    frameWindow.postMessage({ channel: 'responsiver-preview', type: 'design-connect', protocol: 1, sessionId }, origin, [bridgeChannel.port2])
+  }
+
   function synchronizeLoadedFrame(): void {
+    connectComposerBridge()
     pendingPathLoadedRef.current = true
     loadedDocumentIdRef.current = null
     const requestId = `${project.id}:${++stateRequestSequenceRef.current}`
@@ -908,9 +986,14 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
   }
 
   useEffect(() => {
-    const timer = window.setTimeout(() => post(focusSelector ? 'focus-selector' : 'clear-focus', focusSelector ? { selector: focusSelector } : {}), 220)
+    if (!focusSelector) {
+      post('clear-focus')
+      return
+    }
+    const timer = window.setTimeout(() => post('focus-selector', { selector: focusSelector }), 220)
+    if (composerEnabled && focusSelector) sendComposerCommand('design-select', { selector: focusSelector })
     return () => window.clearTimeout(timer)
-  }, [device.height, device.width, focusSelector, source])
+  }, [composerEnabled, device.height, device.width, focusSelector, source])
 
   useEffect(() => {
     const timer = window.setTimeout(() => post(themeOverride ? 'set-theme-preview' : 'clear-theme-preview', themeOverride ? { theme: themeOverride } : {}), 240)
@@ -923,7 +1006,14 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
   }, [inspectorEnabled, source])
 
   useEffect(() => {
-    const timer = window.setTimeout(() => post(visualCss ? 'visual-style-preview' : 'visual-style-clear', visualCss ? { css: visualCss } : {}), 80)
+    sendComposerCommand(composerEnabled ? 'design-start' : 'design-stop')
+  }, [composerEnabled, source])
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      post(visualCss ? 'visual-style-preview' : 'visual-style-clear', visualCss ? { css: visualCss } : {})
+      sendComposerCommand('design-sync')
+    }, 80)
     return () => window.clearTimeout(timer)
   }, [source, visualCss])
 
@@ -1015,11 +1105,11 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
       {readinessBlocked && !showBlockedSource ? diagnosticCard() : <><div className="device-space" style={{ width: outerWidth, height: outerHeight }}>
         <div ref={spaceRef} className="device-shell" style={{ width: device.width, height: device.height, transform: `scale(${scale})` }}>
           <iframe key={`${project.id}:${origin ?? 'inline-preview'}:${frameNavigationKey}`} ref={frameRef} title={`${project.name} — ${device.name}`} width={device.width} height={device.height} sandbox={origin ? 'allow-scripts allow-forms allow-same-origin' : ''} src={source} srcDoc={source ? undefined : project.previewHtml ?? undefined} onLoad={synchronizeLoadedFrame} />
-          {resizable && (Object.keys(resizeLabels) as ResizeEdge[]).map((edge) => <button type="button" key={edge} className={`resize-handle resize-handle--${edge}`} aria-label={resizeLabels[edge]} title={`${resizeLabels[edge]} · flèches, Maj pour 20 px`} onPointerDown={(event) => beginResize(edge, event)} onKeyDown={(event) => resizeWithKeyboard(edge, event)} />)}
+          {resizable && !composerEnabled && (Object.keys(resizeLabels) as ResizeEdge[]).map((edge) => <button type="button" key={edge} className={`resize-handle resize-handle--${edge}`} aria-label={resizeLabels[edge]} title={`${resizeLabels[edge]} · flèches, Maj pour 20 px`} onPointerDown={(event) => beginResize(edge, event)} onKeyDown={(event) => resizeWithKeyboard(edge, event)} />)}
         </div>
       </div>{runtimeBlocked && !showBlockedSource && diagnosticCard(true)}</>}
     </div>
-    <footer className="preview-meta"><strong>{label ?? device.name}</strong><code>{device.width} × {device.height} CSS px</code>{resizable && <span><i /> Glissez un bord</span>}{zoomable && <PreviewZoomControls scale={scale} autoFit={autoFit} onZoomOut={() => applyManualZoom(stepPreviewScale(scaleRef.current, -1))} onZoomIn={() => applyManualZoom(stepPreviewScale(scaleRef.current, 1))} onActualSize={() => applyManualZoom(1)} onFit={() => setAutoFit(true)} />}</footer>
+    <footer className="preview-meta"><strong>{label ?? device.name}</strong><code>{device.width} × {device.height} CSS px</code>{resizable && !composerEnabled && <span><i /> Glissez un bord</span>}{composerEnabled && <span><i /> Poignées de l’élément actives</span>}{zoomable && <PreviewZoomControls scale={scale} autoFit={autoFit} onZoomOut={() => applyManualZoom(stepPreviewScale(scaleRef.current, -1))} onZoomIn={() => applyManualZoom(stepPreviewScale(scaleRef.current, 1))} onActualSize={() => applyManualZoom(1)} onFit={() => setAutoFit(true)} />}</footer>
   </section>
 }
 
@@ -1036,7 +1126,7 @@ export default function App(): ReactElement {
   const [previewMode, setPreviewMode] = useState<PreviewMode>('source')
   const [labMode, setLabMode] = useState<LabMode>('device')
   const [stageFullscreen, setStageFullscreen] = useState(false)
-  const [visualMode, setVisualMode] = useState<VisualEditorMode>('select')
+  const [visualMode, setVisualMode] = useState<VisualEditorMode>('compose')
   const [inspectorLocation, setInspectorLocation] = useState<InspectorLocation>(null)
   const [inspectorPhase, setInspectorPhase] = useState<InspectorPhase>('idle')
   const [inspectedElement, setInspectedElement] = useState<VisualElementSnapshot | null>(null)
@@ -1374,7 +1464,7 @@ export default function App(): ReactElement {
     setWorkspaceOrigin(null)
     setInspectorTab('findings')
     setLabMode('device')
-    setVisualMode('select')
+    setVisualMode(next.source.kind === 'local-project' ? 'compose' : 'select')
     setVisualScope({ kind: 'mobile' })
     setVisualRouteScope('current')
     setVisualMultipleConfirmed(false)
@@ -1526,6 +1616,32 @@ export default function App(): ReactElement {
       commitVisualOperations(current)
     } catch (error) {
       flash(error instanceof Error ? error.message : 'Cette valeur ne peut pas être transformée en CSS sûr.')
+    }
+  }
+
+  function commitVisualGesture(value: VisualGestureCommit): void {
+    if (!visualAuthorization?.allowed) return
+    try {
+      const gesture = sanitizeVisualGestureCommit(value)
+      if (!gesture) throw new Error('Ce geste ne peut pas être appliqué en toute sécurité.')
+      const route = visualRouteScope === 'current' ? { kind: 'current' as const, path: documentPath(activePath) } : { kind: 'all' as const }
+      const batch = visualGestureOperations(gesture, { scope: visualScope, route })
+      const next = mergeVisualGestureOperations(visualHistory.present, batch)
+      if (next.length === visualHistory.present.length && next.every((operation, index) => operation === visualHistory.present[index])) return
+      commitVisualOperations(next)
+      const selected = gesture.mutations[0]?.target
+      if (selected) setInspectedElement(selected)
+      const retainedCount = next.filter((operation) => batch.some((candidate) => visualEditOperationKey(candidate) === visualEditOperationKey(operation))).length
+      const message = retainedCount === 0
+        ? 'Le réglage est revenu à sa valeur source ; la surcharge temporaire a été retirée.'
+        : gesture.kind === 'reorder'
+          ? `Ordre visuel préparé pour ${retainedCount} élément${retainedCount > 1 ? 's' : ''}. Testez aussi le clavier avant validation.`
+        : gesture.kind === 'resize'
+          ? 'Dimensions préparées pour ce format. Passez en mode Tester pour vérifier le contenu réel.'
+          : 'Position préparée sans sortir le bloc de son flux. Le site reste à tester avant validation.'
+      flash(message)
+    } catch (error) {
+      flash(error instanceof Error ? error.message : 'Ce geste ne peut pas être transformé en CSS responsive sûr.')
     }
   }
 
@@ -2255,6 +2371,7 @@ export default function App(): ReactElement {
         onMultipleConfirmed={setVisualMultipleConfirmed}
         onInspect={(element, phase) => { if (phase === 'selected') { setInspectedElement(element); setVisualMultipleConfirmed(false) } }}
         onInspectorStop={() => setVisualMode('interact')}
+        onGesture={commitVisualGesture}
         onProperty={updateVisualProperty}
         onRemoveOperation={removeVisualOperation}
         onUndo={undoVisualEdit}
@@ -2425,7 +2542,7 @@ function VisualPropertiesPanel({ target, scope, routeScope, multipleConfirmed, o
   </aside>
 }
 
-function VisualEditorView({ project, remotePreviewVisible, device, family, familyDevices, selectedDeviceId, width, height, path, mode, scope, routeScope, currentRoutePersistent, target, multipleConfirmed, operations, visualCss, authorization, canUndo, canRedo, busy, onMode, onScope, onRouteScope, onMultipleConfirmed, onInspect, onInspectorStop, onProperty, onRemoveOperation, onUndo, onRedo, onClear, onPrepare, onApply, onFamily, onDevice, onWidth, onHeight, onRotate, onResize, onPathChange, onOpenLab, onOpenCode, onNotice }: {
+function VisualEditorView({ project, remotePreviewVisible, device, family, familyDevices, selectedDeviceId, width, height, path, mode, scope, routeScope, currentRoutePersistent, target, multipleConfirmed, operations, visualCss, authorization, canUndo, canRedo, busy, onMode, onScope, onRouteScope, onMultipleConfirmed, onInspect, onInspectorStop, onGesture, onProperty, onRemoveOperation, onUndo, onRedo, onClear, onPrepare, onApply, onFamily, onDevice, onWidth, onHeight, onRotate, onResize, onPathChange, onOpenLab, onOpenCode, onNotice }: {
   project: ProjectSnapshot & ProjectExtra
   remotePreviewVisible: boolean
   device: Device
@@ -2453,6 +2570,7 @@ function VisualEditorView({ project, remotePreviewVisible, device, family, famil
   onMultipleConfirmed: (confirmed: boolean) => void
   onInspect: (element: VisualElementSnapshot, phase: 'hover' | 'selected') => void
   onInspectorStop: () => void
+  onGesture: (gesture: VisualGestureCommit) => void
   onProperty: (property: VisualEditProperty, value: string) => void
   onRemoveOperation: (id: string) => void
   onUndo: () => void
@@ -2482,7 +2600,7 @@ function VisualEditorView({ project, remotePreviewVisible, device, family, famil
   return <div className="visual-editor-page">
     <h1 className="sr-only">Atelier visuel</h1>
     <div className="visual-toolbar">
-      <div className="visual-mode-switch" role="group" aria-label="Mode de l’Atelier"><button className={mode === 'select' ? 'is-active' : ''} onClick={() => onMode('select')} aria-pressed={mode === 'select'}><Icon name="cursor" size={15} /> Sélectionner</button><button className={mode === 'interact' ? 'is-active' : ''} onClick={() => onMode('interact')} aria-pressed={mode === 'interact'}><Icon name="play" size={15} /> Interagir</button><button className={mode === 'compare' ? 'is-active' : ''} onClick={() => onMode('compare')} aria-pressed={mode === 'compare'} disabled={remote} title={remote ? 'La comparaison du localhost utilise une seule session réelle.' : undefined}><Icon name="compare" size={15} /> Avant / après</button></div>
+      <div className="visual-mode-switch" role="group" aria-label="Mode de l’Atelier"><button className={mode === 'compose' ? 'is-active' : ''} onClick={() => onMode('compose')} aria-pressed={mode === 'compose'} disabled={remote} title={remote ? 'La composition directe nécessite la preview locale instrumentée. Les propriétés restent disponibles.' : 'Figer la page et manipuler ses éléments à la souris'}><Icon name="compose" size={15} /> Composer</button><button className={mode === 'select' ? 'is-active' : ''} onClick={() => onMode('select')} aria-pressed={mode === 'select'}><Icon name="cursor" size={15} /> Propriétés</button><button className={mode === 'interact' ? 'is-active' : ''} onClick={() => onMode('interact')} aria-pressed={mode === 'interact'}><Icon name="play" size={15} /> Tester</button><button className={mode === 'compare' ? 'is-active' : ''} onClick={() => onMode('compare')} aria-pressed={mode === 'compare'} disabled={remote} title={remote ? 'La comparaison du localhost utilise une seule session réelle.' : undefined}><Icon name="compare" size={15} /> Avant / après</button></div>
       <div className="visual-history-actions"><button className="icon-button" type="button" onClick={onUndo} disabled={!canUndo} aria-label="Annuler la dernière modification" title="Annuler"><Icon name="undo" size={15} /></button><button className="icon-button" type="button" onClick={onRedo} disabled={!canRedo} aria-label="Rétablir la modification" title="Rétablir"><Icon name="redo" size={15} /></button></div>
       <div className="visual-toolbar-divider" />
       <label className="visual-scope-select"><span>Écran</span><select value={selectedScope} onChange={(event) => { const next = event.target.value; onScope(next === 'all' || next === 'mobile' || next === 'tablet' ? { kind: next } : { kind: 'custom', minWidth: device.width, maxWidth: device.width }) }}><option value="all">Toutes tailles</option><option value="mobile">Mobile ≤ 767 px</option><option value="tablet">Tablette 768–1024 px</option><option value="custom">Plage personnalisée</option></select></label>
@@ -2493,10 +2611,10 @@ function VisualEditorView({ project, remotePreviewVisible, device, family, famil
     </div>
     <div className="visual-device-bar"><DeviceControls family={family} devices={familyDevices} selectedId={selectedDeviceId} width={width} height={height} onFamily={onFamily} onDevice={onDevice} onWidth={onWidth} onHeight={onHeight} onRotate={onRotate} /></div>
     <div className="visual-workspace">
-      <section className="visual-canvas"><header><span><i />{mode === 'select' ? 'Cliquez pour sélectionner' : mode === 'interact' ? 'Interactions du site actives' : 'Source et proposition synchronisées'}</span><code>{path}</code></header><div className="visual-canvas-body">{remote
+      <section className={`visual-canvas visual-canvas--${mode}`}><header><span><i />{mode === 'compose' ? 'Page figée · glissez un bloc ou une poignée' : mode === 'select' ? 'Sélection et propriétés CSS' : mode === 'interact' ? 'Aperçu fonctionnel · interactions actives' : 'Source et proposition synchronisées'}</span><code>{path}</code></header><div className="visual-canvas-body">{remote
         ? <RemotePreview projectId={project.id} device={device} visible={remotePreviewVisible} embedded automaticAudit={false} onResize={onResize} onAudit={() => undefined} onState={(state) => onPathChange(state.path)} onNotice={onNotice} />
         : mode === 'compare' ? <div className="before-after-grid visual-before-after"><div className="comparison-pane"><header><span>Avant</span><strong>Source</strong></header><PreviewFrame compact zoomable project={project} origin={project.previewOrigin} device={device} path={path} label="Avant — Source" onPathChange={onPathChange} /></div><div className="comparison-pane comparison-pane--after"><header><span>Après</span><strong>{operations.length} ajustement{operations.length > 1 ? 's' : ''}</strong></header><PreviewFrame compact zoomable project={project} origin={project.previewOrigin} device={device} path={path} label="Après — Atelier" visualCss={visualCss} onPathChange={onPathChange} /></div></div>
-          : <PreviewFrame project={project} origin={project.previewOrigin} device={device} path={path} resizable zoomable inspectorEnabled={mode === 'select'} focusSelector={target?.selector} visualCss={visualCss} onInspectElement={onInspect} onInspectorStop={onInspectorStop} onResize={onResize} onPathChange={onPathChange} />}</div><footer><span className="source-badge"><i />Preview temporaire</span><small>{mode === 'select' ? 'Les clics sont capturés ; passez en mode Interagir pour naviguer.' : 'Aucun fichier n’est modifié pendant cette étape.'}</small></footer></section>
+          : <PreviewFrame project={project} origin={project.previewOrigin} device={device} path={path} resizable zoomable inspectorEnabled={mode === 'select'} composerEnabled={mode === 'compose'} focusSelector={mode === 'compose' || mode === 'select' ? target?.selector : null} visualCss={visualCss} onInspectElement={onInspect} onInspectorStop={onInspectorStop} onComposerGesture={onGesture} onComposerNotice={onNotice} onResize={onResize} onPathChange={onPathChange} />}</div><footer><span className="source-badge"><i />Preview temporaire</span><small>{mode === 'compose' ? 'Page figée · flèches : 1 px · Maj : 10 px · Échap : annuler le geste.' : mode === 'select' ? 'Les clics sont capturés ; passez en mode Tester pour naviguer.' : mode === 'interact' ? 'Le vrai site fonctionne avec les changements temporaires.' : 'Aucun fichier n’est modifié pendant cette étape.'}</small></footer></section>
       <VisualPropertiesPanel target={target} scope={scope} routeScope={routeScope} multipleConfirmed={multipleConfirmed} operations={operations} authorization={authorization} onMultipleConfirmed={onMultipleConfirmed} onProperty={onProperty} onRemoveOperation={onRemoveOperation} onOpenCode={onOpenCode} />
     </div>
     <footer className="visual-change-tray"><div className="visual-change-summary"><span className="visual-change-count">{operations.length}</span><span><strong>Changement{operations.length > 1 ? 's' : ''} dans l’Atelier</strong><small>{operations.length ? `${new Set(operations.map((operation) => operation.target.selector)).size} cible${new Set(operations.map((operation) => operation.target.selector)).size > 1 ? 's' : ''} · ${operationScopeSummary}` : 'Sélectionnez un élément pour commencer.'}</small></span></div><div className="visual-change-list">{operations.slice(-3).map((operation) => <span key={operation.id}><code>{operation.property}</code><b>{operation.after}</b><button onClick={() => onRemoveOperation(operation.id)} aria-label={`Retirer ${operation.property}`}><Icon name="close" size={11} /></button></span>)}{operations.length > 3 && <em>+{operations.length - 3}</em>}</div><div className="visual-tray-actions">{operations.length > 0 && <button className="text-button" type="button" onClick={onClear} disabled={busy}>Tout effacer</button>}<button className="button button--secondary" type="button" onClick={onPrepare} disabled={!operations.length || busy}><Icon name="changes" size={15} /> Préparer le code</button><button className="button button--primary" type="button" onClick={onApply} disabled={!operations.length || busy}><Icon name={authorization.persistable ? 'check' : 'export'} size={15} />{authorization.persistable ? 'Appliquer au projet' : 'Préparer l’export'}</button></div></footer>

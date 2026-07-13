@@ -464,6 +464,58 @@ test('l’Atelier visuel prépare une surcharge responsive liée uniquement à l
   assert.equal(repeated.snapshot.changedFiles.length, 0)
 })
 
+test('un nouveau geste remplace sa précédente règle gérée au lieu de l’empiler', async (context) => {
+  const fixture = await createFixture()
+  context.after(() => rm(fixture.root, { recursive: true, force: true }))
+  const project = await analyzeProject(fixture.root)
+  const operation = (after: string) => createVisualEditOperation({
+    target: { selector: 'html > body > nav.navigation', metadata: { matchCount: 1, selectionMode: 'single', stable: true, editable: true } },
+    property: 'gap',
+    before: '8px',
+    after,
+    scope: { kind: 'mobile' },
+    route: { kind: 'current', path: '/index.html' }
+  })
+  const firstOperation = operation('12px')
+  const first = await buildProjectStaging(fixture.root, project, { issueIds: [], themeTarget: null, instructions: [], visualEdits: [firstOperation] })
+  await applyProjectStagingToSource(fixture.root, first)
+
+  const refreshed = await analyzeProject(fixture.root)
+  const secondOperation = operation('24px')
+  assert.equal(secondOperation.id, firstOperation.id)
+  const second = await buildProjectStaging(fixture.root, refreshed, { issueIds: [], themeTarget: null, instructions: [], visualEdits: [secondOperation] })
+  const generated = second.overrides.get('.responsiver/responsiver.generated.css')?.toString('utf8') ?? ''
+  assert.match(generated, /gap: 24px !important/)
+  assert.doesNotMatch(generated, /gap: 12px !important/)
+  assert.equal(generated.match(new RegExp(`Responsiver visual:start ${firstOperation.id}`, 'g'))?.length, 1)
+})
+
+test('les anciennes règles visuelles dupliquées sont migrées vers un seul bloc géré', async (context) => {
+  const fixture = await createFixture()
+  context.after(() => rm(fixture.root, { recursive: true, force: true }))
+  const project = await analyzeProject(fixture.root)
+  const operation = createVisualEditOperation({
+    target: { selector: 'html > body > nav.navigation', metadata: { matchCount: 1, selectionMode: 'single', stable: true, editable: true } },
+    property: 'gap',
+    before: '8px',
+    after: '24px',
+    scope: { kind: 'mobile' },
+    route: { kind: 'current', path: '/index.html' }
+  })
+  await mkdir(join(fixture.root, '.responsiver'), { recursive: true })
+  await writeFile(join(fixture.root, '.responsiver', 'responsiver.generated.css'), [
+    '/*\n * Généré localement par Responsiver.\n * Chaque règle reste lisible, exportable et réversible.\n */',
+    `/* Atelier visuel · /index.html · ${operation.id} */\n.navigation { gap: 12px !important; }`,
+    `/* Atelier visuel · /index.html · ${operation.id} */\n.navigation { gap: 16px !important; }`
+  ].join('\n\n'))
+
+  const staging = await buildProjectStaging(fixture.root, project, { issueIds: [], themeTarget: null, instructions: [], visualEdits: [operation] })
+  const generated = staging.overrides.get('.responsiver/responsiver.generated.css')?.toString('utf8') ?? ''
+  assert.match(generated, /gap: 24px !important/)
+  assert.doesNotMatch(generated, /gap: (?:12|16)px !important/)
+  assert.equal(generated.match(new RegExp(`Responsiver visual:start ${operation.id}`, 'g'))?.length, 1)
+})
+
 test('un correctif déjà couvert par la feuille gérée devient un no-op explicite', async (context) => {
   const fixture = await createFixture()
   context.after(() => rm(fixture.root, { recursive: true, force: true }))

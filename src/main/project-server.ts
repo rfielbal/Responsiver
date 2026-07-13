@@ -136,6 +136,19 @@ const bridge = `<style data-responsiver-bridge-style>
   const VISUAL_MAX_OCCURRENCE_SCAN = ${LOCAL_VISUAL_BRIDGE_LIMITS.maxOccurrenceScan};
   let originalThemeState = null;
   let mutationObserver = null;
+  const nativeApply = Reflect.apply;
+  const nativeStringify = JSON.stringify.bind(JSON);
+  const nativeEventAddEventListener = EventTarget.prototype.addEventListener;
+  const nativeEventStopImmediatePropagation = Event.prototype.stopImmediatePropagation;
+  const nativeMessagePortPostMessage = MessagePort.prototype.postMessage;
+  const nativeMessagePortStart = MessagePort.prototype.start;
+  const nativeMessagePortClose = MessagePort.prototype.close;
+  const nativeMessageEventData = Object.getOwnPropertyDescriptor(MessageEvent.prototype, 'data')?.get;
+  const nativeMessageEventPorts = Object.getOwnPropertyDescriptor(MessageEvent.prototype, 'ports')?.get;
+  const nativeMessageEventSource = Object.getOwnPropertyDescriptor(MessageEvent.prototype, 'source')?.get;
+  const readMessageEventData = (event) => nativeMessageEventData ? nativeApply(nativeMessageEventData, event, []) : event.data;
+  const readMessageEventPorts = (event) => nativeMessageEventPorts ? nativeApply(nativeMessageEventPorts, event, []) : event.ports;
+  const readMessageEventSource = (event) => nativeMessageEventSource ? nativeApply(nativeMessageEventSource, event, []) : event.source;
   const nativeAttachShadow = Element.prototype.attachShadow;
   Element.prototype.attachShadow = function(init) {
     const root = nativeAttachShadow.call(this, init);
@@ -903,10 +916,10 @@ const bridge = `<style data-responsiver-bridge-style>
   const inspectorStyleProperties = Object.freeze([
     'display', 'position', 'box-sizing', 'width', 'height', 'min-width', 'min-height', 'max-width', 'max-height',
     'margin-top', 'margin-right', 'margin-bottom', 'margin-left', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
-    'gap', 'row-gap', 'column-gap', 'flex-direction', 'flex-wrap', 'justify-content', 'align-items', 'align-self',
+    'gap', 'row-gap', 'column-gap', 'flex-direction', 'flex-wrap', 'justify-content', 'align-items', 'align-self', 'justify-self', 'order',
     'grid-template-columns', 'grid-template-rows', 'font-family', 'font-size', 'font-weight', 'line-height', 'letter-spacing',
     'text-align', 'white-space', 'color', 'background-color', 'border-top-width', 'border-top-style', 'border-top-color',
-    'border-radius', 'overflow-x', 'overflow-y', 'opacity', 'visibility', 'z-index', 'transform'
+    'border-radius', 'overflow-x', 'overflow-y', 'opacity', 'visibility', 'z-index', 'transform', 'translate'
   ]);
   let inspectorActive = false;
   let inspectorHovered = null;
@@ -972,7 +985,8 @@ const bridge = `<style data-responsiver-bridge-style>
   };
   const isInspectorInternal = (element) => element.hasAttribute('data-responsiver-inspector-overlay') ||
     element.hasAttribute('data-responsiver-bridge') || element.hasAttribute('data-responsiver-bridge-style') ||
-    element.hasAttribute('data-responsiver-visual-preview');
+    element.hasAttribute('data-responsiver-visual-preview') || element.hasAttribute('data-responsiver-composer-active') ||
+    element.hasAttribute('data-responsiver-composer-freeze');
   const isInspectable = (element) => element instanceof Element && element.isConnected && !isInspectorInternal(element) &&
     !/^(?:base|head|link|meta|script|style|template|title)$/.test(element.tagName.toLowerCase());
   const inspectorTargetFromEvent = (event) => {
@@ -1076,6 +1090,7 @@ const bridge = `<style data-responsiver-bridge-style>
     message('inspector-stopped', { reason, route: inspectorClean(location.pathname + location.search + location.hash, VISUAL_MAX_ROUTE_LENGTH) });
   };
   const startInspector = () => {
+    if (designActive) stopDesign('inspector');
     if (!inspectorActive) {
       inspectorActive = true;
       inspectorHovered = null;
@@ -1098,6 +1113,481 @@ const bridge = `<style data-responsiver-bridge-style>
     const payload = inspectorPayload(target, true);
     if (payload) message('inspector-selected', payload);
   };
+  let designActive = false;
+  let designPort = null;
+  let designSessionId = '';
+  let designRevision = 0;
+  let designHost = null;
+  let designRoot = null;
+  let designBox = null;
+  let designLabel = null;
+  let designGuideX = null;
+  let designGuideY = null;
+  let designSelected = null;
+  let designGesture = null;
+  let designPaintFrame = 0;
+  let designPendingRect = null;
+  let designFreezeStyle = null;
+  const DESIGN_PROTOCOL = 1;
+  const DESIGN_MAX_PAYLOAD_BYTES = 32768;
+  const designClean = (value, limit) => inspectorClean(value, limit);
+  const designMessage = (type, payload = {}) => {
+    if (!designPort || !designSessionId) return;
+    const data = { protocol: DESIGN_PROTOCOL, sessionId: designSessionId, documentId, revision: designRevision, type, ...payload };
+    try {
+      if (nativeStringify(data).length > DESIGN_MAX_PAYLOAD_BYTES) return;
+      nativeApply(nativeMessagePortPostMessage, designPort, [data]);
+    } catch {}
+  };
+  const parseTranslate = (value) => {
+    const normalized = String(value || '').trim();
+    if (!normalized || normalized === 'none') return { x: 0, y: 0 };
+    const match = normalized.match(/^(-?(?:\\d+\\.?\\d*|\\.\\d+)px)(?:\\s+(-?(?:\\d+\\.?\\d*|\\.\\d+)px))?$/i);
+    if (!match) return null;
+    return { x: Number.parseFloat(match[1]), y: Number.parseFloat(match[2] || '0') };
+  };
+  const formatTranslate = (x, y) => {
+    const roundedX = Math.round(x);
+    const roundedY = Math.round(y);
+    return roundedX === 0 && roundedY === 0 ? 'none' : roundedX + 'px ' + roundedY + 'px';
+  };
+  const designSelectable = (element) => {
+    if (!isInspectable(element) || parent !== top || /^(?:html|body|iframe|object|embed|input|option|select|textarea)$/.test(element.tagName.toLowerCase())) return false;
+    if (element.closest('[contenteditable], input, select, textarea')) return false;
+    const rectangle = element.getBoundingClientRect();
+    return rectangle.width >= 3 && rectangle.height >= 3 && rectangle.width <= 100000 && rectangle.height <= 100000;
+  };
+  const designTextual = (element) => {
+    const tag = element.tagName.toLowerCase();
+    if (/^(?:a|address|blockquote|button|caption|cite|code|dd|dt|figcaption|label|legend|li|p|pre|q|small|span|strong|em|h[1-6]|td|th)$/.test(tag)) return true;
+    for (const node of element.childNodes) {
+      if (node.nodeType === Node.TEXT_NODE && /\\S/.test(node.textContent || '')) return true;
+    }
+    return false;
+  };
+  const nearbyDesignChildren = (parentElement, selectedElement, limit, includeSelected = false) => {
+    if (!parentElement || !selectedElement || limit < 1) return [];
+    const children = parentElement.children;
+    let selectedIndex = -1;
+    for (let index = 0; index < children.length; index += 1) {
+      if (children[index] === selectedElement) { selectedIndex = index; break; }
+    }
+    if (selectedIndex < 0) return [];
+    const radius = Math.max(limit, 4);
+    const start = Math.max(0, selectedIndex - radius);
+    const end = Math.min(children.length, selectedIndex + radius + 1);
+    const result = [];
+    for (let index = start; index < end && result.length < limit; index += 1) {
+      const entry = children[index];
+      if ((!includeSelected && entry === selectedElement) || !designSelectable(entry)) continue;
+      result.push(entry);
+    }
+    return result;
+  };
+  const designSnapshot = (element, detailed = true) => {
+    if (!designSelectable(element)) return null;
+    const payload = inspectorPayload(element, true);
+    if (!payload || payload.occurrences !== 1 || payload.selector === '*' || payload.selector.includes(' >>> ')) return null;
+    return { ...payload, route: designClean(location.pathname, VISUAL_MAX_ROUTE_LENGTH) || '/', styles: detailed ? payload.styles : { order: payload.styles.order || '0', translate: payload.styles.translate || 'none' }, text: '', role: null, ariaLabel: null, editable: true, insideFrame: false };
+  };
+  const designTargetFromEvent = (event) => {
+    const path = typeof event.composedPath === 'function' ? event.composedPath() : [event.target];
+    return path.find((candidate) => candidate instanceof Element && designSelectable(candidate)) || null;
+  };
+  const createDesignOverlay = () => {
+    if (designHost?.isConnected) return;
+    designHost = document.createElement('div');
+    designHost.setAttribute('data-responsiver-composer-active', '');
+    for (const [name, value] of Object.entries({ all: 'initial', position: 'fixed', inset: '0', display: 'block', margin: '0', padding: '0', 'pointer-events': 'auto', 'z-index': '2147483647', contain: 'strict' })) {
+      designHost.style.setProperty(name, value, 'important');
+    }
+    designRoot = nativeApply(nativeAttachShadow, designHost, [{ mode: 'open' }]);
+    const style = document.createElement('style');
+    style.textContent = [
+      ':host{all:initial;position:fixed;inset:0;display:block;pointer-events:auto;z-index:2147483647;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}',
+      '#box{position:fixed;display:none;box-sizing:border-box;border:2px solid #bf5239;background:rgba(191,82,57,.055);box-shadow:0 0 0 1px rgba(255,255,255,.92),0 8px 26px rgba(39,34,29,.18);pointer-events:none}',
+      '#box.pending{border-style:dashed;background:rgba(191,82,57,.11)}',
+      '#label{position:absolute;left:-2px;top:-25px;max-width:260px;height:22px;box-sizing:border-box;padding:4px 7px;color:#fff;background:#2e302c;font:600 10px/14px ui-monospace,SFMono-Regular,Menlo,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;box-shadow:0 2px 10px rgba(0,0,0,.18)}',
+      '.handle{position:absolute;width:12px;height:12px;box-sizing:border-box;border:2px solid #fff;border-radius:50%;background:#bf5239;box-shadow:0 0 0 1px #7f2f1e;pointer-events:auto;touch-action:none}',
+      '.handle[data-edge=n]{left:50%;top:-7px;transform:translateX(-50%);cursor:ns-resize}.handle[data-edge=ne]{right:-7px;top:-7px;cursor:nesw-resize}.handle[data-edge=e]{right:-7px;top:50%;transform:translateY(-50%);cursor:ew-resize}.handle[data-edge=se]{right:-7px;bottom:-7px;cursor:nwse-resize}',
+      '.handle[data-edge=s]{left:50%;bottom:-7px;transform:translateX(-50%);cursor:ns-resize}.handle[data-edge=sw]{left:-7px;bottom:-7px;cursor:nesw-resize}.handle[data-edge=w]{left:-7px;top:50%;transform:translateY(-50%);cursor:ew-resize}.handle[data-edge=nw]{left:-7px;top:-7px;cursor:nwse-resize}',
+      '.guide{position:fixed;display:none;background:#2293a6;box-shadow:0 0 0 1px rgba(255,255,255,.7);pointer-events:none}.guide.x{top:0;bottom:0;width:1px}.guide.y{left:0;right:0;height:1px}'
+    ].join('');
+    designBox = document.createElement('div');
+    designBox.id = 'box';
+    designBox.setAttribute('data-responsiver-composer-overlay', '');
+    designLabel = document.createElement('div');
+    designLabel.id = 'label';
+    designBox.append(designLabel);
+    for (const edge of ['n', 'ne', 'e', 'se', 's', 'sw', 'w', 'nw']) {
+      const handle = document.createElement('span');
+      handle.className = 'handle';
+      handle.setAttribute('data-edge', edge);
+      handle.setAttribute('data-responsiver-composer-handle', edge);
+      handle.addEventListener('pointerdown', (event) => {
+        designHost?.setAttribute('data-responsiver-composer-last-input', 'resize-' + edge);
+        beginDesignGesture('resize', edge, event);
+      }, true);
+      designBox.append(handle);
+    }
+    designGuideX = document.createElement('div');
+    designGuideX.className = 'guide x';
+    designGuideY = document.createElement('div');
+    designGuideY.className = 'guide y';
+    designRoot.append(style, designBox, designGuideX, designGuideY);
+    document.documentElement.append(designHost);
+    designHost.addEventListener('pointerdown', (event) => {
+      if (!designActive || designGesture || !event.isTrusted || event.button !== 0) return;
+      const handle = typeof event.composedPath === 'function' && event.composedPath().find((entry) => entry instanceof Element && entry.hasAttribute('data-responsiver-composer-handle'));
+      if (handle) return;
+      designHost.setAttribute('data-responsiver-composer-last-input', 'move');
+      designHost.style.setProperty('pointer-events', 'none', 'important');
+      const target = document.elementFromPoint(event.clientX, event.clientY);
+      designHost.style.setProperty('pointer-events', 'auto', 'important');
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (!target || !selectDesignTarget(target, true)) return;
+      beginDesignGesture('move', '', event);
+    }, true);
+  };
+  const clearDesignGuides = () => {
+    designGuideX?.style.setProperty('display', 'none');
+    designGuideY?.style.setProperty('display', 'none');
+  };
+  const paintDesignRect = (rectangle, pending = false) => {
+    if (!designBox || !rectangle || rectangle.width <= 0 || rectangle.height <= 0) {
+      designBox?.style.setProperty('display', 'none');
+      return;
+    }
+    designBox.classList.toggle('pending', pending);
+    designBox.style.setProperty('display', 'block');
+    designBox.style.setProperty('left', inspectorRound(rectangle.left) + 'px');
+    designBox.style.setProperty('top', inspectorRound(rectangle.top) + 'px');
+    designBox.style.setProperty('width', inspectorRound(rectangle.width) + 'px');
+    designBox.style.setProperty('height', inspectorRound(rectangle.height) + 'px');
+    if (designLabel && designSelected) {
+      const classes = [...designSelected.classList].slice(0, 2).map((name) => '.' + name).join('');
+      designLabel.textContent = designSelected.tagName.toLowerCase() + classes + '  ' + Math.round(rectangle.width) + '×' + Math.round(rectangle.height);
+    }
+  };
+  const repaintDesign = () => {
+    designPaintFrame = 0;
+    if (!designActive || !designSelected?.isConnected) {
+      if (designSelected && !designSelected.isConnected) designMessage('design-invalidated', { reason: 'target-detached' });
+      designSelected = null;
+      designPendingRect = null;
+      paintDesignRect(null);
+      return;
+    }
+    if (designGesture) paintDesignRect(designGesture.previewRect, false);
+    else if (designPendingRect) paintDesignRect(designPendingRect, true);
+    else paintDesignRect(designSelected.getBoundingClientRect(), false);
+  };
+  const scheduleDesignPaint = () => {
+    if (!designActive || designPaintFrame) return;
+    designPaintFrame = requestAnimationFrame(repaintDesign);
+  };
+  const selectDesignTarget = (element, notify = true) => {
+    const snapshot = designSnapshot(element);
+    if (!snapshot) {
+      designMessage('design-rejected', { reason: 'unstable-or-sensitive-target' });
+      return false;
+    }
+    designSelected = element;
+    designPendingRect = null;
+    scheduleDesignPaint();
+    if (notify) designMessage('design-selection', { selection: snapshot });
+    return true;
+  };
+  const selectDesignSelector = (value) => {
+    if (!designActive || typeof value !== 'string' || !value.trim() || value.includes('>>>')) return;
+    let target = null;
+    try {
+      const matches = document.querySelectorAll(value.trim().slice(0, VISUAL_MAX_SELECTOR_LENGTH));
+      if (matches.length === 1) target = matches[0];
+    } catch {}
+    if (target) selectDesignTarget(target, true);
+  };
+  const finishDesignGesture = (cancelled = false) => {
+    if (!designGesture) return;
+    try { designGesture.capture?.releasePointerCapture?.(designGesture.pointerId); } catch {}
+    designGesture = null;
+    clearDesignGuides();
+    if (cancelled) designPendingRect = null;
+    scheduleDesignPaint();
+  };
+  const stopDesign = (reason = 'request') => {
+    if (designPaintFrame) cancelAnimationFrame(designPaintFrame);
+    designPaintFrame = 0;
+    finishDesignGesture(true);
+    designActive = false;
+    designSelected = null;
+    designPendingRect = null;
+    designHost?.remove();
+    designFreezeStyle?.remove();
+    designHost = null;
+    designRoot = null;
+    designBox = null;
+    designLabel = null;
+    designGuideX = null;
+    designGuideY = null;
+    designFreezeStyle = null;
+    designMessage('design-stopped', { reason });
+  };
+  const startDesign = () => {
+    stopInspector('composer');
+    designActive = true;
+    document.activeElement instanceof HTMLElement && document.activeElement.blur();
+    if (!designFreezeStyle) {
+      designFreezeStyle = document.createElement('style');
+      designFreezeStyle.setAttribute('data-responsiver-composer-freeze', '');
+      designFreezeStyle.textContent = '*,*::before,*::after{animation-play-state:paused!important;transition-duration:0s!important;transition-delay:0s!important;caret-color:transparent!important;scroll-behavior:auto!important;-webkit-user-select:none!important;user-select:none!important}';
+      (document.head || document.documentElement).append(designFreezeStyle);
+    }
+    createDesignOverlay();
+    scheduleDesignPaint();
+    designMessage('design-started', { route: designClean(location.pathname, VISUAL_MAX_ROUTE_LENGTH) || '/' });
+  };
+  const snapDesignAxis = (start, size, delta, targets) => {
+    const anchors = [start + delta, start + delta + size / 2, start + delta + size];
+    let best = { distance: 7, delta, guide: null };
+    for (const target of targets) {
+      for (const anchor of anchors) {
+        const distance = target - anchor;
+        if (Math.abs(distance) < Math.abs(best.distance)) best = { distance, delta: delta + distance, guide: target };
+      }
+    }
+    return best;
+  };
+  const designSnapTargets = (element, parent, axis) => {
+    const parentRect = parent?.getBoundingClientRect();
+    const targets = parentRect ? axis === 'x'
+      ? [parentRect.left, parentRect.left + parentRect.width / 2, parentRect.right]
+      : [parentRect.top, parentRect.top + parentRect.height / 2, parentRect.bottom] : [];
+    const siblings = nearbyDesignChildren(parent, element, 16);
+    for (const sibling of siblings) {
+      const rectangle = sibling.getBoundingClientRect();
+      targets.push(...(axis === 'x' ? [rectangle.left, rectangle.left + rectangle.width / 2, rectangle.right] : [rectangle.top, rectangle.top + rectangle.height / 2, rectangle.bottom]));
+    }
+    return targets;
+  };
+  function beginDesignGesture(kind, edge, event) {
+    if (!designActive || !designSelected || !event.isTrusted || event.button !== 0) return;
+    const snapshot = designSnapshot(designSelected);
+    if (!snapshot) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    const rectangle = designSelected.getBoundingClientRect();
+    const parentElement = designSelected.parentElement;
+    const parentRect = parentElement?.getBoundingClientRect() || { left: 0, top: 0, right: innerWidth, bottom: innerHeight, width: innerWidth, height: innerHeight };
+    const capture = event.currentTarget instanceof Element ? event.currentTarget : designSelected;
+    try { capture.setPointerCapture(event.pointerId); } catch {}
+    designPendingRect = null;
+    designGesture = {
+      id: 'gesture-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10),
+      kind,
+      edge: edge || '',
+      pointerId: event.pointerId,
+      capture,
+      startX: event.clientX,
+      startY: event.clientY,
+      startRect: { left: rectangle.left, top: rectangle.top, right: rectangle.right, bottom: rectangle.bottom, width: rectangle.width, height: rectangle.height },
+      previewRect: { left: rectangle.left, top: rectangle.top, right: rectangle.right, bottom: rectangle.bottom, width: rectangle.width, height: rectangle.height },
+      parentElement,
+      parentRect,
+      moved: false,
+      snapshot
+    };
+    clearDesignGuides();
+    scheduleDesignPaint();
+  }
+  const updateDesignGesture = (event) => {
+    const gesture = designGesture;
+    if (!gesture || event.pointerId !== gesture.pointerId) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    const rawX = event.clientX - gesture.startX;
+    const rawY = event.clientY - gesture.startY;
+    gesture.moved = gesture.moved || Math.hypot(rawX, rawY) >= 2;
+    const start = gesture.startRect;
+    if (gesture.kind === 'move') {
+      const minimumX = gesture.parentRect.left - start.left;
+      const maximumX = gesture.parentRect.right - start.right;
+      const minimumY = gesture.parentRect.top - start.top;
+      const maximumY = gesture.parentRect.bottom - start.bottom;
+      let deltaX = Math.min(maximumX, Math.max(minimumX, rawX));
+      let deltaY = Math.min(maximumY, Math.max(minimumY, rawY));
+      const snappedX = snapDesignAxis(start.left, start.width, deltaX, designSnapTargets(designSelected, gesture.parentElement, 'x'));
+      const snappedY = snapDesignAxis(start.top, start.height, deltaY, designSnapTargets(designSelected, gesture.parentElement, 'y'));
+      deltaX = snappedX.delta;
+      deltaY = snappedY.delta;
+      if (snappedX.guide !== null && designGuideX) { designGuideX.style.left = inspectorRound(snappedX.guide) + 'px'; designGuideX.style.display = 'block'; } else designGuideX?.style.setProperty('display', 'none');
+      if (snappedY.guide !== null && designGuideY) { designGuideY.style.top = inspectorRound(snappedY.guide) + 'px'; designGuideY.style.display = 'block'; } else designGuideY?.style.setProperty('display', 'none');
+      gesture.previewRect = { left: start.left + deltaX, top: start.top + deltaY, right: start.right + deltaX, bottom: start.bottom + deltaY, width: start.width, height: start.height };
+    } else {
+      const edge = gesture.edge;
+      let left = edge.includes('w') ? Math.min(start.right - 24, start.left + rawX) : start.left;
+      let right = edge.includes('e') ? Math.max(start.left + 24, start.right + rawX) : start.right;
+      let top = edge.includes('n') ? Math.min(start.bottom - 24, start.top + rawY) : start.top;
+      let bottom = edge.includes('s') ? Math.max(start.top + 24, start.bottom + rawY) : start.bottom;
+      const tag = designSelected.tagName.toLowerCase();
+      const textual = designTextual(designSelected);
+      const replaced = /^(?:img|video|canvas|svg)$/.test(tag);
+      const horizontal = edge.includes('e') || edge.includes('w');
+      const vertical = edge.includes('n') || edge.includes('s');
+      if (textual && vertical) { top = start.top; bottom = start.bottom; }
+      if (replaced && horizontal) {
+        const ratio = start.width / Math.max(1, start.height);
+        const height = (right - left) / ratio;
+        if (edge.includes('n')) top = bottom - height; else bottom = top + height;
+      } else if (replaced && vertical) {
+        const ratio = start.width / Math.max(1, start.height);
+        right = left + (bottom - top) * ratio;
+      }
+      gesture.previewRect = { left, top, right, bottom, width: right - left, height: bottom - top };
+      clearDesignGuides();
+    }
+    scheduleDesignPaint();
+  };
+  const reorderDesignMutations = (gesture, event) => {
+    const parentElement = gesture.parentElement;
+    if (!parentElement) return null;
+    const layout = getComputedStyle(parentElement).display;
+    if (!/^(?:inline-)?(?:flex|grid)$/.test(layout)) return null;
+    if (parentElement.children.length > 32) return null;
+    const siblings = nearbyDesignChildren(parentElement, designSelected, 32, true).map((element, domIndex) => ({ element, domIndex, order: Number.parseInt(getComputedStyle(element).order, 10) || 0 }));
+    siblings.sort((left, right) => left.order - right.order || left.domIndex - right.domIndex);
+    const from = siblings.findIndex((entry) => entry.element === designSelected);
+    if (from < 0 || siblings.length < 2) return null;
+    const centers = siblings.map((entry) => { const rect = entry.element.getBoundingClientRect(); return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }; });
+    let to = 0;
+    let distance = Number.POSITIVE_INFINITY;
+    for (let index = 0; index < centers.length; index += 1) {
+      const next = Math.hypot(event.clientX - centers[index].x, event.clientY - centers[index].y);
+      if (next < distance) { distance = next; to = index; }
+    }
+    if (to === from) return null;
+    const ordered = [...siblings];
+    const [moved] = ordered.splice(from, 1);
+    ordered.splice(to, 0, moved);
+    const mutations = [];
+    for (const [index, entry] of ordered.entries()) {
+      const target = designSnapshot(entry.element, false);
+      if (!target) return null;
+      mutations.push({ target, property: 'order', before: String(entry.order), after: String(index) });
+    }
+    return { strategy: layout.includes('grid') ? 'grid-order' : 'flex-order', mutations };
+  };
+  const sendDesignCommit = (kind, strategy, mutations, gestureId, warning, pendingRect) => {
+    if (!mutations.length) return false;
+    designPendingRect = pendingRect || null;
+    designMessage('design-commit', { gestureId, kind, strategy, mutations, warning });
+    scheduleDesignPaint();
+    return true;
+  };
+  const commitDesignGesture = (event) => {
+    const gesture = designGesture;
+    if (!gesture || event.pointerId !== gesture.pointerId) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (!gesture.moved || !designSelected?.isConnected) { finishDesignGesture(true); return; }
+    const preview = gesture.previewRect;
+    if (gesture.kind === 'move') {
+      const reordered = reorderDesignMutations(gesture, event);
+      if (reordered) {
+        sendDesignCommit('reorder', reordered.strategy, reordered.mutations, gesture.id, 'visual-order-only', preview);
+      } else {
+        const computed = getComputedStyle(designSelected);
+        const base = parseTranslate(computed.translate);
+        if (!base) { designMessage('design-rejected', { reason: 'existing-complex-transform' }); finishDesignGesture(true); return; }
+        const deltaX = Math.round(preview.left - gesture.startRect.left);
+        const deltaY = Math.round(preview.top - gesture.startRect.top);
+        const mutation = { target: gesture.snapshot, property: 'translate', before: computed.translate || 'none', after: formatTranslate(base.x + deltaX, base.y + deltaY) };
+        sendDesignCommit('move', 'flow-translate', [mutation], gesture.id, 'flow-preserved', preview);
+      }
+    } else {
+      const computed = getComputedStyle(designSelected);
+      const base = parseTranslate(computed.translate);
+      if (!base) { designMessage('design-rejected', { reason: 'existing-complex-transform' }); finishDesignGesture(true); return; }
+      const tag = designSelected.tagName.toLowerCase();
+      const textual = designTextual(designSelected);
+      const replaced = /^(?:img|video|canvas|svg)$/.test(tag);
+      const horizontal = gesture.edge.includes('e') || gesture.edge.includes('w');
+      const vertical = gesture.edge.includes('n') || gesture.edge.includes('s');
+      if (textual && vertical && !horizontal) { designMessage('design-rejected', { reason: 'text-height-is-fluid' }); finishDesignGesture(true); return; }
+      const mutations = [{ target: gesture.snapshot, property: 'box-sizing', before: computed.boxSizing, after: 'border-box' }];
+      if (horizontal || (replaced && vertical)) mutations.push({ target: gesture.snapshot, property: 'width', before: computed.width, after: 'min(' + Math.round(preview.width) + 'px, 100%)' });
+      if (vertical && !textual) mutations.push({ target: gesture.snapshot, property: 'height', before: computed.height, after: replaced ? 'auto' : Math.round(preview.height) + 'px' });
+      const shiftX = Math.round(preview.left - gesture.startRect.left);
+      const shiftY = textual ? 0 : Math.round(preview.top - gesture.startRect.top);
+      if (shiftX || shiftY) mutations.push({ target: gesture.snapshot, property: 'translate', before: computed.translate || 'none', after: formatTranslate(base.x + shiftX, base.y + shiftY) });
+      if (mutations.length === 1) { designMessage('design-rejected', { reason: 'text-height-is-fluid' }); finishDesignGesture(true); return; }
+      sendDesignCommit('resize', 'responsive-size', mutations, gesture.id, replaced ? undefined : 'fixed-height', preview);
+    }
+    finishDesignGesture(false);
+  };
+  const nudgeDesign = (event) => {
+    if (!designActive || !designSelected || !/^Arrow/.test(event.key)) return false;
+    const computed = getComputedStyle(designSelected);
+    const base = parseTranslate(computed.translate);
+    const snapshot = designSnapshot(designSelected);
+    if (!base || !snapshot) return false;
+    const step = event.shiftKey ? 10 : 1;
+    const deltaX = event.key === 'ArrowLeft' ? -step : event.key === 'ArrowRight' ? step : 0;
+    const deltaY = event.key === 'ArrowUp' ? -step : event.key === 'ArrowDown' ? step : 0;
+    const rectangle = designSelected.getBoundingClientRect();
+    sendDesignCommit('nudge', 'flow-translate', [{ target: snapshot, property: 'translate', before: computed.translate || 'none', after: formatTranslate(base.x + deltaX, base.y + deltaY) }], 'gesture-key-' + Date.now().toString(36), 'flow-preserved', { left: rectangle.left + deltaX, top: rectangle.top + deltaY, right: rectangle.right + deltaX, bottom: rectangle.bottom + deltaY, width: rectangle.width, height: rectangle.height });
+    return true;
+  };
+  addEventListener('message', (event) => {
+    const data = readMessageEventData(event);
+    const transferredPorts = readMessageEventPorts(event);
+    if (!event.isTrusted || readMessageEventSource(event) !== parent || !data || data.channel !== channel || data.type !== 'design-connect' || data.protocol !== DESIGN_PROTOCOL || typeof data.sessionId !== 'string' || !transferredPorts?.[0]) return;
+    nativeApply(nativeEventStopImmediatePropagation, event, []);
+    if (designPort) nativeApply(nativeMessagePortClose, designPort, []);
+    designPort = transferredPorts[0];
+    designSessionId = designClean(data.sessionId, 80);
+    designRevision = 0;
+    nativeApply(nativeEventAddEventListener, designPort, ['message', (portEvent) => {
+      const command = readMessageEventData(portEvent);
+      if (!command || command.protocol !== DESIGN_PROTOCOL || command.sessionId !== designSessionId || !Number.isSafeInteger(command.revision) || command.revision < designRevision) return;
+      designRevision = command.revision;
+      if (command.type === 'design-start') startDesign();
+      if (command.type === 'design-stop') stopDesign('request');
+      if (command.type === 'design-select') selectDesignSelector(command.selector);
+      if (command.type === 'design-sync') { designPendingRect = null; scheduleDesignPaint(); }
+      if (command.type === 'design-cancel') finishDesignGesture(true);
+    }]);
+    nativeApply(nativeMessagePortStart, designPort, []);
+    designMessage('design-ready', { route: designClean(location.pathname, VISUAL_MAX_ROUTE_LENGTH) || '/' });
+  }, true);
+  document.addEventListener('pointerdown', (event) => {
+    if (!designActive || designGesture) return;
+    const rawTarget = event.target instanceof Element ? event.target : null;
+    if (rawTarget && isInspectorInternal(rawTarget)) return;
+    const target = designTargetFromEvent(event);
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (!target || !selectDesignTarget(target, true)) return;
+    beginDesignGesture('move', '', event);
+  }, true);
+  document.addEventListener('pointermove', updateDesignGesture, true);
+  document.addEventListener('pointerup', commitDesignGesture, true);
+  document.addEventListener('pointercancel', (event) => {
+    if (!designGesture || event.pointerId !== designGesture.pointerId) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    finishDesignGesture(true);
+  }, true);
+  for (const type of ['mousedown', 'mouseup', 'click', 'dblclick', 'auxclick', 'contextmenu', 'touchstart', 'touchmove', 'touchend', 'dragstart', 'drag', 'dragend', 'dragenter', 'dragover', 'dragleave', 'drop', 'selectstart', 'beforeinput', 'input', 'change', 'submit', 'reset']) {
+    document.addEventListener(type, (event) => {
+      if (!designActive) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }, true);
+  }
+  addEventListener('scroll', scheduleDesignPaint, true);
+  addEventListener('blur', () => { if (designGesture) finishDesignGesture(true); });
   const applyVisualStylePreview = (value) => {
     if (typeof value !== 'string') {
       message('visual-style-preview-result', { applied: false, reason: 'invalid-css' });
@@ -1116,12 +1606,14 @@ const bridge = `<style data-responsiver-bridge-style>
       (document.head || document.documentElement).append(style);
     }
     style.textContent = value;
-    requestAnimationFrame(() => { schedule(); scheduleInspectorHighlights(); });
+    designPendingRect = null;
+    requestAnimationFrame(() => { schedule(); scheduleInspectorHighlights(); scheduleDesignPaint(); });
     message('visual-style-preview-result', { applied: true, bytes: byteLength });
   };
   const clearVisualStylePreview = () => {
     document.querySelector('style[data-responsiver-visual-preview]')?.remove();
-    requestAnimationFrame(() => { schedule(); scheduleInspectorHighlights(); });
+    designPendingRect = null;
+    requestAnimationFrame(() => { schedule(); scheduleInspectorHighlights(); scheduleDesignPaint(); });
     message('visual-style-clear-result', { cleared: true });
   };
   document.addEventListener('pointermove', (event) => {
@@ -1212,7 +1704,30 @@ const bridge = `<style data-responsiver-bridge-style>
       message('inspector-shortcut');
       return;
     }
-    if (event.key !== 'Escape') return;
+    if (designActive && nudgeDesign(event)) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      return;
+    }
+    if (event.key !== 'Escape') {
+      if (designActive) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
+      return;
+    }
+    if (designActive) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (designGesture) finishDesignGesture(true);
+      else {
+        designSelected = null;
+        designPendingRect = null;
+        paintDesignRect(null);
+        designMessage('design-selection-cleared');
+      }
+      return;
+    }
     if (inspectorActive) {
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -1249,7 +1764,10 @@ const bridge = `<style data-responsiver-bridge-style>
   const start = () => {
     const mutationOptions = { attributes: true, attributeFilter: ['class', 'style', 'content', 'data-theme', 'data-color-scheme'], childList: true, subtree: true };
     mutationObserver = new MutationObserver((records) => {
-      if (records.some((record) => !(record.target instanceof Element && isInspectorInternal(record.target)))) schedule();
+      if (records.some((record) => !(record.target instanceof Element && isInspectorInternal(record.target)))) {
+        schedule();
+        scheduleDesignPaint();
+      }
     });
     mutationObserver.observe(document.documentElement, mutationOptions);
     for (const element of composedElements(document.documentElement, 5000)) {
@@ -1260,6 +1778,7 @@ const bridge = `<style data-responsiver-bridge-style>
     setTimeout(() => renderStatus(true), 1800);
   };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true }); else start();
+  addEventListener('pagehide', () => { stopDesign('navigation'); if (designPort) nativeApply(nativeMessagePortClose, designPort, []); designPort = null; }, { once: true });
   setTimeout(schedule, 0);
 })();
 </script>`

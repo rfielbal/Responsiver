@@ -226,6 +226,30 @@ export interface VisualElementSnapshot {
   insideFrame?: boolean
 }
 
+export type VisualGestureKind = 'move' | 'resize' | 'reorder' | 'nudge'
+export type VisualGestureStrategy = 'flow-translate' | 'responsive-size' | 'flex-order' | 'grid-order'
+
+/** Mutation structurelle bornée émise par le compositeur. La portée reste choisie par l’app. */
+export interface VisualGestureMutation {
+  target: VisualElementSnapshot
+  property: string
+  before: string | null
+  after: string
+}
+
+/** Intention privée du pont de preview, jamais du CSS libre. */
+export interface VisualGestureCommit {
+  protocol: 1
+  sessionId: string
+  documentId: string
+  revision: number
+  gestureId: string
+  kind: VisualGestureKind
+  strategy: VisualGestureStrategy
+  mutations: VisualGestureMutation[]
+  warning?: 'flow-preserved' | 'visual-order-only' | 'fixed-height'
+}
+
 export interface RemoteInspectorRequest {
   /** Identifiant anti-course de la session distante affichée. */
   projectId: string

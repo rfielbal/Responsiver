@@ -790,6 +790,7 @@ export async function buildProjectStaging(
   const changes: StagingChange[] = []
   const outcomes: StagingOutcome[] = []
   const generatedSections: string[] = []
+  const managedVisualSections = new Map<string, { section: string; css: string }>()
   const generatedOperations = new Set<string>()
   const operationChangeIds = new Map<string, string[]>()
   const generatedRoutePaths = new Set<string>()
@@ -994,7 +995,9 @@ export async function buildProjectStaging(
     if (operation.route.kind === 'current') generatedRoutePaths.add(operation.route.path)
     else hasGeneratedGlobalVisual = true
     const routeLabel = operation.route.kind === 'current' ? ` · ${operation.route.path}` : ' · toutes les pages'
-    generatedSections.push(`/* Atelier visuel${routeLabel} · ${operation.id} */\n${css}`)
+    const section = `/* Responsiver visual:start ${operation.id} */\n/* Atelier visuel${routeLabel} · ${operation.id} */\n${css}\n/* Responsiver visual:end ${operation.id} */`
+    managedVisualSections.set(operation.id, { section, css })
+    generatedSections.push(section)
     const change: StagingChange = {
       id: changeId('visual', operation.id, operation.after),
       title: `Ajuster ${operation.property} sur ${operation.target.selector}`,
@@ -1002,7 +1005,9 @@ export async function buildProjectStaging(
       kind: 'visual',
       before: `${operation.target.selector} { ${operation.property}: ${operation.before ?? 'valeur calculée'}; }`,
       after: css,
-      confidence: operation.target.metadata.matchCount === 1 ? 'safe' : 'review'
+      confidence: operation.property === 'order' || operation.property === 'height' || operation.property === 'translate'
+        ? 'review'
+        : operation.target.metadata.matchCount === 1 ? 'safe' : 'review'
     }
     changes.push(change)
     outcomes.push({ proposalId: operation.id, findingIds: [], kind: 'visual', status: 'applied', changeIds: [change.id], reason: 'Surcharge visuelle responsive préparée.' })
@@ -1134,7 +1139,23 @@ export async function buildProjectStaging(
   if (generatedSections.length > 0) {
     const generatedTarget = await availableGeneratedPath(normalizedRoot, project.previewBasePath)
     generatedFile = generatedTarget.path
-    const existing = generatedTarget.existing?.trim() ?? ''
+    let existing = generatedTarget.existing?.trim() ?? ''
+    const unchangedVisualIds = new Set<string>()
+    for (const [operationId, managed] of managedVisualSections) {
+      const escapedId = operationId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const managedPattern = new RegExp(`/\\* Responsiver visual:start ${escapedId} \\*/[\\s\\S]*?/\\* Responsiver visual:end ${escapedId} \\*/`, 'g')
+      const legacyPattern = new RegExp(`/\\* Atelier visuel[^\\n]*${escapedId} \\*/[\\s\\S]*?(?=\\n\\n/\\*|$)`, 'g')
+      const managedMatches = existing.match(managedPattern) ?? []
+      const legacyMatches = existing.replace(managedPattern, '').match(legacyPattern) ?? []
+      const previousSections = [...managedMatches, ...legacyMatches]
+      if (!previousSections.length) continue
+      if (previousSections.length === 1 && previousSections[0].includes(managed.css.trim())) {
+        unchangedVisualIds.add(operationId)
+        continue
+      }
+      existing = existing.replace(managedPattern, '').replace(legacyPattern, '').replace(/\n{3,}/g, '\n\n').trim()
+    }
+    const pendingSections = generatedSections.filter((section) => ![...unchangedVisualIds].some((operationId) => section.includes(`Responsiver visual:start ${operationId}`)))
     const duplicateChangeIds = new Set(changes
       .filter((change) => change.file === GENERATED_STYLESHEET && existing && existing.includes(change.after.trim()))
       .map((change) => change.id))
@@ -1151,7 +1172,7 @@ export async function buildProjectStaging(
         }
       }
     }
-    const freshSections = generatedSections.filter((section) => {
+    const freshSections = pendingSections.filter((section) => {
       const trimmed = section.trim()
       const withoutLeadingComment = trimmed.replace(/^\/\*[\s\S]*?\*\/\s*/, '')
       return !existing.includes(trimmed) && !existing.includes(withoutLeadingComment)
