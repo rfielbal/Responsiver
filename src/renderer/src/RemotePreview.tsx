@@ -1,5 +1,7 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactElement } from 'react'
+import { useEffect, useRef, useState, type FormEvent, type ReactElement, type WheelEvent } from 'react'
 import type { RemoteAuditResult, RemotePageState } from '../../shared/contracts'
+import PreviewZoomControls from './PreviewZoomControls'
+import { clampPreviewScale, stepPreviewScale, wheelPreviewScale } from './preview-zoom'
 
 interface RemoteDevice {
   id: string
@@ -34,35 +36,56 @@ const sweepViewports = [
 
 export default function RemotePreview({ projectId, device, visible, allowUpscale = false, embedded = false, automaticAudit = true, onResize, onAudit, onState, onNotice }: RemotePreviewProps): ReactElement {
   const stage = useRef<HTMLDivElement>(null)
+  const frame = useRef<HTMLDivElement>(null)
   const host = useRef<HTMLDivElement>(null)
+  const boundsFrame = useRef<number | null>(null)
   const resizeCleanup = useRef<(() => void) | null>(null)
   const auditedRoutes = useRef(new Set<string>())
   const [scale, setScale] = useState(0.7)
+  const scaleRef = useRef(scale)
   const [autoFit, setAutoFit] = useState(true)
   const [resizing, setResizing] = useState(false)
   const [state, setState] = useState<RemotePageState | null>(null)
   const [address, setAddress] = useState('')
   const [auditing, setAuditing] = useState(false)
+  scaleRef.current = scale
 
   const publishBounds = (): void => {
-    const element = host.current
-    if (!element) return
-    const rect = element.getBoundingClientRect()
-    void window.responsiver.setRemoteBounds({
-      x: Math.round(rect.left),
-      y: Math.round(rect.top),
-      width: Math.max(1, Math.round(rect.width)),
-      height: Math.max(1, Math.round(rect.height)),
-      scale,
-      visible,
-      viewport: { width: device.width, height: device.height, deviceScaleFactor: 1, mobile: device.family !== 'computer', touch: device.family !== 'computer' }
-    }).catch(() => undefined)
+    if (boundsFrame.current !== null) return
+    boundsFrame.current = window.requestAnimationFrame(() => {
+      boundsFrame.current = null
+      const element = host.current
+      const clip = stage.current
+      if (!element || !clip) return
+      const rect = element.getBoundingClientRect()
+      const clipRect = clip.getBoundingClientRect()
+      void window.responsiver.setRemoteBounds({
+        projectId,
+        x: Math.round(rect.left),
+        y: Math.round(rect.top),
+        width: Math.max(1, Math.round(rect.width)),
+        height: Math.max(1, Math.round(rect.height)),
+        clip: {
+          x: Math.round(clipRect.left),
+          y: Math.round(clipRect.top),
+          width: Math.max(1, Math.round(clipRect.width)),
+          height: Math.max(1, Math.round(clipRect.height))
+        },
+        scale: scaleRef.current,
+        visible,
+        viewport: { width: device.width, height: device.height, deviceScaleFactor: 1, mobile: device.family !== 'computer', touch: device.family !== 'computer' }
+      }).catch(() => undefined)
+    })
   }
 
   useEffect(() => {
     if (!autoFit || resizing || !stage.current) return
     const element = stage.current
-    const update = (): void => setScale(Math.min(allowUpscale ? 1.5 : 1, Math.max(0.1, (element.clientWidth - 54) / (device.width + 14)), Math.max(0.1, (element.clientHeight - 54) / (device.height + 14))))
+    const update = (): void => {
+      const next = clampPreviewScale(Math.min(allowUpscale ? 1.5 : 1, Math.max(0.1, (element.clientWidth - 54) / (device.width + 14)), Math.max(0.1, (element.clientHeight - 54) / (device.height + 14))))
+      scaleRef.current = next
+      setScale(next)
+    }
     const observer = new ResizeObserver(update)
     observer.observe(element)
     update()
@@ -71,22 +94,64 @@ export default function RemotePreview({ projectId, device, visible, allowUpscale
 
   useEffect(() => {
     if (!visible) {
-      void window.responsiver.setRemoteBounds({ x: 0, y: 0, width: 1, height: 1, scale: 1, visible: false, viewport: { width: device.width, height: device.height } }).catch(() => undefined)
+      void window.responsiver.setRemoteBounds({ projectId, x: 0, y: 0, width: 1, height: 1, scale: 1, visible: false, viewport: { width: device.width, height: device.height } }).catch(() => undefined)
       return
     }
     const observer = new ResizeObserver(publishBounds)
     if (host.current) observer.observe(host.current)
     window.addEventListener('resize', publishBounds)
     window.addEventListener('scroll', publishBounds, true)
-    const animation = window.requestAnimationFrame(publishBounds)
+    publishBounds()
     return () => {
       observer.disconnect()
       window.removeEventListener('resize', publishBounds)
       window.removeEventListener('scroll', publishBounds, true)
-      window.cancelAnimationFrame(animation)
-      void window.responsiver.setRemoteBounds({ x: 0, y: 0, width: 1, height: 1, scale: 1, visible: false, viewport: { width: device.width, height: device.height } }).catch(() => undefined)
+      if (boundsFrame.current !== null) window.cancelAnimationFrame(boundsFrame.current)
+      boundsFrame.current = null
     }
-  }, [device.family, device.height, device.width, scale, visible])
+  }, [device.family, device.height, device.width, projectId, scale, visible])
+
+  useEffect(() => () => {
+    if (boundsFrame.current !== null) window.cancelAnimationFrame(boundsFrame.current)
+    void window.responsiver.setRemoteBounds({ projectId, x: 0, y: 0, width: 1, height: 1, scale: 1, visible: false, viewport: { width: device.width, height: device.height } }).catch(() => undefined)
+  }, [projectId])
+
+  const stageCenter = (): { x: number; y: number } | undefined => {
+    const element = stage.current
+    if (!element) return undefined
+    const rectangle = element.getBoundingClientRect()
+    return { x: rectangle.left + rectangle.width / 2, y: rectangle.top + rectangle.height / 2 }
+  }
+
+  const applyManualZoom = (nextValue: number, anchor = stageCenter()): void => {
+    const previous = scaleRef.current
+    const next = clampPreviewScale(nextValue, previous)
+    if (Math.abs(next - previous) < .0001) {
+      setAutoFit(false)
+      return
+    }
+    const scrollHost = stage.current
+    const deviceFrame = frame.current
+    const before = anchor && deviceFrame ? deviceFrame.getBoundingClientRect() : null
+    const ratioX = before && before.width > 0 ? (anchor!.x - before.left) / before.width : .5
+    const ratioY = before && before.height > 0 ? (anchor!.y - before.top) / before.height : .5
+    setAutoFit(false)
+    scaleRef.current = next
+    setScale(next)
+    if (!scrollHost || !deviceFrame || !anchor || !before) return
+    window.requestAnimationFrame(() => {
+      const after = deviceFrame.getBoundingClientRect()
+      scrollHost.scrollLeft += after.left + after.width * ratioX - anchor.x
+      scrollHost.scrollTop += after.top + after.height * ratioY - anchor.y
+      publishBounds()
+    })
+  }
+
+  const handleZoomWheel = (event: WheelEvent<HTMLDivElement>): void => {
+    if (!event.metaKey && !event.ctrlKey) return
+    event.preventDefault()
+    applyManualZoom(wheelPreviewScale(scaleRef.current, event.deltaY, event.deltaMode), { x: event.clientX, y: event.clientY })
+  }
 
   useEffect(() => {
     const off = window.responsiver.onRemoteState((next) => {
@@ -101,6 +166,13 @@ export default function RemotePreview({ projectId, device, visible, allowUpscale
     }).catch(() => undefined)
     return off
   }, [projectId])
+
+  useEffect(() => window.responsiver.onRemoteZoomGesture((gesture) => {
+    if (!visible || gesture.projectId !== projectId) return
+    const rectangle = host.current?.getBoundingClientRect()
+    const anchor = rectangle ? { x: rectangle.left + gesture.x, y: rectangle.top + gesture.y } : stageCenter()
+    applyManualZoom(wheelPreviewScale(scaleRef.current, gesture.deltaY), anchor)
+  }), [device.family, device.height, device.width, projectId, visible])
 
   const audit = async (automatic = false): Promise<void> => {
     if (auditing) return
@@ -190,15 +262,15 @@ export default function RemotePreview({ projectId, device, visible, allowUpscale
       <span className="remote-session-badge"><i /> Session éphémère</span>
       <button className="remote-audit-button" onClick={() => void audit(false)} disabled={auditing}>{auditing ? 'Analyse…' : 'Analyser cette route'}</button>
     </div>
-    <div className="remote-stage" ref={stage}>
+    <div className="remote-stage" ref={stage} onWheel={handleZoomWheel}>
       <div className="remote-device-space" style={{ width: width + 14, height: height + 14 }}>
-        <div className="remote-device-frame" style={{ width: width + 14, height: height + 14 }}>
+        <div ref={frame} className="remote-device-frame" style={{ width: width + 14, height: height + 14 }}>
           <div className="remote-view-host" ref={host} style={{ width, height }} aria-label={`Aperçu distant ${device.name}`} />
           {(['n', 'ne', 'e', 'se', 's', 'sw', 'w', 'nw'] as ResizeEdge[]).map((edge) => <button key={edge} className={`resize-handle resize-handle--${edge}`} onPointerDown={(event) => beginResize(edge, event)} aria-label={`Redimensionner la preview depuis ${edge}`} />)}
         </div>
       </div>
       {auditing && <div className="remote-audit-overlay" role="status"><span /><strong>Analyse visuelle multi-viewport</strong><small>Géométrie, texte, médias, contraste et interactions</small></div>}
     </div>
-    <footer><strong>{device.name}</strong><code>{device.width} × {device.height} CSS px</code><span>{state?.loading ? 'Chargement…' : 'Navigable'}</span><button onClick={() => setAutoFit(true)} disabled={autoFit}>Ajuster à la zone</button></footer>
+    <footer><strong>{device.name}</strong><code>{device.width} × {device.height} CSS px</code><span>{state?.loading ? 'Chargement…' : 'Navigable'}</span><PreviewZoomControls scale={scale} autoFit={autoFit} onZoomOut={() => applyManualZoom(stepPreviewScale(scaleRef.current, -1))} onZoomIn={() => applyManualZoom(stepPreviewScale(scaleRef.current, 1))} onActualSize={() => applyManualZoom(1)} onFit={() => setAutoFit(true)} /></footer>
   </section>
 }

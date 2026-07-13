@@ -21,6 +21,7 @@ import type {
   RemoteViewport,
   RemoteVisualStyleRequest,
   RemoteVisualStyleResult,
+  RemoteZoomGesture,
   StagingApplyResult,
   StagingRequest,
   StagingSnapshot,
@@ -60,6 +61,9 @@ declare global {
     clearRemoteVisualStyle: (request: RemoteInspectorRequest) => Promise<RemoteVisualStyleResult>
     onRemoteInspectorSelection: (listener: (selection: RemoteInspectorSelection) => void) => () => void
     onRemoteInspectorShortcut: (listener: (projectId: string) => void) => () => void
+    onRemoteInspectorCanceled: (listener: (projectId: string) => void) => () => void
+    onRemoteInspectorReady: (listener: (projectId: string) => void) => () => void
+    onRemoteZoomGesture: (listener: (gesture: RemoteZoomGesture) => void) => () => void
     onRemoteState: (listener: (state: RemotePageState) => void) => () => void
     onRemoteBlockedNavigation: (listener: (payload: { url: string; detail: string }) => void) => () => void
     onExtensionOpenProject: (listener: (payload: { project: ProjectSnapshot; viewport: RemoteViewport }) => void) => () => void

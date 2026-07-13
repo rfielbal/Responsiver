@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron'
-import type { ExportResult, LocalAiRequest, LocalAiResponse, LocalAiStatus, ProjectPreparationProgress, ProjectSnapshot, RecentProjectSummary, RemoteAuditResult, RemoteFocusResult, RemoteInspectorRequest, RemoteInspectorSelection, RemoteInspectorState, RemoteOpenRequest, RemotePageState, RemoteSourceAssociationRequest, RemoteViewBounds, RemoteViewport, RemoteVisualStyleRequest, RemoteVisualStyleResult, StagingApplyResult, StagingRequest, StagingSnapshot, StagingUndoResult, WorkspaceApplyResult, WorkspaceDiff, WorkspaceFileSnapshot, WorkspaceFileSummary, WorkspaceSnapshot } from '../shared/contracts'
+import type { ExportResult, LocalAiRequest, LocalAiResponse, LocalAiStatus, ProjectPreparationProgress, ProjectSnapshot, RecentProjectSummary, RemoteAuditResult, RemoteFocusResult, RemoteInspectorRequest, RemoteInspectorSelection, RemoteInspectorState, RemoteOpenRequest, RemotePageState, RemoteSourceAssociationRequest, RemoteViewBounds, RemoteViewport, RemoteVisualStyleRequest, RemoteVisualStyleResult, RemoteZoomGesture, StagingApplyResult, StagingRequest, StagingSnapshot, StagingUndoResult, WorkspaceApplyResult, WorkspaceDiff, WorkspaceFileSnapshot, WorkspaceFileSummary, WorkspaceSnapshot } from '../shared/contracts'
 
 function reportRuleIds(projectOrRuleIds?: ProjectSnapshot | string[], acceptedRuleIds?: string[]): string[] {
   return Array.isArray(projectOrRuleIds) ? projectOrRuleIds : acceptedRuleIds ?? []
@@ -41,6 +41,21 @@ if (process.isMainFrame) {
       const handler = (_event: IpcRendererEvent, projectId: string): void => listener(projectId)
       ipcRenderer.on('remote:inspector-shortcut', handler)
       return () => ipcRenderer.removeListener('remote:inspector-shortcut', handler)
+    },
+    onRemoteInspectorCanceled: (listener: (projectId: string) => void): (() => void) => {
+      const handler = (_event: IpcRendererEvent, projectId: string): void => listener(projectId)
+      ipcRenderer.on('remote:inspector-canceled', handler)
+      return () => ipcRenderer.removeListener('remote:inspector-canceled', handler)
+    },
+    onRemoteInspectorReady: (listener: (projectId: string) => void): (() => void) => {
+      const handler = (_event: IpcRendererEvent, projectId: string): void => listener(projectId)
+      ipcRenderer.on('remote:inspector-ready', handler)
+      return () => ipcRenderer.removeListener('remote:inspector-ready', handler)
+    },
+    onRemoteZoomGesture: (listener: (gesture: RemoteZoomGesture) => void): (() => void) => {
+      const handler = (_event: IpcRendererEvent, gesture: RemoteZoomGesture): void => listener(gesture)
+      ipcRenderer.on('remote:zoom-gesture', handler)
+      return () => ipcRenderer.removeListener('remote:zoom-gesture', handler)
     },
     onRemoteState: (listener: (state: RemotePageState) => void): (() => void) => {
       const handler = (_event: IpcRendererEvent, state: RemotePageState): void => listener(state)

@@ -1,7 +1,7 @@
 import { randomUUID, createHash } from 'node:crypto'
 import { lookup } from 'node:dns/promises'
 import { basename } from 'node:path'
-import { BrowserWindow, WebContentsView, type Rectangle } from 'electron'
+import { BrowserWindow, View, WebContentsView, type MouseWheelInputEvent, type Rectangle } from 'electron'
 import type {
   ProjectIssue,
   ProjectSnapshot,
@@ -195,7 +195,7 @@ export function sanitizeRemoteInspectorSelection(
     route: cleanInspectorText(options.route, REMOTE_INSPECTOR_LIMITS.maxRouteLength) || '/',
     text: cleanInspectorText(candidate.text, REMOTE_INSPECTOR_LIMITS.maxTextLength),
     insideFrame,
-    editable: options.editable && !insideFrame && !selector.includes(' >>> ')
+    editable: options.editable && selector !== '*' && !insideFrame && !selector.includes(' >>> ')
   }
 }
 
@@ -204,6 +204,9 @@ export interface RemoteSessionCallbacks {
   onBlockedNavigation?: (url: string, detail: string) => void
   onInspectorSelection?: (selection: Omit<RemoteInspectorSelection, 'projectId'>) => void
   onInspectorShortcut?: () => void
+  onInspectorCanceled?: () => void
+  onInspectorReady?: () => void
+  onZoomGesture?: (gesture: { deltaY: number; x: number; y: number }) => void
 }
 
 export interface RemoteSessionCreateOptions extends RemoteSessionCallbacks {
@@ -245,15 +248,27 @@ function normalizeViewport(value: RemoteViewport): RemoteViewport {
   }
 }
 
-function sanitizeBounds(value: RemoteViewBounds, owner: BrowserWindow): { bounds: Rectangle; scale: number; viewport: RemoteViewport; visible: boolean } {
+function sanitizeBounds(value: RemoteViewBounds, owner: BrowserWindow): { clipBounds: Rectangle; viewBounds: Rectangle; scale: number; viewport: RemoteViewport; visible: boolean } {
   const contentBounds = owner.getContentBounds()
-  const x = clampInteger(value.x, 0, Math.max(0, contentBounds.width - 1), 0)
-  const y = clampInteger(value.y, 0, Math.max(0, contentBounds.height - 1), 0)
-  const width = clampInteger(value.width, 1, Math.max(1, contentBounds.width - x), 1)
-  const height = clampInteger(value.height, 1, Math.max(1, contentBounds.height - y), 1)
+  const rawClip = value.clip && typeof value.clip === 'object' ? value.clip : value
+  const clipX = clampInteger(rawClip.x, 0, Math.max(0, contentBounds.width - 1), 0)
+  const clipY = clampInteger(rawClip.y, 0, Math.max(0, contentBounds.height - 1), 0)
+  const clipWidth = clampInteger(rawClip.width, 1, Math.max(1, contentBounds.width - clipX), 1)
+  const clipHeight = clampInteger(rawClip.height, 1, Math.max(1, contentBounds.height - clipY), 1)
+  const nativeLimit = 8_192
+  const x = clampInteger(value.x, -nativeLimit, contentBounds.width + nativeLimit, clipX)
+  const y = clampInteger(value.y, -nativeLimit, contentBounds.height + nativeLimit, clipY)
+  const width = clampInteger(value.width, 1, nativeLimit, 1)
+  const height = clampInteger(value.height, 1, nativeLimit, 1)
   const scale = typeof value.scale === 'number' && Number.isFinite(value.scale) ? Math.min(2, Math.max(0.1, value.scale)) : 1
   const viewport = value.viewport && typeof value.viewport === 'object' ? value.viewport : defaultViewport
-  return { bounds: { x, y, width, height }, scale, viewport: normalizeViewport(viewport), visible: value.visible === true }
+  return {
+    clipBounds: { x: clipX, y: clipY, width: clipWidth, height: clipHeight },
+    viewBounds: { x: x - clipX, y: y - clipY, width, height },
+    scale,
+    viewport: normalizeViewport(viewport),
+    visible: value.visible === true
+  }
 }
 
 async function resolveAddresses(hostname: string): Promise<string[]> {
@@ -394,6 +409,7 @@ function uniqueIssues(issues: ProjectIssue[]): { issues: ProjectIssue[]; truncat
 export class RemoteBrowserSession {
   readonly owner: BrowserWindow
   readonly view: WebContentsView
+  private readonly clipView: View
   readonly mode: RemoteAuditMode
   readonly initial: NormalizedAuditUrl
   private readonly callbacks: RemoteSessionCallbacks
@@ -410,19 +426,39 @@ export class RemoteBrowserSession {
   private inspectorActive = false
   private inspectorRequested = false
   private inspectorSelectionSequence = 0
+  private inspectorOperationEpoch = 0
   private navigationVisualToolsReset: Promise<void> = Promise.resolve()
+  private visualToolsRestoreQueue: Promise<void> = Promise.resolve()
   private readonly allowedHostnames = new Set<string>()
   private readonly resourceHostCache = new Map<string, { allowed: boolean; expiresAt: number }>()
   private readonly resourceHostnames = new Set<string>()
   private readonly resourceHostInflight = new Map<string, Promise<boolean>>()
   private pendingViewSettings: { viewport: RemoteViewport; scale: number } | null = null
   private viewportQueue: Promise<void> = Promise.resolve()
+  private lastViewportRequest: { key: string; promise: Promise<void> } | null = null
   private readonly debuggerMessageHandler = (_event: unknown, method: string, params: unknown): void => {
+    if (method === 'Overlay.inspectModeCanceled') {
+      if (!this.inspectorRequested || !this.inspectorActive || this.auditRunning || this.closed) return
+      this.inspectorRequested = false
+      this.inspectorActive = false
+      this.inspectorOperationEpoch += 1
+      this.inspectorSelectionSequence += 1
+      this.callbacks.onInspectorCanceled?.()
+      return
+    }
     if (method !== 'Overlay.inspectNodeRequested' || !this.inspectorActive || this.auditRunning || this.closed) return
     const backendNodeId = params && typeof params === 'object' ? (params as { backendNodeId?: unknown }).backendNodeId : null
     if (typeof backendNodeId !== 'number' || !Number.isSafeInteger(backendNodeId) || backendNodeId <= 0) return
     const sequence = ++this.inspectorSelectionSequence
     void this.resolveInspectorSelection(backendNodeId, sequence)
+  }
+  private readonly debuggerDetachHandler = (): void => {
+    if (this.closed || (!this.inspectorRequested && !this.inspectorActive)) return
+    this.inspectorRequested = false
+    this.inspectorActive = false
+    this.inspectorOperationEpoch += 1
+    this.inspectorSelectionSequence += 1
+    this.callbacks.onInspectorCanceled?.()
   }
 
   private constructor(options: RemoteSessionCreateOptions, initial: NormalizedAuditUrl) {
@@ -433,6 +469,7 @@ export class RemoteBrowserSession {
     this.initial = initial
     this.currentApproved = initial
     this.allowedHostnames.add(initial.hostname)
+    this.clipView = new View()
     this.view = new WebContentsView({
       webPreferences: {
         contextIsolation: true,
@@ -452,8 +489,11 @@ export class RemoteBrowserSession {
     this.view.setBackgroundColor('#ffffff')
     this.view.setBorderRadius(7)
     this.view.setVisible(false)
-    this.owner.contentView.addChildView(this.view)
+    this.clipView.setVisible(false)
+    this.clipView.addChildView(this.view)
+    this.owner.contentView.addChildView(this.clipView)
     this.view.webContents.debugger.on('message', this.debuggerMessageHandler)
+    this.view.webContents.debugger.on('detach', this.debuggerDetachHandler)
     this.configureSecurity()
   }
 
@@ -536,7 +576,11 @@ export class RemoteBrowserSession {
     contents.on('did-start-loading', () => this.emitState())
     contents.on('did-stop-loading', () => {
       this.emitState()
-      void this.navigationVisualToolsReset.then(() => this.restoreVisualToolsAfterNavigation()).catch(() => undefined)
+      const reset = this.navigationVisualToolsReset
+      void this.enqueueVisualToolsOperation(async () => {
+        await reset
+        await this.restoreVisualToolsAfterNavigation()
+      }).catch(() => undefined)
     })
     contents.on('did-navigate', (_event, url) => {
       this.adoptNavigatedUrl(url)
@@ -556,6 +600,21 @@ export class RemoteBrowserSession {
       if (!shortcut) return
       event.preventDefault()
       this.callbacks.onInspectorShortcut?.()
+    })
+    contents.on('before-mouse-event', (event, mouse) => {
+      if (mouse.type !== 'mouseWheel') return
+      const modifiers = mouse.modifiers ?? []
+      if (!modifiers.some((modifier) => modifier === 'control' || modifier === 'ctrl' || modifier === 'meta' || modifier === 'command' || modifier === 'cmd')) return
+      event.preventDefault()
+      const wheel = mouse as MouseWheelInputEvent
+      const rawDelta = typeof wheel.deltaY === 'number' && Number.isFinite(wheel.deltaY)
+        ? wheel.deltaY
+        : typeof wheel.wheelTicksY === 'number' && Number.isFinite(wheel.wheelTicksY) ? -wheel.wheelTicksY * 53 : 0
+      this.callbacks.onZoomGesture?.({
+        deltaY: Math.min(1_000, Math.max(-1_000, rawDelta)),
+        x: clampInteger(mouse.x, 0, 8_192, 0),
+        y: clampInteger(mouse.y, 0, 8_192, 0)
+      })
     })
     contents.on('will-prevent-unload', (event) => event.preventDefault())
     contents.on('login', (event, _details, _authInfo, callback) => {
@@ -717,16 +776,27 @@ export class RemoteBrowserSession {
       if (objectId && this.view.webContents.debugger.isAttached()) {
         await this.sendDebuggerCommand('Runtime.releaseObject', { objectId }).catch(() => undefined)
       }
+      if (this.inspectorRequested && this.inspectorActive && !this.auditRunning && !this.closed) {
+        await this.setInspectorMode(true).catch(() => undefined)
+      }
     }
+  }
+
+  private enqueueVisualToolsOperation<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.visualToolsRestoreQueue.catch(() => undefined).then(operation)
+    this.visualToolsRestoreQueue = result.then(() => undefined, () => undefined)
+    return result
   }
 
   private async resetVisualToolsForNavigation(): Promise<void> {
     const inspectorWasActive = this.inspectorActive
     this.inspectorActive = false
     this.inspectorSelectionSequence += 1
-    await this.removeWorkspaceCss()
-    await this.removeVisualPreviewCss()
-    if (inspectorWasActive) await this.setInspectorMode(false).catch(() => undefined)
+    return this.enqueueVisualToolsOperation(async () => {
+      await this.removeWorkspaceCss()
+      await this.removeVisualPreviewCss()
+      if (inspectorWasActive) await this.setInspectorMode(false).catch(() => undefined)
+    })
   }
 
   private async removeVisualPreviewCss(): Promise<void> {
@@ -746,24 +816,43 @@ export class RemoteBrowserSession {
   }
 
   private async restoreVisualToolsAfterNavigation(): Promise<void> {
-    if (this.closed || this.auditRunning || this.view.webContents.isDestroyed() || this.view.webContents.isLoading()) return
-    const css = this.visualPreviewCss
+    const current = (): boolean => !this.closed && !this.auditRunning && !this.view.webContents.isDestroyed() && !this.view.webContents.isLoading()
+    if (!current()) return
     const workspaceCss = this.workspaceCss
-    if (workspaceCss) {
-      await this.removeWorkspaceCss()
-      if (!this.closed && this.workspaceCss === workspaceCss) {
-        this.workspaceCssKey = await this.view.webContents.insertCSS(workspaceCss, { cssOrigin: 'author' })
-      }
+    const css = this.visualPreviewCss
+    // Une insertion demandée pendant le chargement peut encore viser l’ancien
+    // document tout en produisant une clé valide. Après chaque navigation, les
+    // clés sont donc invalidées puis les états désirés sont réinjectés.
+    await this.removeWorkspaceCss()
+    await this.removeVisualPreviewCss()
+    if (!current()) return
+    if (workspaceCss && this.workspaceCss === workspaceCss) {
+      const key = await this.view.webContents.insertCSS(workspaceCss, { cssOrigin: 'author' })
+      if (!current() || this.workspaceCss !== workspaceCss) await this.view.webContents.removeInsertedCSS(key).catch(() => undefined)
+      else this.workspaceCssKey = key
     }
-    if (css && this.canPreviewVisualStyle) {
-      await this.removeVisualPreviewCss()
-      if (!this.closed && this.visualPreviewCss === css) {
-        this.visualPreviewCssKey = await this.view.webContents.insertCSS(css, { cssOrigin: 'author' })
-      }
+    if (css && this.canPreviewVisualStyle && this.visualPreviewCss === css) {
+      if (!current()) return
+      const key = await this.view.webContents.insertCSS(css, { cssOrigin: 'author' })
+      if (!current() || this.visualPreviewCss !== css) await this.view.webContents.removeInsertedCSS(key).catch(() => undefined)
+      else this.visualPreviewCssKey = key
     }
-    if (this.inspectorRequested && !this.closed && !this.auditRunning) {
-      await this.setInspectorMode(true)
-      this.inspectorActive = true
+    if (this.inspectorRequested && current()) {
+      try {
+        await this.setInspectorMode(true)
+        if (!current() || !this.inspectorRequested) {
+          await this.setInspectorMode(false).catch(() => undefined)
+          return
+        }
+        this.inspectorActive = true
+        this.callbacks.onInspectorReady?.()
+      } catch {
+        if (this.inspectorRequested && !this.closed) {
+          this.inspectorRequested = false
+          this.inspectorActive = false
+          this.callbacks.onInspectorCanceled?.()
+        }
+      }
     }
   }
 
@@ -829,7 +918,6 @@ export class RemoteBrowserSession {
 
   private async load(target: NormalizedAuditUrl): Promise<void> {
     if (this.closed) throw new Error('La session distante est fermée.')
-    await this.resetVisualToolsForNavigation()
     const previous = this.currentApproved
     this.currentApproved = target
     const contents = this.view.webContents
@@ -844,8 +932,31 @@ export class RemoteBrowserSession {
       this.currentApproved = previous
       throw error
     }
+    await this.visualToolsRestoreQueue
     await contents.executeJavaScript(REMOTE_AUDIT_BOOTSTRAP_SCRIPT).catch(() => undefined)
     this.emitState()
+  }
+
+  private async performHistoryNavigation(action: () => void): Promise<void> {
+    const contents = this.view.webContents
+    let onLoadCompleted: (() => void) | null = null
+    let onSameDocument: ((_event: unknown, _url: string, isMainFrame: boolean) => void) | null = null
+    const completed = new Promise<'load' | 'same-document'>((resolve) => {
+      onLoadCompleted = () => resolve('load')
+      onSameDocument = (_event, _url, isMainFrame) => {
+        if (isMainFrame) resolve('same-document')
+      }
+      contents.once('did-stop-loading', onLoadCompleted)
+      contents.on('did-navigate-in-page', onSameDocument)
+    })
+    try {
+      action()
+      const result = await withTimeout(completed, navigationTimeoutMs, 'La navigation n’a pas terminé son chargement dans le délai autorisé.')
+      if (result === 'load') await this.visualToolsRestoreQueue
+    } finally {
+      if (onLoadCompleted) contents.removeListener('did-stop-loading', onLoadCompleted)
+      if (onSameDocument) contents.removeListener('did-navigate-in-page', onSameDocument)
+    }
   }
 
   private safeCurrentUrl(): string {
@@ -897,25 +1008,37 @@ export class RemoteBrowserSession {
 
   async startInspector(): Promise<RemoteInspectorState> {
     if (this.closed) throw new Error('La session distante est fermée.')
-    if (this.auditRunning) throw new Error('L’inspecteur est indisponible pendant l’audit multi-viewport.')
+    const epoch = ++this.inspectorOperationEpoch
     this.inspectorRequested = true
-    try {
-      await this.setInspectorMode(true)
-      this.inspectorActive = true
-    } catch (error) {
-      this.inspectorRequested = false
-      throw error
-    }
-    return this.inspectorState()
+    if (this.auditRunning) return this.inspectorState()
+    return this.enqueueVisualToolsOperation(async () => {
+      try {
+        await this.viewportQueue
+        if (epoch !== this.inspectorOperationEpoch || !this.inspectorRequested || this.closed || this.auditRunning) return this.inspectorState()
+        await this.setInspectorMode(true)
+        if (epoch !== this.inspectorOperationEpoch || !this.inspectorRequested || this.closed || this.auditRunning) {
+          await this.setInspectorMode(false).catch(() => undefined)
+          return this.inspectorState()
+        }
+        this.inspectorActive = true
+      } catch (error) {
+        if (epoch === this.inspectorOperationEpoch) this.inspectorRequested = false
+        throw error
+      }
+      return this.inspectorState()
+    })
   }
 
   async stopInspector(): Promise<RemoteInspectorState> {
     if (this.closed) throw new Error('La session distante est fermée.')
+    this.inspectorOperationEpoch += 1
     this.inspectorRequested = false
     this.inspectorActive = false
     this.inspectorSelectionSequence += 1
-    await this.setInspectorMode(false)
-    return this.inspectorState()
+    return this.enqueueVisualToolsOperation(async () => {
+      await this.setInspectorMode(false)
+      return this.inspectorState()
+    })
   }
 
   async previewVisualStyle(visualEdits: VisualEditOperation[], route: string): Promise<RemoteVisualStyleResult> {
@@ -934,16 +1057,20 @@ export class RemoteBrowserSession {
       throw new Error(`La feuille de prévisualisation dépasse ${REMOTE_INSPECTOR_LIMITS.maxCssBytes} octets.`)
     }
     this.visualPreviewCss = css.trim() ? css : null
-    await this.removeVisualPreviewCss()
-    if (css.trim()) this.visualPreviewCssKey = await this.view.webContents.insertCSS(css, { cssOrigin: 'author' })
-    return { applied: Boolean(this.visualPreviewCssKey), bytes, path: this.state().path }
+    return this.enqueueVisualToolsOperation(async () => {
+      await this.removeVisualPreviewCss()
+      if (this.visualPreviewCss === css && css.trim()) this.visualPreviewCssKey = await this.view.webContents.insertCSS(css, { cssOrigin: 'author' })
+      return { applied: Boolean(this.visualPreviewCssKey), bytes, path: this.state().path }
+    })
   }
 
   async clearVisualStyle(): Promise<RemoteVisualStyleResult> {
     if (this.closed) throw new Error('La session distante est fermée.')
     this.visualPreviewCss = null
-    await this.removeVisualPreviewCss()
-    return { applied: false, bytes: 0, path: this.state().path }
+    return this.enqueueVisualToolsOperation(async () => {
+      await this.removeVisualPreviewCss()
+      return { applied: false, bytes: 0, path: this.state().path }
+    })
   }
 
   projectSnapshot(issues: ProjectIssue[] = []): ProjectSnapshot {
@@ -980,8 +1107,10 @@ export class RemoteBrowserSession {
   async setViewBounds(value: RemoteViewBounds): Promise<void> {
     if (this.closed) return
     const normalized = sanitizeBounds(value, this.owner)
-    this.view.setBounds(normalized.bounds)
+    this.clipView.setBounds(normalized.clipBounds)
+    this.view.setBounds(normalized.viewBounds)
     this.view.setVisible(normalized.visible)
+    this.clipView.setVisible(normalized.visible)
     if (this.auditRunning) {
       this.pendingViewSettings = { viewport: normalized.viewport, scale: normalized.scale }
       return
@@ -990,8 +1119,15 @@ export class RemoteBrowserSession {
   }
 
   private async applyViewport(viewportValue: RemoteViewport, scale: number): Promise<void> {
-    const operation = this.viewportQueue.then(() => this.applyViewportNow(viewportValue, scale))
-    this.viewportQueue = operation.catch(() => undefined)
+    const viewport = normalizeViewport(viewportValue)
+    const normalizedScale = Math.min(2, Math.max(0.1, scale))
+    const key = `${viewport.width}x${viewport.height}:${viewport.deviceScaleFactor ?? 1}:${viewport.mobile === true ? 1 : 0}:${viewport.touch === true ? 1 : 0}:${normalizedScale.toFixed(4)}`
+    if (key === this.lastViewportRequest?.key) return this.lastViewportRequest.promise
+    const operation = this.viewportQueue.then(() => this.applyViewportNow(viewport, normalizedScale))
+    this.viewportQueue = operation.catch(() => {
+      if (this.lastViewportRequest?.promise === operation) this.lastViewportRequest = null
+    })
+    this.lastViewportRequest = { key, promise: operation }
     return operation
   }
 
@@ -1024,12 +1160,16 @@ export class RemoteBrowserSession {
   async navigate(action: 'back' | 'forward' | 'reload' | 'url', value?: string): Promise<RemotePageState> {
     if (this.closed) throw new Error('La session distante est fermée.')
     if (this.auditRunning) throw new Error('La navigation est indisponible pendant l’audit multi-viewport.')
-    if (action !== 'url') await this.resetVisualToolsForNavigation()
     const history = this.view.webContents.navigationHistory
-    if (action === 'back' && history.canGoBack()) history.goBack()
-    else if (action === 'forward' && history.canGoForward()) history.goForward()
-    else if (action === 'reload') this.view.webContents.reload()
-    else if (action === 'url' && value) await this.requestNavigation(value)
+    if (action === 'back') {
+      if (!history.canGoBack()) return this.state()
+      await this.performHistoryNavigation(() => history.goBack())
+    } else if (action === 'forward') {
+      if (!history.canGoForward()) return this.state()
+      await this.performHistoryNavigation(() => history.goForward())
+    } else if (action === 'reload') {
+      await this.performHistoryNavigation(() => this.view.webContents.reload())
+    } else if (action === 'url' && value) await this.requestNavigation(value)
     return this.state()
   }
 
@@ -1067,15 +1207,19 @@ export class RemoteBrowserSession {
     if (this.closed) throw new Error('La session distante est fermée.')
     if (this.auditRunning) throw new Error('La prévisualisation du code est suspendue pendant l’audit multi-viewport.')
     this.workspaceCss = css.trim() ? css : null
-    await this.removeWorkspaceCss()
-    if (css.trim()) this.workspaceCssKey = await this.view.webContents.insertCSS(css, { cssOrigin: 'author' })
+    await this.enqueueVisualToolsOperation(async () => {
+      await this.removeWorkspaceCss()
+      if (this.workspaceCss === css && css.trim()) this.workspaceCssKey = await this.view.webContents.insertCSS(css, { cssOrigin: 'author' })
+    })
   }
 
   async audit(viewportValues: RemoteViewport[]): Promise<SharedRemoteAuditResult> {
     if (this.closed) throw new Error('La session distante est fermée.')
     if (this.auditRunning) throw new Error('Un audit distant est déjà en cours.')
-    const restoreInspector = this.inspectorActive
+    const restoreInspector = this.inspectorRequested
     this.auditRunning = true
+    await this.visualToolsRestoreQueue.catch(() => undefined)
+    this.inspectorActive = false
     this.inspectorSelectionSequence += 1
     const originalViewport = this.currentViewport
     const originalScale = this.currentScale
@@ -1134,7 +1278,7 @@ export class RemoteBrowserSession {
       this.auditRunning = false
       const lateSettings = this.takePendingViewSettings()
       if (lateSettings) await this.applyViewport(lateSettings.viewport, lateSettings.scale).catch(() => undefined)
-      if (restoreInspector && this.inspectorActive && !this.closed) await this.setInspectorMode(true).catch(() => undefined)
+      await this.enqueueVisualToolsOperation(() => this.restoreVisualToolsAfterNavigation()).catch(() => undefined)
     }
     const state = this.state()
     const groupedFindings = consolidateRemoteAuditFindings(rawFindings)
@@ -1157,6 +1301,7 @@ export class RemoteBrowserSession {
   async close(): Promise<void> {
     if (this.closed) return
     this.closed = true
+    this.inspectorOperationEpoch += 1
     this.inspectorRequested = false
     this.inspectorActive = false
     this.inspectorSelectionSequence += 1
@@ -1165,10 +1310,14 @@ export class RemoteBrowserSession {
     this.resourceHostnames.clear()
     this.resourceHostInflight.clear()
     try { this.view.setVisible(false) } catch { /* la fenêtre propriétaire peut déjà être détruite */ }
-    try { this.owner.contentView.removeChildView(this.view) } catch { /* idem */ }
+    try { this.clipView.setVisible(false) } catch { /* idem */ }
+    try { this.clipView.removeChildView(this.view) } catch { /* idem */ }
+    try { this.owner.contentView.removeChildView(this.clipView) } catch { /* idem */ }
     const contents = this.view.webContents
     contents.debugger.removeListener('message', this.debuggerMessageHandler)
+    contents.debugger.removeListener('detach', this.debuggerDetachHandler)
     if (contents.isDestroyed()) return
+    await this.visualToolsRestoreQueue.catch(() => undefined)
     contents.session.webRequest.onBeforeRequest(null)
     if (contents.debugger.isAttached()) await this.setInspectorMode(false).catch(() => undefined)
     if (this.workspaceCssKey) await contents.removeInsertedCSS(this.workspaceCssKey).catch(() => undefined)

@@ -113,8 +113,9 @@ const bridge = `<style data-responsiver-bridge-style>
   scroll-margin: 72px !important;
 }
 </style><script data-responsiver-bridge>
-(() => {
-  const channel = 'responsiver-preview';
+	(() => {
+	  const channel = 'responsiver-preview';
+	  const documentId = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
   const revealAttribute = 'data-responsiver-reveal-target';
   const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
   const AUDIT_MAX_NODES = ${LOCAL_RUNTIME_AUDIT_LIMITS.maxNodes};
@@ -144,7 +145,12 @@ const bridge = `<style data-responsiver-bridge-style>
     });
     return root;
   };
-  const message = (type, payload = {}) => parent.postMessage({ channel, type, ...payload }, '*');
+  const message = (type, payload = {}) => top.postMessage({ channel, type, ...payload }, '*');
+  const relayInspectorCommand = (type) => {
+    for (let index = 0; index < Math.min(24, frames.length); index += 1) {
+      try { frames[index].postMessage({ channel, type, relayedByResponsiver: true }, '*'); } catch {}
+    }
+  };
   const runtimeErrors = [];
   const recordRuntimeError = (type, value, url = '', line = 0) => {
     if (runtimeErrors.length >= 12) return;
@@ -186,10 +192,12 @@ const bridge = `<style data-responsiver-bridge-style>
       : declaresDark && !declaresLight ? 'dark' : declaresLight && !declaresDark ? 'light' : 'unknown';
     return { background, color: bodyStyle?.color ?? rootStyle.color, declaredScheme, detected };
   };
-  const state = () => {
-    const theme = themeState();
-    message('state', {
-      path: location.pathname + location.search + location.hash,
+	  const state = (requestId) => {
+	    const theme = themeState();
+	    message('state', {
+	      documentId,
+	      ...(typeof requestId === 'string' && requestId.length <= 128 ? { requestId } : {}),
+	      path: location.pathname + location.search + location.hash,
       title: document.title,
       ...theme,
       theme
@@ -972,6 +980,9 @@ const bridge = `<style data-responsiver-bridge-style>
     return path.find((candidate) => candidate instanceof Element && isInspectable(candidate)) || null;
   };
   const inspectorOccurrences = (selector) => {
+    if (!selector.includes(' >>> ')) {
+      try { return Math.max(1, Math.min(10000, document.querySelectorAll(selector).length)); } catch {}
+    }
     let count = 0;
     const elements = composedElements(document.documentElement, VISUAL_MAX_OCCURRENCE_SCAN);
     for (const element of elements) {
@@ -980,7 +991,7 @@ const bridge = `<style data-responsiver-bridge-style>
     }
     return Math.max(1, count);
   };
-  const inspectorPayload = (element) => {
+  const inspectorPayload = (element, countOccurrences = false) => {
     if (!isInspectable(element)) return null;
     const selector = selectorForInspector(element);
     const rectangle = element.getBoundingClientRect();
@@ -1005,8 +1016,10 @@ const bridge = `<style data-responsiver-bridge-style>
         height: inspectorRound(rectangle.height)
       },
       styles,
-      occurrences: inspectorOccurrences(selector),
+      occurrences: countOccurrences ? inspectorOccurrences(selector) : 1,
       route: inspectorClean(location.pathname + location.search + location.hash, VISUAL_MAX_ROUTE_LENGTH),
+      insideFrame: parent !== top,
+      editable: parent === top && selector !== '*' && selector.length <= 320 && !selector.includes(' >>> '),
       text
     };
   };
@@ -1059,6 +1072,7 @@ const bridge = `<style data-responsiver-bridge-style>
     inspectorSelectedOverlay?.remove();
     inspectorHoverOverlay = null;
     inspectorSelectedOverlay = null;
+    relayInspectorCommand('inspector-stop');
     message('inspector-stopped', { reason, route: inspectorClean(location.pathname + location.search + location.hash, VISUAL_MAX_ROUTE_LENGTH) });
   };
   const startInspector = () => {
@@ -1069,6 +1083,7 @@ const bridge = `<style data-responsiver-bridge-style>
       inspectorHoverOverlay = createInspectorOverlay('hover');
       inspectorSelectedOverlay = createInspectorOverlay('selected');
     }
+    relayInspectorCommand('inspector-start');
     scheduleInspectorHighlights();
     message('inspector-started', { route: inspectorClean(location.pathname + location.search + location.hash, VISUAL_MAX_ROUTE_LENGTH) });
   };
@@ -1080,7 +1095,7 @@ const bridge = `<style data-responsiver-bridge-style>
     inspectorSelected = target;
     inspectorHovered = target;
     scheduleInspectorHighlights();
-    const payload = inspectorPayload(target);
+    const payload = inspectorPayload(target, true);
     if (payload) message('inspector-selected', payload);
   };
   const applyVisualStylePreview = (value) => {
@@ -1118,7 +1133,7 @@ const bridge = `<style data-responsiver-bridge-style>
     }
     inspectorHovered = target;
     scheduleInspectorHighlights();
-    const payload = target ? inspectorPayload(target) : null;
+    const payload = target ? inspectorPayload(target, false) : null;
     if (payload) message('inspector-hover', payload);
   }, true);
   for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup']) {
@@ -1129,7 +1144,7 @@ const bridge = `<style data-responsiver-bridge-style>
       if (type === 'pointerdown') {
         inspectorSelected = target;
         scheduleInspectorHighlights();
-        const payload = inspectorPayload(target);
+        const payload = inspectorPayload(target, true);
         if (payload) message('inspector-selected', payload);
       }
       if (type === 'mousedown') event.preventDefault();
@@ -1142,17 +1157,24 @@ const bridge = `<style data-responsiver-bridge-style>
     if (!target) return;
     event.preventDefault();
     event.stopImmediatePropagation();
+    const changed = inspectorSelected !== target;
     inspectorSelected = target;
     scheduleInspectorHighlights();
-    const payload = inspectorPayload(target);
+    const payload = changed ? inspectorPayload(target, true) : null;
     if (payload) message('inspector-selected', payload);
   }, true);
   addEventListener('scroll', scheduleInspectorHighlights, true);
   addEventListener('message', (event) => {
-    if (event.source !== parent) return;
     const data = event.data;
     if (!data || data.channel !== channel) return;
+    if (event.source !== parent) {
+      if (data.type === 'inspector-child-ready' && inspectorActive && event.source && 'postMessage' in event.source) {
+        try { event.source.postMessage({ channel, type: 'inspector-start', relayedByResponsiver: true }, '*'); } catch {}
+      }
+      return;
+    }
     if (data.type === 'navigate' && typeof data.path === 'string') go(data.path);
+	    if (data.type === 'state-request') state(data.requestId);
     if (data.type === 'back') history.back();
     if (data.type === 'forward') history.forward();
     if (data.type === 'reload') location.reload();
@@ -1198,6 +1220,20 @@ const bridge = `<style data-responsiver-bridge-style>
     }
     message('escape');
   }, true);
+  addEventListener('wheel', (event) => {
+    if (!event.metaKey && !event.ctrlKey) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    message('preview-zoom', {
+      deltaY: Math.max(-1000, Math.min(1000, Number(event.deltaY) || 0)),
+      deltaMode: Math.max(0, Math.min(2, Number(event.deltaMode) || 0)),
+      clientX: inspectorRound(event.clientX),
+      clientY: inspectorRound(event.clientY)
+    });
+  }, { capture: true, passive: false });
+  if (parent !== top) {
+    try { parent.postMessage({ channel, type: 'inspector-child-ready' }, '*'); } catch {}
+  }
   document.addEventListener('click', (event) => {
     const target = event.target instanceof Element ? event.target.closest('a[href]') : null;
     if (!target || event.defaultPrevented) return;

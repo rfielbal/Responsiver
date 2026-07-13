@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { cp, lstat, mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
 import { dirname, extname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import type { ExportResult, LocalAiRequest, LocalAiResponse, LocalAiStatus, ProjectPreparationProgress, ProjectSnapshot, RecentProjectSummary, RemoteAuditResult, RemoteFocusResult, RemoteInspectorRequest, RemoteInspectorSelection, RemoteInspectorState, RemoteOpenRequest, RemotePageState, RemoteSourceAssociationRequest, RemoteViewBounds, RemoteViewport, RemoteVisualStyleRequest, RemoteVisualStyleResult, StagingApplyResult, StagingRequest, StagingSnapshot, StagingUndoResult, WorkspaceApplyResult, WorkspaceDiff, WorkspaceFileSnapshot, WorkspaceFileSummary, WorkspaceSnapshot } from '../shared/contracts'
+import type { ExportResult, LocalAiRequest, LocalAiResponse, LocalAiStatus, ProjectPreparationProgress, ProjectSnapshot, RecentProjectSummary, RemoteAuditResult, RemoteFocusResult, RemoteInspectorRequest, RemoteInspectorSelection, RemoteInspectorState, RemoteOpenRequest, RemotePageState, RemoteSourceAssociationRequest, RemoteViewBounds, RemoteViewport, RemoteVisualStyleRequest, RemoteVisualStyleResult, RemoteZoomGesture, StagingApplyResult, StagingRequest, StagingSnapshot, StagingUndoResult, WorkspaceApplyResult, WorkspaceDiff, WorkspaceFileSnapshot, WorkspaceFileSummary, WorkspaceSnapshot } from '../shared/contracts'
 import { analyzeProject, createDemoProject } from './project-analyzer'
 import { startProjectServer, type ProjectServer } from './project-server'
 import { buildProjectStaging, type ProjectStaging } from './project-transformer'
@@ -326,6 +326,25 @@ async function openRemoteProject(value: unknown): Promise<ProjectSnapshot> {
       const session = activeSession
       if (!createdBrowser || session?.remoteBrowser !== createdBrowser) return
       mainWindow.webContents.send('remote:inspector-shortcut', session.project.id)
+    },
+    onInspectorCanceled: () => {
+      if (!mainWindow || mainWindow.isDestroyed()) return
+      const session = activeSession
+      if (!createdBrowser || session?.remoteBrowser !== createdBrowser) return
+      mainWindow.webContents.send('remote:inspector-canceled', session.project.id)
+    },
+    onInspectorReady: () => {
+      if (!mainWindow || mainWindow.isDestroyed()) return
+      const session = activeSession
+      if (!createdBrowser || session?.remoteBrowser !== createdBrowser) return
+      mainWindow.webContents.send('remote:inspector-ready', session.project.id)
+    },
+    onZoomGesture: (gesture) => {
+      if (!mainWindow || mainWindow.isDestroyed()) return
+      const session = activeSession
+      if (!createdBrowser || session?.remoteBrowser !== createdBrowser) return
+      const payload: RemoteZoomGesture = { ...gesture, projectId: session.project.id }
+      mainWindow.webContents.send('remote:zoom-gesture', payload)
     }
   })
   createdBrowser = remoteBrowser
@@ -1058,7 +1077,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle('remote:set-bounds', async (event, bounds: unknown): Promise<void> => {
     requireTrustedWindow(event)
     if (!bounds || typeof bounds !== 'object') throw new Error('Les limites de la preview distante sont invalides.')
-    await currentRemoteSession().browser.setViewBounds(bounds as RemoteViewBounds)
+    await remoteSessionForRequest(bounds).browser.setViewBounds(bounds as RemoteViewBounds)
   })
   ipcMain.handle('remote:navigate', async (event, action: unknown, value: unknown): Promise<RemotePageState> => {
     requireTrustedWindow(event)

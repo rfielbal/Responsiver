@@ -19,9 +19,11 @@ await writeFile(join(firstRoot, 'package.json'), JSON.stringify({ dependencies: 
 await writeFile(join(firstRoot, 'composer.json'), JSON.stringify({ require: { 'symfony/framework-bundle': '^7.0' } }))
 await writeFile(join(secondRoot, 'theme.css'), 'body { background: #fff; }\n')
 
-const server = createServer((_request, response) => {
+const server = createServer((request, response) => {
   response.setHeader('content-type', 'text/html; charset=utf-8')
-  response.end('<!doctype html><html lang="fr"><head><meta name="viewport" content="width=device-width"><title>Localhost associé à chaud</title></head><body><main>Session conservée</main></body></html>')
+  const finish = () => response.end('<!doctype html><html lang="fr"><head><meta name="viewport" content="width=device-width"><title>Localhost associé à chaud</title></head><body><main>Session conservée</main></body></html>')
+  if (request.url?.startsWith('/lent') || request.url?.startsWith('/workspace-lent')) setTimeout(finish, 350)
+  else finish()
 })
 await new Promise((resolve, reject) => {
   server.once('error', reject)
@@ -97,7 +99,8 @@ try {
     /invalide/
   )
 
-  await page.evaluate(() => window.responsiver.setRemoteBounds({
+  await page.evaluate((projectId) => window.responsiver.setRemoteBounds({
+    projectId,
     x: 0,
     y: 0,
     width: 393,
@@ -105,7 +108,7 @@ try {
     scale: 1,
     visible: true,
     viewport: { width: 393, height: 852, deviceScaleFactor: 1, mobile: true, touch: true }
-  }))
+  }), linked.id)
   const originalColor = await application.evaluate(async ({ webContents }, expectedOrigin) => {
     const remote = webContents.getAllWebContents().find((contents) => contents.getURL().startsWith(expectedOrigin))
     return remote?.executeJavaScript('getComputedStyle(document.querySelector("main")).color')
@@ -170,6 +173,34 @@ try {
     const remote = webContents.getAllWebContents().find((contents) => contents.getURL().startsWith(expectedOrigin))
     return remote?.executeJavaScript('getComputedStyle(document.querySelector("main")).color')
   }, origin), originalColor)
+  const latestColorEdit = { ...mainColorEdit, id: 'visual-a11ce002', after: 'rgb(32, 104, 168)' }
+  await page.evaluate(async ({ projectId, first, latest }) => {
+    await Promise.all([
+      window.responsiver.previewRemoteVisualStyle({ projectId, visualEdits: [first], route: '/' }),
+      window.responsiver.previewRemoteVisualStyle({ projectId, visualEdits: [latest], route: '/' })
+    ])
+  }, { projectId: linked.id, first: mainColorEdit, latest: latestColorEdit })
+  assert.equal(await application.evaluate(async ({ webContents }, expectedOrigin) => {
+    const remote = webContents.getAllWebContents().find((contents) => contents.getURL().startsWith(expectedOrigin))
+    return remote?.executeJavaScript('getComputedStyle(document.querySelector("main")).color')
+  }, origin), 'rgb(32, 104, 168)', 'la dernière preview CSS concurrente doit gagner sans laisser de clé orpheline')
+  const loadingColorEdit = { ...mainColorEdit, id: 'visual-a11ce003', after: 'rgb(39, 122, 86)' }
+  const slowVisualNavigation = page.evaluate((url) => window.responsiver.navigateRemote('url', url), `${origin}/lent`)
+  await page.waitForFunction(async () => (await window.responsiver.getRemoteState()).loading)
+  const previewDuringNavigation = page.evaluate(
+    ({ projectId, visualEdit }) => window.responsiver.previewRemoteVisualStyle({ projectId, visualEdits: [visualEdit], route: '/lent' }),
+    { projectId: linked.id, visualEdit: loadingColorEdit }
+  )
+  await Promise.all([slowVisualNavigation, previewDuringNavigation])
+  assert.equal(await application.evaluate(async ({ webContents }, expectedOrigin) => {
+    const remote = webContents.getAllWebContents().find((contents) => contents.getURL().startsWith(expectedOrigin))
+    return remote?.executeJavaScript('getComputedStyle(document.querySelector("main")).color')
+  }, origin), 'rgb(39, 122, 86)', 'une preview CSS demandée pendant un chargement doit être réinjectée dans le nouveau document')
+  await page.evaluate((projectId) => window.responsiver.clearRemoteVisualStyle({ projectId }), linked.id)
+  assert.equal(await application.evaluate(async ({ webContents }, expectedOrigin) => {
+    const remote = webContents.getAllWebContents().find((contents) => contents.getURL().startsWith(expectedOrigin))
+    return remote?.executeJavaScript('getComputedStyle(document.querySelector("main")).color')
+  }, origin), originalColor, 'le nettoyage doit retirer toutes les previews CSS concurrentes')
   await page.evaluate(() => window.__responsiverRemoteSelectionOff?.())
 
   const files = await page.evaluate((projectId) => window.responsiver.listWorkspaceFiles(projectId), linked.id)
@@ -178,7 +209,7 @@ try {
     ({ projectId }) => window.responsiver.readWorkspaceFile(projectId, 'styles.css'),
     { projectId: linked.id }
   )
-  const overlay = await page.evaluate(
+  let overlay = await page.evaluate(
     ({ projectId, version }) => window.responsiver.replaceWorkspaceFile(projectId, 'styles.css', 'body { color: #b94d32; }\n', version),
     { projectId: linked.id, version: source.version }
   )
@@ -188,11 +219,23 @@ try {
     const remote = webContents.getAllWebContents().find((contents) => contents.getURL().startsWith(expectedOrigin))
     return remote?.executeJavaScript('getComputedStyle(document.body).color')
   }, origin), 'rgb(185, 77, 50)')
+  const slowWorkspaceNavigation = page.evaluate((url) => window.responsiver.navigateRemote('url', url), `${origin}/workspace-lent`)
+  await page.waitForFunction(async () => (await window.responsiver.getRemoteState()).loading)
+  const workspaceDuringNavigation = page.evaluate(
+    ({ projectId, version }) => window.responsiver.replaceWorkspaceFile(projectId, 'styles.css', 'body { color: #2068a8; }\n', version),
+    { projectId: linked.id, version: overlay.version }
+  )
+  const [, updatedOverlay] = await Promise.all([slowWorkspaceNavigation, workspaceDuringNavigation])
+  overlay = updatedOverlay
+  assert.equal(await application.evaluate(async ({ webContents }, expectedOrigin) => {
+    const remote = webContents.getAllWebContents().find((contents) => contents.getURL().startsWith(expectedOrigin))
+    return remote?.executeJavaScript('getComputedStyle(document.body).color')
+  }, origin), 'rgb(32, 104, 168)', 'une preview Code modifiée pendant un chargement doit être restaurée dans le nouveau document')
   await page.evaluate(() => window.responsiver.navigateRemote('reload'))
   assert.equal(await application.evaluate(async ({ webContents }, expectedOrigin) => {
     const remote = webContents.getAllWebContents().find((contents) => contents.getURL().startsWith(expectedOrigin))
     return remote?.executeJavaScript('getComputedStyle(document.body).color')
-  }, origin), 'rgb(185, 77, 50)', 'la preview CSS de Code doit être restaurée après rechargement')
+  }, origin), 'rgb(32, 104, 168)', 'la preview CSS de Code doit être restaurée après rechargement')
   assert.equal(await readFile(join(firstRoot, 'styles.css'), 'utf8'), 'body { color: #111; }\n', 'recharger la preview ne doit jamais écrire dans les sources')
 
   await assert.rejects(

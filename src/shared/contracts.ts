@@ -153,13 +153,25 @@ export interface RemoteViewport {
 }
 
 export interface RemoteViewBounds {
+  /** Identifiant anti-course de la session distante affichée. */
+  projectId: string
   x: number
   y: number
   width: number
   height: number
+  /** Zone native qui découpe la WebContentsView lorsque la preview est zoomée. */
+  clip?: { x: number; y: number; width: number; height: number }
   scale: number
   visible: boolean
   viewport: RemoteViewport
+}
+
+export interface RemoteZoomGesture {
+  projectId: string
+  deltaY: number
+  /** Coordonnées physiques du pointeur dans la WebContentsView. */
+  x: number
+  y: number
 }
 
 export interface RemotePageState {
