@@ -5,6 +5,7 @@ import { basename, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import electronPath from 'electron'
 import { _electron as electron } from 'playwright'
+import { dismissOnboardingIfPresent } from './helpers/onboarding.mjs'
 
 const projectPath = process.argv[2]
 if (!projectPath) throw new Error('Usage : npm run test:project -- /chemin/du/projet')
@@ -17,6 +18,7 @@ const application = await electron.launch({ executablePath: electronPath, args: 
 try {
   const page = await application.firstWindow()
   page.setDefaultTimeout(20_000)
+  await dismissOnboardingIfPresent(page)
   await page.getByLabel('Chemin local').fill(resolve(projectPath))
   await page.locator('.path-bar').getByRole('button', { name: 'Ouvrir' }).click()
   await page.waitForFunction(() => {

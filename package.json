@@ -17,6 +17,7 @@
     "test": "tsx --test tests/*.test.ts",
     "test:native-host": "node --test native-host/tests/*.test.mjs",
     "test:e2e": "npm run build && node tests/electron.e2e.mjs",
+    "test:e2e:onboarding": "npm run build && node tests/onboarding.e2e.mjs",
     "test:e2e:visual": "npm run build && node tests/visual-editor.e2e.mjs",
     "test:e2e:remote": "npm run build && node tests/remote-session.e2e.mjs",
     "test:e2e:localhost-link": "npm run build && node tests/localhost-association.e2e.mjs",

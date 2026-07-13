@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import electronPath from 'electron'
 import { _electron as electron } from 'playwright'
+import { dismissOnboardingIfPresent } from './helpers/onboarding.mjs'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const state = await mkdtemp(join(tmpdir(), 'responsiver-visual-e2e-'))
@@ -18,6 +19,7 @@ try {
   const page = await application.firstWindow()
   page.setDefaultTimeout(12_000)
   await page.waitForLoadState('domcontentloaded')
+  await dismissOnboardingIfPresent(page)
   await page.getByLabel('Chemin local').fill(projectRoot)
   await page.locator('.path-bar').getByRole('button', { name: 'Ouvrir' }).click()
   await page.locator('.stage-canvas iframe').first().waitFor({ state: 'visible' })

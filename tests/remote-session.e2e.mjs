@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import electronPath from 'electron'
 import { _electron as electron } from 'playwright'
+import { dismissOnboardingIfPresent } from './helpers/onboarding.mjs'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const userDataRoot = await mkdtemp(join(tmpdir(), 'responsiver-remote-e2e-'))
@@ -55,6 +56,7 @@ const application = await electron.launch({
 
 try {
   const page = await application.firstWindow()
+  await dismissOnboardingIfPresent(page)
   page.setDefaultTimeout(30_000)
   const pageErrors = []
   page.on('pageerror', (error) => pageErrors.push(error.message))

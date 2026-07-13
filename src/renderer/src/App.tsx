@@ -6,8 +6,10 @@ import { frameworkSupportFor } from '../../shared/framework-support'
 import { authorizeVisualEditor, compileVisualEditCss, createVisualEditOperation, visualEditOperationKey, type VisualEditOperation, type VisualEditProperty, type VisualEditScope } from '../../shared/visual-editor'
 import { mergeVisualGestureOperations, sanitizeVisualGestureCommit, visualGestureOperations } from '../../shared/visual-manipulation'
 import LocalAssistant from './LocalAssistant'
+import OnboardingTour from './OnboardingTour'
 import PreviewZoomControls from './PreviewZoomControls'
 import RemotePreview from './RemotePreview'
+import { isOnboardingHidden, persistOnboardingHidden } from './onboarding'
 import { clampPreviewScale, stepPreviewScale, wheelPreviewScale } from './preview-zoom'
 
 const CodeWorkspace = React.lazy(() => import('./CodeWorkspace'))
@@ -1117,6 +1119,10 @@ export default function App(): ReactElement {
   const [railCollapsed, setRailCollapsed] = useState(() => {
     try { return window.localStorage.getItem('responsiver.rail-collapsed') === 'true' } catch { return false }
   })
+  const [onboardingState, setOnboardingState] = useState(() => {
+    const hideOnStartup = isOnboardingHidden()
+    return { open: !hideOnStartup, hideOnStartup }
+  })
   const [destination, setDestination] = useState<Destination>('projects')
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>('findings')
   const [project, setProject] = useState<(ProjectSnapshot & ProjectExtra) | null>(null)
@@ -1177,6 +1183,9 @@ export default function App(): ReactElement {
   const activePathRef = useRef(activePath)
   const fastApplyInFlight = useRef(false)
   const fullscreenButtonRef = useRef<HTMLButtonElement>(null)
+  const onboardingTriggerRef = useRef<HTMLButtonElement>(null)
+  const onboardingFallbackFocusRef = useRef<HTMLButtonElement>(null)
+  const onboardingOpenedFromRail = useRef(false)
   const remoteAudits = useRef(new Map<string, RemoteAuditResult>())
   const localRuntimeAudits = useRef(new Map<string, RuntimeAudit>())
   const localSourceIssues = useRef<ProjectIssue[]>([])
@@ -1358,18 +1367,18 @@ export default function App(): ReactElement {
   useEffect(() => {
     const shortcut = (event: KeyboardEvent): void => {
       const togglesInspector = event.key === 'F12' || ((event.metaKey || event.ctrlKey) && event.altKey && event.key.toLowerCase() === 'i') || ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === 'c')
-      if (!togglesInspector || (destination !== 'lab' && destination !== 'code')) return
+      if (!togglesInspector || onboardingState.open || showPreparation || (destination !== 'lab' && destination !== 'code')) return
       event.preventDefault()
       toggleInspector(destination)
     }
     window.addEventListener('keydown', shortcut, true)
     return () => window.removeEventListener('keydown', shortcut, true)
-  }, [destination, inspectorLocation, project?.id])
+  }, [destination, inspectorLocation, onboardingState.open, project?.id, showPreparation])
 
   useEffect(() => window.responsiver.onRemoteInspectorShortcut((projectId) => {
-    if (projectId !== activeProjectId.current || (destination !== 'lab' && destination !== 'code')) return
+    if (projectId !== activeProjectId.current || onboardingState.open || showPreparation || (destination !== 'lab' && destination !== 'code')) return
     toggleInspector(destination)
-  }), [destination, inspectorLocation, project?.id])
+  }), [destination, inspectorLocation, onboardingState.open, project?.id, showPreparation])
 
   useEffect(() => window.responsiver.onRemoteInspectorCanceled((projectId) => {
     if (projectId !== activeProjectId.current) return
@@ -2281,6 +2290,25 @@ export default function App(): ReactElement {
     changes: staging?.changes.length ?? 0
   } : { blockers: 0, issues: 0, selected: 0, changes: 0 }
 
+  const interfaceOverlayOpen = pageGuideOpen || onboardingState.open || showPreparation
+
+  function openOnboarding(): void {
+    onboardingOpenedFromRail.current = true
+    setOnboardingState({ open: true, hideOnStartup: isOnboardingHidden() })
+  }
+
+  function closeOnboarding(hideOnStartup: boolean): void {
+    persistOnboardingHidden(hideOnStartup)
+    const restoreRailFocus = onboardingOpenedFromRail.current
+    onboardingOpenedFromRail.current = false
+    setOnboardingState({ open: false, hideOnStartup })
+    window.requestAnimationFrame(() => {
+      const fallback = onboardingFallbackFocusRef.current
+      const target = restoreRailFocus || fallback?.disabled ? onboardingTriggerRef.current : fallback
+      target?.focus()
+    })
+  }
+
   return <div className={railCollapsed ? 'app-shell is-rail-collapsed' : 'app-shell'}>
     <aside className="nav-rail" aria-label="Navigation principale">
       <div className="rail-head"><button className="brand" onClick={() => go('projects')} aria-label="Responsiver — Projets"><Mark /><span><strong>Responsiver</strong><small>Responsive workbench</small></span></button><button className="rail-toggle" type="button" onClick={() => setRailCollapsed((current) => !current)} aria-label={railCollapsed ? 'Déployer le menu latéral' : 'Replier le menu latéral'} aria-expanded={!railCollapsed} title={railCollapsed ? 'Déployer le menu' : 'Replier le menu'}><Icon name={railCollapsed ? 'panelExpand' : 'panelCollapse'} size={17} /></button></div>
@@ -2288,7 +2316,7 @@ export default function App(): ReactElement {
         const visualUnavailable = item.id === 'visual' && Boolean(project && (!project.source.localRoot || project.source.readOnly || project.source.kind === 'remote-url'))
         const limited = (isRemote && item.id === 'review') || visualUnavailable
         return <button key={item.id} className={`${destination === item.id ? 'nav-link is-active' : 'nav-link'}${limited ? ' is-limited' : ''}`} onClick={() => go(item.id)} aria-label={item.label} aria-current={destination === item.id ? 'page' : undefined} aria-disabled={visualUnavailable || undefined} title={visualUnavailable ? 'Sources locales requises' : item.label}><Icon name={item.icon} /><span>{item.label}</span>{item.id === 'review' && counts.changes > 0 && <b>{counts.changes}</b>}</button>
-      })}</nav>
+      })}<button ref={onboardingTriggerRef} type="button" className="nav-link nav-link--guide" onClick={openOnboarding} aria-label="Ouvrir le guide de prise en main" aria-haspopup="dialog" aria-expanded={onboardingState.open && !showPreparation} aria-controls="responsiver-onboarding" title="Guide de prise en main"><Icon name="help" /><span>Guide</span></button></nav>
       <div className="rail-foot"><span><Icon name="shield" size={15} /> Local strict par défaut</span><small>v0.6 · open source</small></div>
     </aside>
 
@@ -2298,7 +2326,7 @@ export default function App(): ReactElement {
         <div className="title-actions">
           {(destination === 'code' || destination === 'visual') && <PageGuide key={destination} page={destination} onOpenChange={setPageGuideOpen} />}
           {project && <span className={`origin-indicator${project.source.readOnly ? ' is-readonly' : ''}`}><i />{project.source.kind === 'remote-url' ? 'URL · lecture seule' : project.source.kind === 'linked-localhost' ? 'Localhost · sources liées' : 'Runner local'}</span>}
-          <button className="button button--quiet" onClick={() => openWith(() => window.responsiver.chooseProject(), 'Projet analysé et servi localement.')} disabled={busy}><Icon name="folder" /> Ouvrir</button>
+          <button ref={onboardingFallbackFocusRef} className="button button--quiet" onClick={() => openWith(() => window.responsiver.chooseProject(), 'Projet analysé et servi localement.')} disabled={busy}><Icon name="folder" /> Ouvrir</button>
         </div>
       </header>
 
@@ -2328,7 +2356,7 @@ export default function App(): ReactElement {
             </div>
             <div className="stage-canvas">
               {previewBusy && <div className="preview-loading" role="status"><span className="loading-mark" /><strong>Préparation de la proposition…</strong></div>}
-              {isRemote ? <RemotePreview projectId={project.id} device={currentDevice} visible={destination === 'lab'} allowUpscale={stageFullscreen} onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onAudit={applyRemoteAudit} onState={(state) => { setRemoteState(state); changePreviewPath(state.path) }} onNotice={flash} /> : labMode === 'device' && previewMode === 'before-after' && proposal ? <div className="before-after-grid" aria-label="Comparaison avant et après le correctif">
+              {isRemote ? <RemotePreview projectId={project.id} device={currentDevice} visible={destination === 'lab' && !interfaceOverlayOpen} allowUpscale={stageFullscreen} onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onAudit={applyRemoteAudit} onState={(state) => { setRemoteState(state); changePreviewPath(state.path) }} onNotice={flash} /> : labMode === 'device' && previewMode === 'before-after' && proposal ? <div className="before-after-grid" aria-label="Comparaison avant et après le correctif">
                 <div className="comparison-pane"><header><span>Avant</span><strong>Source</strong></header><PreviewFrame compact zoomable project={project} origin={project.previewOrigin} device={currentDevice} path={activePath} label="Avant — Source" focusSelector={focusedSelector} onPathChange={changePreviewPath} onThemeChange={setRuntimeTheme} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} /></div>
                 <div className="comparison-pane comparison-pane--after"><header><span>Après</span><strong>Proposition non validée</strong></header><PreviewFrame compact zoomable project={project} origin={proposal.previewOrigin} device={currentDevice} path={activePath} label="Après — Proposition" focusSelector={focusedSelector} onPathChange={changePreviewPath} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} /></div>
               </div> : labMode === 'device' ? <PreviewFrame project={project} origin={activeOrigin} device={currentDevice} path={activePath} focusSelector={focusedSelector} themeOverride={nativeThemeTarget} resizable allowUpscale={stageFullscreen} zoomable inspectorEnabled={!isRemote && inspectorLocation === 'lab'} onInspectElement={(element, phase) => { if (phase === 'selected' || !inspectedElement) setInspectedElement(element) }} onInspectorReady={() => setInspectorPhase('active')} onInspectorStop={() => { setInspectorLocation(null); setInspectorPhase('idle') }} onInspectorShortcut={() => toggleInspector('lab')} onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onPathChange={changePreviewPath} onThemeChange={activeOrigin === project.previewOrigin ? setRuntimeTheme : undefined} onAudit={activeOrigin === project.previewOrigin ? applyRuntimeAudit : undefined} onRenderStatus={setRuntimeRenderStatus} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} /> : <div className="comparison-grid">{compareDevices.map((device) => <PreviewFrame key={device.id} project={project} origin={activeOrigin} device={device} path={activePath} compact focusSelector={focusedSelector} themeOverride={nativeThemeTarget} label={device.family === 'smartphone' ? 'Smartphone' : device.family === 'tablet' ? 'Tablette' : 'Ordinateur'} onPathChange={changePreviewPath} onThemeChange={activeOrigin === project.previewOrigin ? setRuntimeTheme : undefined} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} />)}</div>}
@@ -2345,7 +2373,7 @@ export default function App(): ReactElement {
 
       {destination === 'visual' && project && visualAuthorization?.allowed && <VisualEditorView
         project={project}
-        remotePreviewVisible={!pageGuideOpen}
+        remotePreviewVisible={!interfaceOverlayOpen}
         device={currentDevice}
         family={family}
         familyDevices={familyDevices}
@@ -2400,7 +2428,7 @@ export default function App(): ReactElement {
             <header><div><span className="overline">Aperçu direct</span><strong>{currentDevice.name}</strong></div><div className="code-preview-actions"><button className={`${inspectorLocation === 'code' ? 'text-button is-active' : 'text-button'}${inspectorLocation === 'code' && inspectorPhase === 'starting' ? ' is-starting' : ''}`} onClick={() => toggleInspector('code')} aria-pressed={inspectorLocation === 'code'} aria-busy={inspectorLocation === 'code' && inspectorPhase === 'starting'} title="Inspecter un élément · F12"><Icon name="cursor" size={14} /> {inspectorLocation === 'code' && inspectorPhase === 'starting' ? 'Activation…' : 'Inspecter'}</button><button className="text-button" onClick={() => go('lab')}><Icon name="fullscreen" size={14} /> Ouvrir en grand</button></div></header>
             <div className="code-preview-body">
               {isRemote
-                ? <RemotePreview projectId={project.id} device={currentDevice} visible={destination === 'code' && !pageGuideOpen} embedded automaticAudit={false} onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onAudit={applyRemoteAudit} onState={(state) => { setRemoteState(state); changePreviewPath(state.path) }} onNotice={flash} />
+                ? <RemotePreview projectId={project.id} device={currentDevice} visible={destination === 'code' && !interfaceOverlayOpen} embedded automaticAudit={false} onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onAudit={applyRemoteAudit} onState={(state) => { setRemoteState(state); changePreviewPath(state.path) }} onNotice={flash} />
                 : <PreviewFrame compact zoomable project={project} origin={workspaceOrigin ?? project.previewOrigin} device={currentDevice} path={activePath} resizable inspectorEnabled={inspectorLocation === 'code'} onInspectElement={(element, phase) => { if (phase === 'selected' || !inspectedElement) setInspectedElement(element) }} onInspectorReady={() => setInspectorPhase('active')} onInspectorStop={() => { setInspectorLocation(null); setInspectorPhase('idle') }} onInspectorShortcut={() => toggleInspector('code')} onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onPathChange={changePreviewPath} onThemeChange={setRuntimeTheme} onAudit={!workspaceOrigin ? applyRuntimeAudit : undefined} onRenderStatus={setRuntimeRenderStatus} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} />}
             </div>
             {inspectorLocation === 'code' && <QuickInspectorPanel element={inspectedElement} phase={inspectorPhase} readOnly={project.source.kind === 'remote-url'} onClose={() => { setInspectorLocation(null); setInspectorPhase('idle') }} onEdit={() => go('visual')} />}
@@ -2414,6 +2442,7 @@ export default function App(): ReactElement {
         ? <RemoteReportView project={project} auditedRouteCount={remoteAudits.current.size} busy={busy} onCopy={() => void copyRemoteSummary()} onExport={() => void exportAction('report')} onLab={() => go('lab')} />
         : <ExportView project={project} staging={staging} selectedCount={counts.selected} busy={busy} onCopy={() => void copyPatch()} onExport={exportAction} onReview={() => project.source.kind === 'linked-localhost' ? go('visual') : go('review')} reviewLabel={project.source.kind === 'linked-localhost' ? 'Revenir à l’Atelier' : 'Réviser le staging'} />)}
     </main>
+    {onboardingState.open && !showPreparation && <OnboardingTour initialHideOnStartup={onboardingState.hideOnStartup} onClose={closeOnboarding} />}
     {showPreparation && preparation && <PreparationOverlay progress={preparation} />}
     {notice && <div className={destination === 'visual' ? 'toast toast--above-visual-tray' : 'toast'} role="status"><Icon name="info" size={16} /> <span>{notice}</span><button aria-label="Fermer" onClick={() => setNotice(null)}><Icon name="close" size={14} /></button></div>}
   </div>

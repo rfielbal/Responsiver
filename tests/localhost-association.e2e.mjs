@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import electronPath from 'electron'
 import { _electron as electron } from 'playwright'
+import { dismissOnboardingIfPresent } from './helpers/onboarding.mjs'
 
 const appRoot = fileURLToPath(new URL('..', import.meta.url))
 const fixtureRoot = await mkdtemp(join(tmpdir(), 'responsiver-localhost-link-'))
@@ -52,6 +53,7 @@ const application = await electron.launch({
 try {
   const page = await application.firstWindow()
   await page.waitForLoadState('domcontentloaded')
+  await dismissOnboardingIfPresent(page)
   const opened = await page.evaluate((url) => window.responsiver.openRemoteUrl({ url, mode: 'localhost' }), origin)
   assert.equal(opened.source.readOnly, true)
   assert.equal(opened.source.localRoot, null)

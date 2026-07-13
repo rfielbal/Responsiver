@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import electronPath from 'electron'
 import { _electron as electron } from 'playwright'
+import { dismissOnboardingIfPresent } from './helpers/onboarding.mjs'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const demoRoot = join(root, 'demo', 'atelier')
@@ -56,6 +57,7 @@ try {
   page.setDefaultTimeout(12_000)
   page.on('pageerror', (error) => pageErrors.push(error.message))
   await page.waitForLoadState('domcontentloaded')
+  await dismissOnboardingIfPresent(page)
 
   const waitForActivePath = async (path) => page.waitForFunction((expected) => document.querySelector('.browser-bar select')?.value === expected, path)
   const waitForComputedStyle = async (locator, property, expected) => {
