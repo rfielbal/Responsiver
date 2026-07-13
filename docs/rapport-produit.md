@@ -92,10 +92,10 @@ La frappe et les propositions IA restent en mémoire. Le clic **Appliquer au fic
 ### Atelier visuel
 
 ```text
-Sélection dans le rendu → Portée écran/page → Réglages CSS → Avant/Après → Appliquer ou exporter
+Composer dans la page figée → Portée écran/page → Tester le vrai site → Avant/Après → Appliquer ou exporter
 ```
 
-L’Atelier conserve des opérations structurées et refuse le déplacement libre en coordonnées absolues. La preview utilise une feuille temporaire ; l’application locale produit une feuille Responsiver gérée et réversible. Un localhost lié reçoit uniquement cette CSS en direct puis un export à intégrer au framework. Une URL publique reste en inspection seule.
+L’Atelier conserve des opérations structurées et refuse le placement absolu automatique. Un déplacement visuel reste borné au conteneur et préserve sa place dans le flux ; un dépôt entre frères Flex/Grid devient un lot d’ordres CSS signalé comme visuel uniquement. Les poignées produisent des dimensions bornées au format choisi. La page est figée pendant le geste, puis **Tester** réactive liens, formulaires et navigation avec la feuille temporaire ; les scripts du site restent chargés pendant les deux modes. L’application locale produit une feuille Responsiver gérée et réversible. Un localhost lié reçoit uniquement les réglages CSS en direct puis un export à intégrer au framework ; la composition gestuelle reste locale. Une URL publique reste en inspection seule.
 
 Cette distinction est volontaire : le parcours court optimise une correction détectée, l’Atelier une retouche visuelle ciblée, le staging une livraison groupée non destructive et Monaco la modification manuelle fichier par fichier.
 

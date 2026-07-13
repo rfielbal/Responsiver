@@ -130,13 +130,23 @@ L’Atelier stocke des `VisualEditOperation` structurées :
 - portée `all`, `mobile`, `tablet` ou plage personnalisée ;
 - portée de route `current` ou `all`.
 
+Le mode **Composer** ajoute un protocole privé au-dessus de ce même modèle. `PreviewFrame` crée un `MessageChannel` neuf à chaque chargement et transfère un seul port au bridge injecté avant les scripts du projet. Session, document et révision sont vérifiés sur chaque message ; le bridge conserve en outre les primitives natives du port avant l’exécution du site. Un `postMessage` fabriqué ou un prototype remplacé par le projet ne peut donc pas devenir un changement. Les intentions de geste ne transportent ni CSS libre, ni HTML, ni valeur de formulaire, ni texte, URL complète, query, fragment ou stockage : seulement une cible unique expurgée, le chemin interne courant, des rectangles bornés et une liste fermée de mutations.
+
+La couche de composition vit dans un Shadow DOM du runner local. Elle intercepte les interactions, met en pause animations et transitions, conserve le scroll et dessine sélection, fantôme, guides et huit poignées sans modifier les styles inline du projet pendant le geste. Le renderer traduit ensuite :
+
+- un déplacement dans le flux en `translate` responsive borné au conteneur ;
+- un dépôt entre frères Flex/Grid en lot atomique de `order`, avec avertissement sur l’ordre de lecture ;
+- un redimensionnement en `width` fluide, `height` contrôlée et `box-sizing` si nécessaire.
+
+La portée écran/page vient toujours de React et jamais du document chargé. Un geste complet remplace les opérations de mêmes clés puis rejoint l’historique en une transaction. **Tester** ferme la couche sans retirer la CSS temporaire ; **Avant/Après**, staging et application réutilisent ensuite le pipeline existant.
+
 La compilation produit une feuille déterministe avec media queries. Une même cible/propriété/portée ne peut recevoir deux valeurs concurrentes ; les doublons exacts sont regroupés. Un sélecteur touchant plusieurs éléments exige une confirmation, tandis que Shadow DOM, frame tierce ou sélecteur instable restent en inspection seule.
 
 La preview locale injecte la feuille dans un `<style data-responsiver-visual-preview>` sans écrire le disque. Undo/redo ne manipule que l’historique renderer. En mode Avant/Après, deux runners affichent source et feuille temporaire ; en mode localhost lié, une seule session réelle reçoit la CSS et la comparaison côte à côte est donc désactivée.
 
 Le zoom de travail transforme uniquement la représentation native ou le conteneur de l’iframe entre 10 et 200 %. La largeur CSS émulée reste celle de l’appareil sélectionné : zoomer ne déclenche donc jamais artificiellement un autre breakpoint. Les previews distantes utilisent une `View` de découpe autour de la `WebContentsView`, et toutes les restaurations CSS/inspecteur sont sérialisées afin qu’une navigation ou une saisie rapide ne laisse aucune feuille temporaire orpheline.
 
-Au staging, les opérations sont revalidées dans le processus principal. Un projet local durable reçoit `.responsiver/responsiver.generated.css` et un lien dans les pages concernées. Pour « page actuelle », le transformeur ajoute un attribut `data-responsiver-route` déterministe sur le document et préfixe la règle ; si plusieurs routes dynamiques partagent le même HTML, il refuse cette portée. Un artefact compilé ou localhost lié produit uniquement un export à intégrer aux sources auteur. Une URL publique n’accède jamais à l’Atelier.
+Au staging, les opérations sont revalidées dans le processus principal. Un projet local durable reçoit `.responsiver/responsiver.generated.css` et un lien dans les pages concernées. Chaque règle visuelle possède des marqueurs gérés stables : un nouveau geste sur la même cible/propriété/portée remplace le bloc précédent au lieu d’accumuler des déclarations concurrentes. Pour « page actuelle », le transformeur ajoute un attribut `data-responsiver-route` déterministe sur le document et préfixe la règle ; si plusieurs routes dynamiques partagent le même HTML, il refuse cette portée. Un artefact compilé ou localhost lié produit uniquement un export à intégrer aux sources auteur. Une URL publique n’accède jamais à l’Atelier.
 
 ## Proposition déterministe et staging
 
