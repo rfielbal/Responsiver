@@ -52,16 +52,17 @@ Responsiver ne prétend pas retrouver le code auteur d’un site public à parti
 
 ### Atelier visuel et inspecteur intégré
 
-- Inspecteur accessible depuis le Laboratoire et Code, ainsi que par `F12`, `⌘⌥I` ou `⌘⇧C` sur macOS.
+- Inspecteur accessible depuis le Laboratoire, Code et l’Atelier, ainsi que par `F12`, `⌘⌥I` ou `⌘⇧C` sur macOS.
 - Survol et sélection dans le vrai rendu avec contour, sélecteur, route, rectangle, box model, rôle, libellé et styles calculés bornés.
 - Passage direct de la cible inspectée vers l’**Atelier visuel**, sans perdre la page ni le format observé.
-- Quatre modes séparés : **Composer** fige la page et active les gestes directs, **Propriétés** ouvre les réglages précis, **Tester** rend toutes les interactions au site et **Avant / après** synchronise la source et la proposition.
-- Composition directe à la souris : déplacement borné dans le conteneur, guides d’alignement, huit poignées de redimensionnement et réorganisation des frères Flex/Grid. Un geste entier reste une seule étape d’annulation.
+- Quatre modes séparés : **Composer** fige la page et active les gestes directs, **Inspecter** ouvre les réglages précis, **Tester** rend toutes les interactions au site et **Avant / après** synchronise la source et la proposition.
+- Composition libre à la souris : glisser déplace un bloc dans le viewport tout en gardant une prise visible, `Maj` + glisser réordonne explicitement ses frères Flex/Grid, `⌥` + clic cible un élément imbriqué et huit poignées redéfinissent sa taille. Chaque geste reste une transaction indépendante : les gestes rapprochés se cumulent et un réglage bloqué est retiré sans effacer les suivants.
 - Réglages sémantiques de mise en page, dimensions, espacements, typographie et apparence. L’Atelier produit des contraintes CSS ; il ne convertit pas les éléments en coordonnées absolues fragiles.
 - Portées indépendantes : toutes tailles, mobile, tablette ou plage personnalisée, puis page actuelle ou toutes les pages.
 - Sélection multiple explicitement confirmée lorsqu’un sélecteur touche plusieurs éléments ; Shadow DOM et frames tierces restent inspectables mais non persistables.
-- Prévisualisation CSS éphémère, undo/redo, avant/après, préparation du code, application atomique sur un projet HTML/CSS durable ou export sur un artefact/localhost lié.
-- Espaces Code et Atelier volontairement compacts : le projet actif reste visible, les grands titres sont remplacés par un guide `?` contextuel et la surface est réservée au rendu, au code et aux propriétés.
+- Prévisualisation CSS éphémère, undo/redo et avant/après. **Réviser sans modifier** ouvre l’aperçu et le diff en gardant les fichiers intacts ; **Appliquer aux fichiers** écrit les ajustements, réanalyse le projet et reste annulable. Un artefact ou localhost lié propose seulement **Préparer l’export CSS**.
+- Plein écran propre à l’Atelier : le canvas et le panneau Inspecter restent ensemble, la route et le viewport sont conservés, `Échap` ferme la vue et rend le focus au bouton d’origine.
+- Espaces Code et Atelier volontairement compacts : le projet actif reste visible, les grands titres sont remplacés par un guide `?` contextuel et la surface est réservée au rendu, au code et à l’inspection.
 
 Une URL publique peut être inspectée dans le Laboratoire, mais l’Atelier reste désactivé sans sources. Sur un localhost lié, les réglages CSS sont visibles immédiatement puis préparés comme feuille à intégrer au framework ; le mode Composer direct reste désactivé tant que la `WebContentsView` distante ne dispose pas du même pont privé que le runner local. Responsiver ne prétend pas retrouver automatiquement le composant Twig, JSX, Vue ou Tailwind auteur.
 
@@ -119,10 +120,10 @@ Quatre niveaux coexistent afin qu’une correction simple reste rapide sans supp
 
 1. **Parcours court** : constat visuel → Avant/Après → **Valider et appliquer**. Seule la proposition actuellement comparée est écrite, jamais le reste du plan ; la route et le viewport sont conservés après réanalyse.
 2. **Workflow avancé** : Source → Proposition → **Ajouter au plan** → Staging combiné → Révision → export. Il sert aux lots, thèmes et instructions.
-3. **Atelier visuel** : composer directement ou régler les propriétés → **Tester** le vrai site → Avant/Après → **Appliquer au projet** ou préparer l’export.
+3. **Atelier visuel** : **Composer** ou **Inspecter** → **Tester** le vrai site → Avant/Après → **Réviser sans modifier** ou **Appliquer aux fichiers** ; sur un artefact ou localhost lié, **Préparer l’export CSS**.
 4. **Code et assistant** : Source → Overlay Monaco → Preview + Diff → **Appliquer au fichier**.
 
-L’application directe est réservée aux sources HTML/CSS locales durables, pas aux URLs, localhost ou artefacts compilés. Tous les chemins et hashes sont validés avant la première substitution ; les fichiers sont remplacés atomiquement, les conflits bloquent le lot entier et la dernière application reste annulable tant que personne n’a remodifié les fichiers. L’annulation restaure aussi les nouveaux fichiers et dossiers créés. La feuille gérée `.responsiver/responsiver.generated.css` est réutilisée au lieu d’accumuler des variantes numérotées, et un nouveau geste sur la même cible remplace son ancien bloc géré.
+L’action **Appliquer aux fichiers** est réservée aux sources HTML/CSS locales durables, pas aux URLs, localhost ou artefacts compilés. Tous les chemins et hashes sont validés avant la première substitution ; les fichiers sont remplacés atomiquement, les conflits bloquent le lot entier et la dernière application reste annulable tant que personne n’a remodifié les fichiers. L’annulation restaure aussi les nouveaux fichiers et dossiers créés. La feuille gérée `.responsiver/responsiver.generated.css` est réutilisée au lieu d’accumuler des variantes numérotées, et un nouveau geste sur la même cible remplace son ancien bloc géré.
 
 Les changements de code à relire montrent leur mini-diff avant validation. Les transformations incompatibles sur la même déclaration, deux palettes ou deux instructions CSS sont refusées au lieu de laisser silencieusement gagner la dernière. Le staging avancé reste non destructif et exporte un patch, les fichiers changés ou une copie corrigée.
 
