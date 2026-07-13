@@ -134,6 +134,8 @@ La compilation produit une feuille déterministe avec media queries. Une même c
 
 La preview locale injecte la feuille dans un `<style data-responsiver-visual-preview>` sans écrire le disque. Undo/redo ne manipule que l’historique renderer. En mode Avant/Après, deux runners affichent source et feuille temporaire ; en mode localhost lié, une seule session réelle reçoit la CSS et la comparaison côte à côte est donc désactivée.
 
+Le zoom de travail transforme uniquement la représentation native ou le conteneur de l’iframe entre 10 et 200 %. La largeur CSS émulée reste celle de l’appareil sélectionné : zoomer ne déclenche donc jamais artificiellement un autre breakpoint. Les previews distantes utilisent une `View` de découpe autour de la `WebContentsView`, et toutes les restaurations CSS/inspecteur sont sérialisées afin qu’une navigation ou une saisie rapide ne laisse aucune feuille temporaire orpheline.
+
 Au staging, les opérations sont revalidées dans le processus principal. Un projet local durable reçoit `.responsiver/responsiver.generated.css` et un lien dans les pages concernées. Pour « page actuelle », le transformeur ajoute un attribut `data-responsiver-route` déterministe sur le document et préfixe la règle ; si plusieurs routes dynamiques partagent le même HTML, il refuse cette portée. Un artefact compilé ou localhost lié produit uniquement un export à intégrer aux sources auteur. Une URL publique n’accède jamais à l’Atelier.
 
 ## Proposition déterministe et staging

@@ -31,6 +31,7 @@ Responsiver ne prétend pas retrouver le code auteur d’un site public à parti
 
 - Familles smartphone, tablette et ordinateur séparées des dimensions personnalisées.
 - Modèles connus, rotation, saisie précise et redimensionnement direct par les bords ou les angles.
+- Zoom de travail de 10 à 200 % par commandes, `Ctrl` + molette ou pincement, sans changer le viewport CSS ni les media queries testées.
 - Plein écran sans perdre la route, la taille, le focus ou la version observée.
 - Comparaison de plusieurs appareils distincte de la comparaison Source / Proposition.
 - Ouverture d’un constat sur sa route et son sélecteur lorsque celui-ci est disponible.
@@ -51,6 +52,7 @@ Responsiver ne prétend pas retrouver le code auteur d’un site public à parti
 - Portées indépendantes : toutes tailles, mobile, tablette ou plage personnalisée, puis page actuelle ou toutes les pages.
 - Sélection multiple explicitement confirmée lorsqu’un sélecteur touche plusieurs éléments ; Shadow DOM et frames tierces restent inspectables mais non persistables.
 - Prévisualisation CSS éphémère, undo/redo, avant/après, préparation du code, application atomique sur un projet HTML/CSS durable ou export sur un artefact/localhost lié.
+- Espaces Code et Atelier volontairement compacts : le projet actif reste visible, les grands titres sont remplacés par un guide `?` contextuel et la surface est réservée au rendu, au code et aux propriétés.
 
 Une URL publique peut être inspectée dans le Laboratoire, mais l’Atelier reste désactivé sans sources. Sur un localhost lié, les réglages CSS sont visibles immédiatement puis préparés comme feuille à intégrer au framework : Responsiver ne prétend pas retrouver automatiquement le composant Twig, JSX, Vue ou Tailwind auteur.
 
