@@ -41,13 +41,13 @@ Responsiver ne prétend pas retrouver le code auteur d’un site public à parti
 - Modèles connus, rotation, saisie précise et redimensionnement direct par les bords ou les angles.
 - Zoom de travail de 10 à 200 % par commandes, `Ctrl` + molette ou pincement, sans changer le viewport CSS ni les media queries testées.
 - Plein écran sans perdre la route, la taille, le focus ou la version observée.
-- Comparaison de plusieurs appareils distincte de la comparaison Source / Proposition.
+- Comparaison de plusieurs appareils distincte de la comparaison **Version actuelle / Correctif temporaire**.
 - Ouverture d’un constat sur sa route et son sélecteur lorsque celui-ci est disponible.
 - Deux catégories explicites : **Rendu & responsive** pour les défauts mesurés, **Code & structure** pour les diagnostics statiques, de build ou de réseau.
 - Cinq priorités visuelles affichées d’abord ; les autres restent accessibles sans saturer l’espace de travail.
 - Fusion d’une preuve runtime et de sa cause CSS exacte lorsqu’elles partagent route et sélecteur, notamment pour éviter les doublons de viewport ou de navigation.
-- Sélection multiple indépendante de l’ouverture du détail ; un constat sans transformation fiable reste consultatif et n’entre pas dans une fausse file d’application.
-- Avant / Après contextualisé avant validation d’un correctif.
+- Sélection multiple indépendante de l’ouverture du détail : les constats réellement corrigeables sont comparés ensemble, puis validés ou écartés comme un lot. Un point sans transformation fiable reste clairement consultatif et n’entre pas dans une fausse file d’application.
+- Avant / Après contextualisé avant validation, mini-diff pour le code, retrait direct d’un choix déjà validé et accès explicite à la révision combinée.
 - Thème clair ou sombre prévisualisé immédiatement ; une variante existante est activée sans doublon. Une variante absente n’est générée que si les rôles fond/texte et leurs contrastes sont fiables ; images, filtres et accents de marque restent intacts, sinon le moteur refuse prudemment.
 
 ### Atelier visuel et inspecteur intégré
@@ -56,7 +56,7 @@ Responsiver ne prétend pas retrouver le code auteur d’un site public à parti
 - Survol et sélection dans le vrai rendu avec contour, sélecteur, route, rectangle, box model, rôle, libellé et styles calculés bornés.
 - Passage direct de la cible inspectée vers l’**Atelier visuel**, sans perdre la page ni le format observé.
 - Quatre modes séparés : **Composer** fige la page et active les gestes directs, **Inspecter** ouvre les réglages précis, **Tester** rend toutes les interactions au site et **Avant / après** synchronise la source et la proposition.
-- Composition libre à la souris : glisser déplace un bloc dans le viewport tout en gardant une prise visible, `Maj` + glisser réordonne explicitement ses frères Flex/Grid, `⌥` + clic cible un élément imbriqué et huit poignées redéfinissent sa taille. Chaque geste reste une transaction indépendante : les gestes rapprochés se cumulent et un réglage bloqué est retiré sans effacer les suivants.
+- Composition libre à la souris : glisser déplace visuellement un bloc dans le viewport tout en gardant une prise visible, `Maj` + glisser réordonne explicitement ses frères Flex/Grid, `⌥` + clic cible un élément imbriqué et huit poignées redéfinissent sa taille, y compris au-delà de son conteneur. Le fantôme suit la géométrie demandée pendant le geste ; au relâchement, Responsiver la traduit en règles CSS (`translate`, dimensions ou `order`) sans reparentage du DOM ni coordonnées absolues. La géométrie réellement obtenue après injection est ensuite vérifiée, car le layout du site peut l’ajuster légèrement. Les gestes rapprochés se cumulent sans invalider les précédents.
 - Réglages sémantiques de mise en page, dimensions, espacements, typographie et apparence. L’Atelier produit des contraintes CSS ; il ne convertit pas les éléments en coordonnées absolues fragiles.
 - Portées indépendantes : toutes tailles, mobile, tablette ou plage personnalisée, puis page actuelle ou toutes les pages.
 - Sélection multiple explicitement confirmée lorsqu’un sélecteur touche plusieurs éléments ; Shadow DOM et frames tierces restent inspectables mais non persistables.
@@ -118,14 +118,14 @@ L’installation est encore manuelle. Le connecteur ne démarre pas Responsiver 
 
 Quatre niveaux coexistent afin qu’une correction simple reste rapide sans supprimer les garde-fous :
 
-1. **Parcours court** : constat visuel → Avant/Après → **Valider et appliquer**. Seule la proposition actuellement comparée est écrite, jamais le reste du plan ; la route et le viewport sont conservés après réanalyse.
-2. **Workflow avancé** : Source → Proposition → **Ajouter au plan** → Staging combiné → Révision → export. Il sert aux lots, thèmes et instructions.
+1. **Parcours court** : constat visuel → Avant/Après → **Appliquer le plan maintenant**. Sans autre choix validé, seule la correction affichée est écrite ; si un plan existe déjà, le bouton annonce et applique explicitement l’ensemble. La route et le viewport sont conservés après réanalyse.
+2. **Workflow groupé sur un projet local** : sélectionner les constats → **Comparer la sélection** → **Valider la correction** → **Préparer et ouvrir la révision** → appliquer ou exporter. Le même parcours réunit défauts visuels, changements de code, thèmes, instructions et ajustements de l’Atelier. Un artefact local compilé peut être comparé et exporté, mais pas appliqué directement. Un localhost lié utilise l’export CSS ou l’espace Code ; une URL publique reste limitée au rapport d’audit.
 3. **Atelier visuel** : **Composer** ou **Inspecter** → **Tester** le vrai site → Avant/Après → **Réviser sans modifier** ou **Appliquer aux fichiers** ; sur un artefact ou localhost lié, **Préparer l’export CSS**.
 4. **Code et assistant** : Source → Overlay Monaco → Preview + Diff → **Appliquer au fichier**.
 
 L’action **Appliquer aux fichiers** est réservée aux sources HTML/CSS locales durables, pas aux URLs, localhost ou artefacts compilés. Tous les chemins et hashes sont validés avant la première substitution ; les fichiers sont remplacés atomiquement, les conflits bloquent le lot entier et la dernière application reste annulable tant que personne n’a remodifié les fichiers. L’annulation restaure aussi les nouveaux fichiers et dossiers créés. La feuille gérée `.responsiver/responsiver.generated.css` est réutilisée au lieu d’accumuler des variantes numérotées, et un nouveau geste sur la même cible remplace son ancien bloc géré.
 
-Les changements de code à relire montrent leur mini-diff avant validation. Les transformations incompatibles sur la même déclaration, deux palettes ou deux instructions CSS sont refusées au lieu de laisser silencieusement gagner la dernière. Le staging avancé reste non destructif et exporte un patch, les fichiers changés ou une copie corrigée.
+Les changements de code à relire montrent leur mini-diff avant validation. Les transformations incompatibles sur la même déclaration, deux palettes ou deux instructions CSS sont refusées au lieu de laisser silencieusement gagner la dernière. La version corrigée reste non destructive jusqu’au bouton **Appliquer au projet** et peut aussi être livrée comme patch, fichiers changés ou copie complète.
 
 ## Données et réseau
 

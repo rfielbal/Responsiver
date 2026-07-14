@@ -13,7 +13,7 @@ Preload contextBridge typé
 Electron main — ActiveProjectSession
   ├── LocalProjectSession
   │     ├── analyse HTML/CSS route-scopée
-  │     ├── runners source / proposition / staging / workspace
+  │     ├── runners version actuelle / correctif temporaire / version corrigée / workspace
 │     ├── politique de constats visuel / code
 │     └── transformeur déterministe + application/undo atomiques
   ├── RemoteBrowserSession
@@ -37,7 +37,7 @@ Le processus principal possède une seule `ActiveProjectSession`. Son contrat di
 - `remote-url` : URL publique HTTPS ou localhost sans sources, toujours en lecture seule ;
 - `linked-localhost` : localhost associé explicitement à un dossier local éditable.
 
-Changer de source ferme les serveurs de preview, le `WebContentsView`, l’espace de changements et le staging de la session précédente. Les buffers Monaco, captures et messages de l’assistant ne sont pas persistés.
+Changer de source ferme les serveurs de preview, le `WebContentsView`, l’espace de changements et la version corrigée préparée dans la session précédente. Les buffers Monaco, captures et messages de l’assistant ne sont pas persistés.
 
 Un verrou Electron d’instance unique évite deux consommateurs concurrents pour le compagnon Chrome. La seconde instance réactive la fenêtre existante et déclenche une nouvelle lecture de la file.
 
@@ -55,7 +55,7 @@ Une sélection peut être un dossier ou un fichier `.html/.htm`. L’ouverture s
 
 L’analyseur privilégie l’entrée racine et sort les fragments, démos, tests, exemples et Storybook des routes principales. Une page auxiliaire reste ouvrable si l’utilisateur la choisit explicitement. Si l’entrée est un shell de framework, il recherche prudemment une sortie existante dans `dist`, `build`, `out` ou `.output/public`. Un simple `public/index.html` de framework n’est pas considéré comme un build final.
 
-Le verdict `ready`, `degraded`, `blocked` ou `needs-build` combine structure HTML, contenu visible potentiel, scripts réellement exécutables, CSS vide, médias orphelins, fraîcheur de l’artefact et exhaustivité de l’inventaire. Un projet bloqué n’obtient ni runner, ni proposition, ni staging.
+Le verdict `ready`, `degraded`, `blocked` ou `needs-build` combine structure HTML, contenu visible potentiel, scripts réellement exécutables, CSS vide, médias orphelins, fraîcheur de l’artefact et exhaustivité de l’inventaire. Un projet bloqué n’obtient ni runner, ni correctif temporaire, ni version corrigée.
 
 L’analyse statique conserve les routes et feuilles CSS effectivement liées. Les règles déterministes couvrent notamment viewport absent, `min-width` rigide, largeurs fixes importantes, `white-space: nowrap` réellement risqué et ressources externes incompatibles avec la politique locale. Les mêmes déclarations partagées par plusieurs routes sont regroupées. Une couche de politique classe ensuite chaque signal en **Rendu & responsive** ou **Code & structure**, distingue preuve statique/runtime/corrélée et impose diff, avant/après ou intervention manuelle. Une heuristique CSS et sa preuve runtime de même route/sélecteur deviennent un seul constat canonique. Aucun signal n’est sélectionnable si aucun transformateur réel ne sait produire sa proposition. La restitution est priorisée et bornée à 18 constats par route et 60 au total ; l’analyse signale honnêtement une troncature. PostCSS structure les déclarations ; Sass, Less et CSS non reliés sont signalés mais pas réécrits aveuglément.
 
@@ -140,38 +140,38 @@ L’Atelier stocke des `VisualEditOperation` structurées :
 
 Le mode **Composer** ajoute un protocole privé au-dessus de ce même modèle. `PreviewFrame` crée un `MessageChannel` neuf à chaque chargement et transfère un seul port au bridge injecté avant les scripts du projet. Session, document et révision sont vérifiés sur chaque message ; le bridge conserve en outre les primitives natives du port avant l’exécution du site. Un `postMessage` fabriqué ou un prototype remplacé par le projet ne peut donc pas devenir un changement. Les intentions de geste ne transportent ni CSS libre, ni HTML, ni valeur de formulaire, ni texte, URL complète, query, fragment ou stockage : seulement une cible unique expurgée, le chemin interne courant, des rectangles bornés et une liste fermée de mutations.
 
-La couche de composition vit dans un Shadow DOM du runner local. Elle intercepte les interactions, met en pause animations et transitions, conserve le scroll et dessine sélection, fantôme, guides et huit poignées sans modifier les styles inline du projet pendant le geste. Le glisser simple reste un déplacement libre ; `Maj` + glisser demande explicitement une réorganisation entre frères Flex/Grid et `⌥` + clic permet de cibler un nœud imbriqué. Le renderer traduit ensuite :
+La couche de composition vit dans un Shadow DOM du runner local. Elle intercepte les interactions, met en pause animations et transitions, conserve le scroll et dessine sélection, fantôme, guides et huit poignées sans modifier les styles inline du projet pendant le geste. Le fantôme représente directement la géométrie demandée par le pointeur. Le glisser simple reste un déplacement visuel libre ; `Maj` + glisser demande explicitement une réorganisation entre frères Flex/Grid et `⌥` + clic permet de cibler un nœud imbriqué. Au relâchement, le renderer n’effectue aucun reparentage du DOM et ne convertit pas la page en coordonnées absolues : il traduit le geste en opérations CSS structurées :
 
 - un déplacement dans le flux en `translate` responsive borné au viewport, avec une prise toujours visible ;
 - un `Maj` + dépôt entre frères Flex/Grid en lot atomique de `order`, avec avertissement sur l’ordre de lecture ;
-- un redimensionnement en `width` fluide bornée au viewport, hauteur textuelle souple, axe principal Flex respecté et `box-sizing` si nécessaire.
+- un redimensionnement en dimensions explicites sur les axes manipulés, largeur fluide bornée au viewport, ratio des médias préservé, axe principal Flex neutralisé lorsque nécessaire et `box-sizing` cohérent.
 
-La portée taille/page vient toujours de React et jamais du document chargé. Un geste complet remplace les opérations de mêmes clés puis rejoint l’historique en une transaction. **Inspecter** et `F12` partagent la même sélection avec le panneau de réglages ; **Tester** ferme la couche sans retirer la CSS temporaire ; **Avant/Après**, staging et application réutilisent ensuite le pipeline existant.
+La portée taille/page vient toujours de React et jamais du document chargé. Un geste complet remplace les opérations de mêmes clés puis rejoint l’historique en une transaction. **Inspecter** et `F12` partagent la même sélection avec le panneau de réglages ; **Tester** ferme la couche sans retirer la CSS temporaire ; **Avant/Après**, préparation de la version corrigée et application réutilisent ensuite le pipeline existant.
 
 La compilation produit une feuille déterministe avec media queries. Une même cible/propriété/portée ne peut recevoir deux valeurs concurrentes ; les doublons exacts sont regroupés. Un sélecteur touchant plusieurs éléments exige une confirmation, tandis que Shadow DOM, frame tierce ou sélecteur instable restent en inspection seule.
 
-La preview locale injecte la feuille dans un `<style data-responsiver-visual-preview>` sans écrire le disque. Chaque injection et chaque geste possèdent un identifiant corrélé ; plusieurs gestes rapprochés restent donc vérifiables séparément. Le runner confirme l’injection avant de remesurer les rectangles réels sur deux frames ; si le layout empêche encore une géométrie demandée, seul le delta correspondant est retiré. Les checkpoints plus récents sont rebasés afin qu’un rejet tardif ne ressuscite jamais un geste déjà refusé et ne supprime pas une modification indépendante. Undo/redo ne manipule que l’historique renderer. En mode Avant/Après, deux runners affichent source et feuille temporaire ; en mode localhost lié, une seule session réelle reçoit la CSS et la comparaison côte à côte est donc désactivée.
+La preview locale injecte la feuille dans un `<style data-responsiver-visual-preview>` sans écrire le disque. Chaque injection et chaque geste possèdent un identifiant corrélé ; plusieurs gestes rapprochés restent donc vérifiables séparément. Le runner confirme l’injection avant de remesurer les rectangles réels sur deux frames. Le rectangle du fantôme est une intention de geste, pas une promesse de coordonnées finales : la cascade et le layout peuvent adapter le résultat. Une adaptation qui suit effectivement le geste est conservée et le contour se recale sur la géométrie réellement rendue ; seule une cible détachée, une règle invalide ou une géométrie qui n’a réellement pas réagi provoque le retrait du delta concerné. Les gestes successifs sur une même propriété forment une chaîne et ne sont validés qu’après confirmation du dernier résultat. Undo/redo ne manipule que l’historique renderer. En mode Avant/Après, deux runners affichent la version actuelle et la feuille temporaire ; en mode localhost lié, une seule session réelle reçoit la CSS et la comparaison côte à côte est donc désactivée.
 
 Le zoom de travail transforme uniquement la représentation native ou le conteneur de l’iframe entre 10 et 200 %. La largeur CSS émulée reste celle de l’appareil sélectionné : zoomer ne déclenche donc jamais artificiellement un autre breakpoint. Le plein écran de l’Atelier conserve ensemble le canvas et le panneau Inspecter, autorise l’agrandissement de la preview sans changer le viewport, neutralise le reste de l’interface et restaure le focus après `Échap`. Les previews distantes utilisent une `View` de découpe autour de la `WebContentsView`, et toutes les restaurations CSS/inspecteur sont sérialisées afin qu’une navigation ou une saisie rapide ne laisse aucune feuille temporaire orpheline.
 
-Au staging, les opérations sont revalidées dans le processus principal. **Réviser sans modifier** construit un aperçu et un diff avec les seules opérations de l’Atelier, sans écrire dans les sources. **Appliquer aux fichiers** reconstruit ce même plan, l’écrit atomiquement, réanalyse le projet et conserve une sauvegarde d’annulation. Un projet local durable reçoit `.responsiver/responsiver.generated.css` et un lien dans les pages concernées. Chaque règle visuelle possède des marqueurs gérés stables : un nouveau geste sur la même cible/propriété/portée remplace le bloc précédent au lieu d’accumuler des déclarations concurrentes. Pour « page actuelle », le transformeur ajoute un attribut `data-responsiver-route` déterministe sur le document et préfixe la règle ; si plusieurs routes dynamiques partagent le même HTML, il refuse cette portée. Un artefact compilé ou localhost lié expose seulement **Préparer l’export CSS**, à intégrer aux sources auteur. Une URL publique n’accède jamais à l’Atelier.
+Dans le pipeline interne de préparation, les opérations sont revalidées dans le processus principal. **Réviser sans modifier** construit un aperçu et un diff avec les seules opérations de l’Atelier, sans écrire dans les sources. **Appliquer aux fichiers** reconstruit ce même plan, l’écrit atomiquement, réanalyse le projet et conserve une sauvegarde d’annulation. Un projet local durable reçoit `.responsiver/responsiver.generated.css` et un lien dans les pages concernées. Chaque règle visuelle possède des marqueurs gérés stables : un nouveau geste sur la même cible/propriété/portée remplace le bloc précédent au lieu d’accumuler des déclarations concurrentes. Pour « page actuelle », le transformeur ajoute un attribut `data-responsiver-route` déterministe sur le document et préfixe la règle ; si plusieurs routes dynamiques partagent le même HTML, il refuse cette portée. Un artefact compilé ou localhost lié expose seulement **Préparer l’export CSS**, à intégrer aux sources auteur. Une URL publique n’accède jamais à l’Atelier.
 
-## Proposition déterministe et staging
+## Proposition déterministe et version corrigée
 
-Le workflow avancé conserve quatre étapes :
+Le workflow de correction conserve quatre étapes visibles :
 
 1. **Analyser** produit des constats sans modification.
-2. **Prévisualiser** construit une proposition éphémère en mémoire.
-3. **Accepter ou écarter** enregistre la décision humaine.
-4. **Construire le staging** reconstruit uniquement les constats et thèmes acceptés.
+2. **Sélectionner et comparer** construit une proposition individuelle ou groupée, avec rendu et/ou diff selon le type de constat.
+3. **Valider ou écarter** enregistre explicitement la décision humaine ; une case validée reste retirable.
+4. **Préparer et réviser** reconstruit uniquement le plan accepté, puis propose application locale ou export.
 
-Source, proposition et staging utilisent des origines distinctes. Le transformeur génère overlays, CSS complémentaire si nécessaire, opérations visuelles validées, patch unifié, résultats par proposition et empreintes SHA-256. L’identité d’une opération CSS inclut fichier, ligne, sélecteur, propriété et breakpoint ; deux valeurs incompatibles sur une même cible, deux thèmes opposés, deux instructions contradictoires ou deux opérations visuelles concurrentes produisent un conflit bloquant. La feuille Responsiver déjà gérée est enrichie au lieu de créer un nouveau lien à chaque application.
+Les runners de la version actuelle, du correctif temporaire et de la version corrigée utilisent des origines distinctes. Le transformeur génère overlays, CSS complémentaire si nécessaire, opérations visuelles validées, patch unifié, résultats par proposition et empreintes SHA-256. L’identité d’une opération CSS inclut fichier, ligne, sélecteur, propriété et breakpoint ; deux valeurs incompatibles sur une même cible, deux thèmes opposés, deux instructions contradictoires ou deux opérations visuelles concurrentes produisent un conflit bloquant. La feuille Responsiver déjà gérée est enrichie au lieu de créer un nouveau lien à chaque application.
 
 Une variante de thème n’est générée que si un couple de rôles fond/texte fiable est résolu et si les contrastes texte/fond, texte/surface et texte atténué/fond passent les seuils. L’apparence active est mesurée séparément sur une grille du viewport, en composant les fonds alpha jusque dans les Shadow DOM ouverts. Une image dominante rend le vote incertain au lieu d’être confondue avec sa couleur de repli ; l’interface distingue alors clairement le rendu mesuré du thème seulement estimé dans le code. Les accents de marque, images et filtres ne sont jamais recolorés automatiquement ; à faible confiance, le moteur refuse la variante au lieu de produire un rendu destructeur.
 
-Pour un projet HTML/CSS local durable, la proposition isolée peut aussi suivre le parcours court **Valider et appliquer**. L’API ne reprend que cette proposition, refait le staging, refuse tout conflit, prévérifie l’ensemble des hashes, prépare les temporaires puis remplace les fichiers. Une sauvegarde d’annulation reste en mémoire ; elle n’est utilisable que si tous les fichiers appliqués ont encore leur hash attendu. L’undo restaure contenus, modes, fichiers absents et dossiers nouvellement créés, puis le projet est réanalysé sur la route courante. Les artefacts compilés, URLs et localhost ne disposent pas de ce raccourci.
+Pour un projet HTML/CSS local durable, le bouton **Appliquer le plan maintenant** réunit la proposition observée et les choix déjà validés, refait la version corrigée, refuse tout conflit, prévérifie l’ensemble des hashes, prépare les temporaires puis remplace les fichiers. Sans choix antérieur, ce parcours reste un correctif isolé en un clic. La page **Révision** est réservée à un projet local ; elle expose la même application pour un lot complet lorsque la source est durable. Un artefact local compilé peut y être comparé et exporté, mais pas réécrit automatiquement. Un localhost lié utilise l’export CSS ou l’espace Code, tandis qu’une URL publique reste limitée au rapport d’audit. Une sauvegarde d’annulation reste en mémoire ; elle n’est utilisable que si tous les fichiers appliqués ont encore leur hash attendu. L’undo restaure contenus, modes, fichiers absents et dossiers nouvellement créés, puis le projet est réanalysé sur la route courante.
 
-Avant tout export, les sources sont re-hachées. Un changement concurrent invalide le staging. Les exports de fichiers, copie ou patch restent hors de la racine source et sont protégés contre traversées et substitutions par lien symbolique.
+Avant tout export, les sources sont re-hachées. Un changement concurrent invalide la version corrigée. Les exports de fichiers, copie ou patch restent hors de la racine source et sont protégés contre traversées et substitutions par lien symbolique.
 
 ## Espace code Monaco
 
@@ -187,7 +187,7 @@ La saisie Monaco met à jour l’overlay après un court délai. Pour un projet 
 
 **Écarter** restaure la copie mémoire. **Appliquer au fichier** est la seule opération de cet espace qui écrit la source. Elle vérifie version et hash, crée un fichier temporaire dans le même dossier, synchronise son contenu puis effectue un renommage atomique. Si le fichier a changé extérieurement, l’écriture est refusée.
 
-Ce workflow est distinct du staging avancé et de son application rapide : Monaco travaille fichier par fichier, tandis qu’une proposition déterministe peut appliquer un lot prévalidé de plusieurs fichiers après consentement explicite.
+Ce workflow est distinct de la version corrigée et de son application groupée : Monaco travaille fichier par fichier, tandis qu’une proposition déterministe peut appliquer un lot prévalidé de plusieurs fichiers après consentement explicite.
 
 ## Assistant IA local
 
@@ -228,7 +228,7 @@ L’historique JSON stocke seulement chemins, entrée, compteurs et dates. Les s
 
 Fermer une session locale arrête ses serveurs et nettoie son stockage navigateur. Fermer une session distante détache le debugger, retire le CSS injecté, efface son stockage et ferme le `WebContentsView`.
 
-Les rapports et exports ne sont créés qu’après choix explicite d’une destination. Pour une URL, le rapport agrège les routes visitées, leurs constats et le mode réseau réel ; il ne prétend pas être « hors ligne ». Une source ne peut être modifiée que par **Appliquer au fichier** dans Code, **Valider et appliquer** après une proposition locale comparée ou **Appliquer aux fichiers** après des opérations explicites dans l’Atelier. Ces trois chemins contrôlent version, hashes et confinement avant écriture.
+Les rapports et exports ne sont créés qu’après choix explicite d’une destination. Pour une URL, le rapport agrège les routes visitées, leurs constats et le mode réseau réel ; il ne prétend pas être « hors ligne ». Une source ne peut être modifiée que par **Appliquer au fichier** dans Code, **Appliquer le plan maintenant** ou **Appliquer au projet** après comparaison, ou **Appliquer aux fichiers** après des opérations explicites dans l’Atelier. Ces chemins contrôlent version, hashes et confinement avant écriture.
 
 ## Projets backend, bases et Docker
 

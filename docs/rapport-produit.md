@@ -29,13 +29,13 @@ La direction UI conserve sa propre grammaire — rail graphite, papier minéral,
 | Détecter les défauts objectifs | Overflow, clipping, texte, tactile, fixe, image, contraste, runtime | Ce n’est pas une note esthétique universelle |
 | Ouvrir un constat dans son contexte | Route exacte, viewport, sélecteur, scroll et contour temporaire | L’interface signale si le sélecteur n’existe plus |
 | Conserver l’audit URL | Agrégation de session, synthèse copiable et rapport JSON | Aucune persistance sans export explicite |
-| Voir l’avant/après | Source et Proposition séparées | Projets locaux déterministes |
+| Voir l’avant/après | **Version actuelle** et **Correctif temporaire** séparés | Projets locaux déterministes |
 | Inspecter comme avec F12 | Sélection DOM intégrée dans Laboratoire et Code, sans ouvrir les DevTools natifs | Photographie bornée ; aucune valeur de formulaire, HTML ou stockage |
 | Modifier visuellement | Atelier sémantique : cible, propriété, portée écran/page, undo/redo et preview CSS | Projet local durable ou export CSS avec sources associées |
 | Travailler sur une seule taille | Portées toutes tailles/mobile/tablette/personnalisée, synchronisées avec le viewport | Media queries explicites et visibles avant application |
 | Limiter une modification à la page | Attribut de route déterministe et règle préfixée | Refus sur une route dynamique non distinguable |
-| Accepter ou refuser chaque correctif | Consultation sans effet puis décision explicite | Staging reconstruit uniquement avec les choix retenus |
-| Corriger une navbar rapidement | Avant/Après puis **Valider et appliquer** sur la proposition isolée | Sources locales durables uniquement, route conservée |
+| Accepter ou refuser chaque correctif | Consultation sans effet puis décision explicite | Version corrigée reconstruite uniquement avec les choix retenus |
+| Corriger une navbar rapidement | Avant/Après puis **Appliquer le plan maintenant** | Sources locales durables uniquement, route conservée |
 | Annuler l’application | Sauvegarde de la dernière écriture, contrôle des hashes et restauration fichiers/dossiers | Refus si un fichier a changé depuis |
 | Prévisualiser clair/sombre | Activation native ou proposition complémentaire | Validation du thème séparée |
 | Modifier le code soi-même | Monaco, explorateur, overlay, diff, écarter/appliquer | Écriture seulement via **Appliquer au fichier** |
@@ -54,7 +54,7 @@ La direction UI conserve sa propre grammaire — rail graphite, papier minéral,
 - **Electron** : desktop multi-plateforme, `WebContentsView`, sandbox et dialogues natifs.
 - **React + TypeScript** : interface et contrats partagés renderer/preload/main.
 - **PostCSS** : analyse et transformations CSS déterministes.
-- **Serveurs Node loopback** : previews locale, proposition, staging et workspace.
+- **Serveurs Node loopback** : previews de la version actuelle, du correctif temporaire, de la version corrigée et du workspace.
 - **Chrome DevTools Protocol** : métriques d’appareil et collecte visuelle dans la session distante.
 - **CDP Overlay** : inspecteur intégré des URL/localhost sans DevTools natifs.
 - **Monaco Editor** : édition locale des sources texte.
@@ -69,18 +69,18 @@ La direction UI conserve sa propre grammaire — rail graphite, papier minéral,
 ### Correctif isolé et rapide
 
 ```text
-Constat → Avant/Après → Valider et appliquer → Réanalyse sur la même route → Annuler si besoin
+Constat → Avant/Après → Appliquer le plan maintenant → Réanalyse sur la même route → Annuler si besoin
 ```
 
-Ce raccourci n’applique que la proposition observée. Il est limité aux sources HTML/CSS locales durables. Le moteur prévérifie tous les hashes, remplace chaque fichier par renommage atomique, restaure le lot en cas d’échec et garde une sauvegarde d’annulation en mémoire.
+Sans autre choix validé, ce raccourci applique uniquement la proposition observée. Si un plan existe déjà, son libellé annonce l’application du plan complet et la proposition y est fusionnée sans perdre les choix précédents. Il est limité aux sources HTML/CSS locales durables. Le moteur prévérifie tous les hashes, remplace chaque fichier par renommage atomique, restaure le lot en cas d’échec et garde une sauvegarde d’annulation en mémoire.
 
 ### Plan de correctifs avancé
 
 ```text
-Source → Proposition éphémère → Accepter/Écarter → Staging → Export
+Sélection → Comparaison groupée → Valider/Écarter → Version corrigée → Révision → Appliquer ou exporter
 ```
 
-La source reste intacte. Les fichiers sont re-hachés avant l’export et une modification concurrente invalide le staging. Les conflits entre correctifs, thèmes et instructions bloquent la construction au lieu de produire un lot partiel silencieux.
+La source reste intacte jusqu’à l’action explicite **Appliquer au projet**. La page **Révision** est réservée aux projets locaux ; un localhost lié utilise l’export CSS ou l’espace Code et une URL publique reste limitée au rapport d’audit. Les fichiers sont re-hachés avant écriture ou export et une modification concurrente invalide la version corrigée. Les conflits entre correctifs, thèmes, instructions et gestes visuels bloquent la construction au lieu de produire un lot partiel silencieux.
 
 ### Éditeur et assistant
 
@@ -96,9 +96,9 @@ La frappe et les propositions IA restent en mémoire. Le clic **Appliquer au fic
 Composer dans la page figée → Portée écran/page → Tester le vrai site → Avant/Après → Appliquer ou exporter
 ```
 
-L’Atelier conserve des opérations structurées et refuse le placement absolu automatique. Un déplacement visuel reste borné au conteneur et préserve sa place dans le flux ; un dépôt entre frères Flex/Grid devient un lot d’ordres CSS signalé comme visuel uniquement. Les poignées produisent des dimensions bornées au format choisi. La page est figée pendant le geste, puis **Tester** réactive liens, formulaires et navigation avec la feuille temporaire ; les scripts du site restent chargés pendant les deux modes. L’application locale produit une feuille Responsiver gérée et réversible. Un localhost lié reçoit uniquement les réglages CSS en direct puis un export à intégrer au framework ; la composition gestuelle reste locale. Une URL publique reste en inspection seule.
+L’Atelier conserve des opérations structurées et refuse le placement absolu automatique. Un déplacement visuel peut sortir de son conteneur tout en préservant sa place dans le flux. Le fantôme suit la géométrie demandée pendant le geste ; au relâchement, Responsiver la convertit en `translate`, dimensions ou `order`, sans déplacement ni reparentage du nœud dans l’arbre DOM. La cascade et le layout pouvant ajuster le résultat, l’Atelier vérifie ensuite la géométrie réellement rendue et recale son contour sur celle-ci. Le redimensionnement reste borné au viewport pour préserver une prise et l’adaptation aux écrans plus étroits ; les médias conservent leur ratio. La page est figée pendant le geste, puis **Tester** réactive liens, formulaires et navigation avec la feuille temporaire ; les scripts du site restent chargés pendant les deux modes. L’application locale produit une feuille Responsiver gérée et réversible. Un localhost lié reçoit uniquement les réglages CSS en direct puis un export à intégrer au framework ; la composition gestuelle reste locale. Une URL publique reste en inspection seule.
 
-Cette distinction est volontaire : le parcours court optimise une correction détectée, l’Atelier une retouche visuelle ciblée, le staging une livraison groupée non destructive et Monaco la modification manuelle fichier par fichier.
+Cette distinction est volontaire : le parcours court optimise une correction détectée, l’Atelier une retouche visuelle ciblée, la version corrigée une livraison groupée non destructive et Monaco la modification manuelle fichier par fichier.
 
 ## Analyse visuelle
 
@@ -151,8 +151,8 @@ Les paquets restent non signés. Une diffusion sans avertissements système et u
 - Une URL publique ne donne pas accès aux sources auteur et ne peut pas être corrigée sur le serveur.
 - L’inspecteur d’une URL publique est informatif ; l’Atelier exige une racine locale autorisée.
 - Un localhost lié permet l’édition locale ; seule la CSS est injectée directement dans la session distante. La stack Symfony/Laravel/Node/frontend est détectée depuis ses manifests, mais les templates de framework ne reçoivent pas encore de correctif automatique sans correspondance source fiable.
-- L’Atelier produit une surcharge CSS sûre. Il ne garantit pas la réécriture du composant Twig/JSX/Vue/Tailwind auteur et ne déplace pas librement les nœuds comme un logiciel de dessin.
-- L’application directe est volontairement absente sur un artefact compilé ; le staging peut l’exporter, mais un prochain build l’écraserait.
+- L’Atelier permet un déplacement visuel libre par CSS, mais n’effectue aucun reparentage du DOM et ne garantit pas la réécriture du composant Twig/JSX/Vue/Tailwind auteur comme le ferait un éditeur de structure spécialisé.
+- L’application directe est volontairement absente sur un artefact compilé ; la version corrigée peut être comparée et exportée, mais un prochain build écraserait une modification directe du build.
 - Le moteur visuel applique des règles objectives mais ne remplace pas une revue UI/UX humaine.
 - L’assistant dépend d’un moteur et d’un modèle locaux installés séparément ; aucun modèle n’est embarqué.
 - Une sortie IA peut être incorrecte, vulnérable ou trop large malgré les filtres.
@@ -178,4 +178,4 @@ Contrôles reproductibles exécutés sur l’état consolidé :
 - ressources `companion/chrome` et `companion/native-host` présentes dans l’application ;
 - bit exécutable du host macOS conservé.
 
-Les tests couvrent notamment analyseur, readiness, historique, URL/SSRF, audits local et distant, inspecteurs bridge/CDP, validation CSS, portée de route, workspace, assistant local, file Chrome, serveur de preview, staging et exports. Les parcours Electron ont été rejoués sur macOS ; cette validation locale ne remplace pas la matrice de release sur chaque plateforme ni une revue humaine sur chaque framework.
+Les tests couvrent notamment analyseur, readiness, historique, URL/SSRF, audits local et distant, inspecteurs bridge/CDP, validation CSS, portée de route, workspace, assistant local, file Chrome, serveur de preview, préparation de la version corrigée et exports. Les parcours Electron ont été rejoués sur macOS ; cette validation locale ne remplace pas la matrice de release sur chaque plateforme ni une revue humaine sur chaque framework.
