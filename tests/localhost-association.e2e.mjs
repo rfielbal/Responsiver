@@ -58,6 +58,15 @@ try {
   assert.equal(opened.source.readOnly, true)
   assert.equal(opened.source.localRoot, null)
   await assert.rejects(
+    page.evaluate((visualEdit) => window.responsiver.buildStaging({
+      issueIds: [],
+      themeTarget: null,
+      instructions: [],
+      visualEdits: [visualEdit]
+    }), mainColorEdit),
+    /lecture seule/
+  )
+  await assert.rejects(
     page.evaluate(({ projectId, visualEdit }) => window.responsiver.previewRemoteVisualStyle({ projectId, visualEdits: [visualEdit], route: '/' }), { projectId: opened.id, visualEdit: mainColorEdit }),
     /réservée à un localhost associé/
   )
@@ -121,6 +130,16 @@ try {
   )
   assert.equal(visualPreview.applied, true)
   assert.ok(visualPreview.bytes > 0)
+  const linkedStaging = await page.evaluate((visualEdit) => window.responsiver.buildStaging({
+    issueIds: [],
+    themeTarget: null,
+    instructions: [],
+    visualEdits: [visualEdit]
+  }), mainColorEdit)
+  assert.equal(linkedStaging.previewOrigin, null)
+  assert.ok(linkedStaging.changes.some((change) => change.kind === 'visual'))
+  assert.match(linkedStaging.generatedCss, /color:\s*rgb\(185, 77, 50\)/)
+  await page.evaluate(() => window.responsiver.clearStaging())
   assert.equal(await application.evaluate(async ({ webContents }, expectedOrigin) => {
     const remote = webContents.getAllWebContents().find((contents) => contents.getURL().startsWith(expectedOrigin))
     return remote?.executeJavaScript('getComputedStyle(document.querySelector("main")).color')

@@ -567,7 +567,7 @@ function currentEditableSession(): ActiveProjectSession {
 
 async function buildStaging(value: unknown): Promise<StagingSnapshot> {
   if (!validStagingRequest(value)) throw new Error('La demande de staging est invalide.')
-  const session = currentSession()
+  const session = currentEditableSession()
   if (!session.project.capabilities.staging) throw new Error('Ce projet ne possède pas encore de rendu exploitable à corriger.')
   const staging = await buildProjectStaging(session.root, session.project, value)
   const conflicts = staging.snapshot.outcomes?.filter((outcome) => outcome.status === 'conflict') ?? []
@@ -597,7 +597,7 @@ async function buildStaging(value: unknown): Promise<StagingSnapshot> {
 
 async function previewStaging(value: unknown): Promise<StagingSnapshot> {
   if (!validStagingRequest(value)) throw new Error('La demande de prévisualisation est invalide.')
-  const session = currentSession()
+  const session = currentEditableSession()
   if (!session.project.capabilities.staging) throw new Error('Ce projet ne possède pas encore de rendu exploitable à prévisualiser.')
   const proposal = await buildProjectStaging(session.root, session.project, value)
   if (activeSession !== session || !mainWindow) throw new Error('La session projet a changé pendant la préparation de la prévisualisation.')

@@ -64,7 +64,7 @@ try {
         await missingVariant.check()
         const decision = page.locator('.proposal-decision')
         await decision.waitFor({ state: 'visible' })
-        assert.match(await decision.textContent(), /Aperçu non validé/)
+        assert.match(await decision.textContent(), /Comparaison à valider/)
         assert.equal(await missingVariant.isChecked(), true)
       }
     } else {
