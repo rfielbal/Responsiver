@@ -153,6 +153,14 @@ try {
     return getComputedStyle(element).translate
   })
   assert.notEqual(translated, 'none')
+  await page.waitForTimeout(420)
+  const settledMoveBox = await heroCopy.boundingBox()
+  assert.ok(settledMoveBox)
+  assert.ok(settledMoveBox.x > moveBox.x + 2, JSON.stringify({ moveBox, settledMoveBox }))
+  assert.ok(settledMoveBox.y > moveBox.y + 2, JSON.stringify({ moveBox, settledMoveBox }))
+  assert.equal(await page.locator('.visual-change-count').textContent(), '1')
+  const composerNotices = await page.locator('.toast').allTextContents()
+  assert.ok(!composerNotices.some((message) => /bloque encore|geste (?:a été )?annulé/i.test(message)), JSON.stringify(composerNotices))
   const rapidNudgeBefore = await heroCopy.evaluate((element) => {
     const rectangle = element.getBoundingClientRect()
     return { left: rectangle.left, top: rectangle.top }
@@ -202,8 +210,32 @@ try {
   await page.mouse.move(eastStart.x, eastStart.y)
   await page.mouse.down()
   await page.mouse.move(eastStart.x - 48 * scaleX, eastStart.y, { steps: 8 })
+  const eastPreviewWidth = await visualFrame.locator('[data-responsiver-composer-active]').evaluate((host) => Number.parseFloat(host.shadowRoot?.querySelector('#box')?.style.width ?? '0'))
+  const resizeInputDiagnostics = await visualFrame.locator('[data-responsiver-composer-active]').evaluate((host) => ({
+    lastInput: host.getAttribute('data-responsiver-composer-last-input'),
+    boxClass: host.shadowRoot?.querySelector('#box')?.className,
+    handle: (() => {
+      const handle = host.shadowRoot?.querySelector('[data-responsiver-composer-handle="e"]')
+      if (!handle) return null
+      const rectangle = handle.getBoundingClientRect()
+      return { left: rectangle.left, right: rectangle.right, width: rectangle.width, styleRight: getComputedStyle(handle).right }
+    })()
+  }))
+  assert.ok(eastPreviewWidth < widthBefore - 10, JSON.stringify({ widthBefore, eastPreviewWidth, scaleX, iframeBox, eastHandleBox, eastStart, resizeInputDiagnostics }))
   await page.mouse.up()
-  await page.waitForFunction(() => Number(document.querySelector('.visual-change-count')?.textContent) >= 2)
+  await page.waitForFunction(() => Number(document.querySelector('.visual-change-count')?.textContent) >= 2).catch(async (error) => {
+    const diagnostics = {
+      count: await page.locator('.visual-change-count').textContent(),
+      notices: await page.locator('.toast').allTextContents(),
+      lastInput: await visualFrame.locator('[data-responsiver-composer-active]').getAttribute('data-responsiver-composer-last-input'),
+      overlay: await visualFrame.locator('[data-responsiver-composer-active]').evaluate((host) => {
+        const box = host.shadowRoot?.querySelector('#box')
+        return { width: box?.style.width, className: box?.className }
+      }),
+      width: await heroCopy.evaluate((element) => ({ rect: element.getBoundingClientRect().width, computed: getComputedStyle(element).width }))
+    }
+    throw new Error(`${error.message}\nDiagnostic redimensionnement : ${JSON.stringify(diagnostics)}`)
+  })
   const widthAfter = await heroCopy.evaluate(async (element, before) => {
     for (let index = 0; index < 30; index += 1) {
       const width = element.getBoundingClientRect().width
@@ -213,6 +245,7 @@ try {
     return element.getBoundingClientRect().width
   }, widthBefore)
   assert.ok(widthAfter < widthBefore - 10, JSON.stringify({ widthBefore, widthAfter }))
+  assert.ok(Math.abs(widthAfter - eastPreviewWidth) <= 5, JSON.stringify({ widthBefore, eastPreviewWidth, widthAfter }))
 
   const countBeforeTextHeight = Number(await page.locator('.visual-change-count').textContent())
   const heightBefore = await heroCopy.evaluate((element) => element.getBoundingClientRect().height)
@@ -249,6 +282,26 @@ try {
   assert.ok(Math.abs(restoredHeight - heightBefore) < 2)
   await page.getByRole('button', { name: 'Rétablir la modification' }).click()
   await page.waitForFunction((before) => Number(document.querySelector('.visual-change-count')?.textContent) > before, countBeforeTextHeight)
+  const expandedTextHeight = await heroCopy.evaluate((element) => element.getBoundingClientRect().height)
+  await southTextHandle.hover()
+  const shrinkHandleBox = await southTextHandle.boundingBox()
+  assert.ok(shrinkHandleBox)
+  const shrinkStart = { x: shrinkHandleBox.x + shrinkHandleBox.width / 2, y: shrinkHandleBox.y + shrinkHandleBox.height / 2 }
+  await page.mouse.move(shrinkStart.x, shrinkStart.y)
+  await page.mouse.down()
+  await page.mouse.move(shrinkStart.x, shrinkStart.y - 20 * scaleY, { steps: 8 })
+  await page.mouse.up()
+  const shrunkenTextHeight = await heroCopy.evaluate(async (element, before) => {
+    for (let index = 0; index < 40; index += 1) {
+      const height = element.getBoundingClientRect().height
+      if (height < before - 8) return height
+      await new Promise((resolve) => requestAnimationFrame(resolve))
+    }
+    return element.getBoundingClientRect().height
+  }, expandedTextHeight)
+  assert.ok(shrunkenTextHeight < expandedTextHeight - 8, JSON.stringify({ expandedTextHeight, shrunkenTextHeight }))
+  await page.waitForTimeout(420)
+  assert.ok(Math.abs(await heroCopy.evaluate((element) => element.getBoundingClientRect().height) - shrunkenTextHeight) < 2)
   await page.locator('.visual-editor-page').screenshot({ path: join(root, 'output', 'playwright', 'electron-visual-composer.png'), animations: 'disabled' })
 
   const directTextProbe = visualFrame.locator('.composer-direct-text-probe')

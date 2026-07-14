@@ -1315,8 +1315,12 @@ const bridge = `<style data-responsiver-bridge-style>
     const simple = value.match(/^(-?(?:\\d+\\.?\\d*|\\.\\d+))(px|%)$/i);
     if (simple) return simple[2] === '%' ? { percent: Number.parseFloat(simple[1]), pixels: 0 } : { percent: 0, pixels: Number.parseFloat(simple[1]) };
     const calculated = value.match(/^calc\\(\\s*(-?(?:\\d+\\.?\\d*|\\.\\d+))%\\s*([+-])\\s*((?:\\d+\\.?\\d*|\\.\\d+))px\\s*\\)$/i);
-    if (!calculated) return null;
-    return { percent: Number.parseFloat(calculated[1]), pixels: Number.parseFloat(calculated[3]) * (calculated[2] === '-' ? -1 : 1) };
+    if (calculated) return { percent: Number.parseFloat(calculated[1]), pixels: Number.parseFloat(calculated[3]) * (calculated[2] === '-' ? -1 : 1) };
+    const safeLength = String(value || '').trim();
+    if (/^-?(?:\\d+\\.?\\d*|\\.\\d+)(?:em|rem|vw|vh|vmin|vmax|ch|ex|cm|mm|q|in|pt|pc|cqw|cqh|cqi|cqb|cqmin|cqmax)$/i.test(safeLength) || /^calc\\([\\da-z.%+*/()\\s-]+\\)$/i.test(safeLength)) {
+      return { percent: 0, pixels: 0, raw: safeLength };
+    }
+    return null;
   };
   const parseTranslate = (value) => {
     const normalized = String(value || '').trim();
@@ -1328,8 +1332,10 @@ const bridge = `<style data-responsiver-bridge-style>
     return x && y ? { x, y } : null;
   };
   const formatTranslateComponent = (axis, delta) => {
+    const roundedDelta = Math.round(delta * 1000) / 1000;
+    if (axis.raw) return roundedDelta ? 'calc(' + axis.raw + ' ' + (roundedDelta < 0 ? '- ' + Math.abs(roundedDelta) : '+ ' + roundedDelta) + 'px)' : axis.raw;
     const percent = Math.round(axis.percent * 1000) / 1000;
-    const pixels = Math.round((axis.pixels + delta) * 1000) / 1000;
+    const pixels = Math.round((axis.pixels + roundedDelta) * 1000) / 1000;
     if (!percent) return pixels + 'px';
     if (!pixels) return percent + '%';
     return 'calc(' + percent + '% ' + (pixels < 0 ? '- ' + Math.abs(pixels) : '+ ' + pixels) + 'px)';
@@ -1344,24 +1350,6 @@ const bridge = `<style data-responsiver-bridge-style>
     if (element.closest('[contenteditable]')) return false;
     const rectangle = element.getBoundingClientRect();
     return rectangle.width >= 3 && rectangle.height >= 3 && rectangle.width <= 100000 && rectangle.height <= 100000;
-  };
-  const designTextual = (element) => {
-    const tag = element.tagName.toLowerCase();
-    if (/^(?:a|address|blockquote|button|caption|cite|code|dd|dt|figcaption|label|legend|li|p|pre|q|small|span|strong|em|h[1-6]|td|th)$/.test(tag)) return true;
-    for (const node of element.childNodes) {
-      if (node.nodeType === Node.TEXT_NODE && /\\S/.test(node.textContent || '')) return true;
-    }
-    return false;
-  };
-  const designMinimumTextHeight = (element, style) => {
-    const range = document.createRange();
-    range.selectNodeContents(element);
-    const content = range.getBoundingClientRect();
-    range.detach();
-    const inset = ['paddingTop', 'paddingBottom', 'borderTopWidth', 'borderBottomWidth']
-      .reduce((total, property) => total + (Number.parseFloat(style[property]) || 0), 0);
-    const lineHeight = Number.parseFloat(style.lineHeight) || (Number.parseFloat(style.fontSize) || 16) * 1.2;
-    return Math.ceil(Math.max(content.height, lineHeight) + inset);
   };
   const nearbyDesignChildren = (parentElement, selectedElement, limit, includeSelected = false) => {
     if (!parentElement || !selectedElement || limit < 1) return [];
@@ -1445,9 +1433,11 @@ const bridge = `<style data-responsiver-bridge-style>
       '#box{position:fixed;display:none;box-sizing:border-box;border:2px solid #bf5239;background:rgba(191,82,57,.055);box-shadow:0 0 0 1px rgba(255,255,255,.92),0 8px 26px rgba(39,34,29,.18);pointer-events:none}',
       '#box.pending{border-style:dashed;background:rgba(191,82,57,.11)}',
       '#label{position:absolute;left:-2px;top:-25px;max-width:260px;height:22px;box-sizing:border-box;padding:4px 7px;color:#fff;background:#2e302c;font:600 10px/14px ui-monospace,SFMono-Regular,Menlo,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;box-shadow:0 2px 10px rgba(0,0,0,.18)}',
-      '.handle{position:absolute;width:12px;height:12px;box-sizing:border-box;border:2px solid #fff;border-radius:50%;background:#bf5239;box-shadow:0 0 0 1px #7f2f1e;pointer-events:auto;touch-action:none}',
-      '.handle[data-edge=n]{left:50%;top:-7px;transform:translateX(-50%);cursor:ns-resize}.handle[data-edge=ne]{right:-7px;top:-7px;cursor:nesw-resize}.handle[data-edge=e]{right:-7px;top:50%;transform:translateY(-50%);cursor:ew-resize}.handle[data-edge=se]{right:-7px;bottom:-7px;cursor:nwse-resize}',
-      '.handle[data-edge=s]{left:50%;bottom:-7px;transform:translateX(-50%);cursor:ns-resize}.handle[data-edge=sw]{left:-7px;bottom:-7px;cursor:nesw-resize}.handle[data-edge=w]{left:-7px;top:50%;transform:translateY(-50%);cursor:ew-resize}.handle[data-edge=nw]{left:-7px;top:-7px;cursor:nwse-resize}',
+      '.handle{position:absolute;width:20px;height:20px;box-sizing:border-box;border:0;background:transparent;pointer-events:auto;touch-action:none}',
+      '.handle::after{content:"";position:absolute;inset:4px;box-sizing:border-box;border:2px solid #fff;border-radius:50%;background:#bf5239;box-shadow:0 0 0 1px #7f2f1e}',
+      '.handle[data-edge=n]{left:var(--handle-center-x,50%);top:var(--handle-top,-11px);transform:translateX(-50%);cursor:ns-resize}.handle[data-edge=ne]{right:var(--handle-right,-11px);top:var(--handle-top,-11px);cursor:nesw-resize}.handle[data-edge=e]{right:var(--handle-right,-11px);top:var(--handle-center-y,50%);transform:translateY(-50%);cursor:ew-resize}.handle[data-edge=se]{right:var(--handle-right,-11px);bottom:var(--handle-bottom,-11px);cursor:nwse-resize}',
+      '.handle[data-edge=s]{left:var(--handle-center-x,50%);bottom:var(--handle-bottom,-11px);transform:translateX(-50%);cursor:ns-resize}.handle[data-edge=sw]{left:var(--handle-left,-11px);bottom:var(--handle-bottom,-11px);cursor:nesw-resize}.handle[data-edge=w]{left:var(--handle-left,-11px);top:var(--handle-center-y,50%);transform:translateY(-50%);cursor:ew-resize}.handle[data-edge=nw]{left:var(--handle-left,-11px);top:var(--handle-top,-11px);cursor:nwse-resize}',
+      '#box.inset-top #label{top:2px;left:16px}',
       '.guide{position:fixed;display:none;background:#2293a6;box-shadow:0 0 0 1px rgba(255,255,255,.7);pointer-events:none}.guide.x{top:0;bottom:0;width:1px}.guide.y{left:0;right:0;height:1px}'
     ].join('');
     designBox = document.createElement('div');
@@ -1464,6 +1454,13 @@ const bridge = `<style data-responsiver-bridge-style>
       handle.addEventListener('pointerdown', (event) => {
         designHost?.setAttribute('data-responsiver-composer-last-input', 'resize-' + edge);
         beginDesignGesture('resize', edge, event);
+      }, true);
+      handle.addEventListener('pointerup', commitDesignGesture, true);
+      handle.addEventListener('pointercancel', (event) => {
+        if (!designGesture || event.pointerId !== designGesture.pointerId) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        finishDesignGesture(true);
       }, true);
       designBox.append(handle);
     }
@@ -1487,6 +1484,7 @@ const bridge = `<style data-responsiver-bridge-style>
       if (!preferredTarget || !selectDesignTarget(preferredTarget, true)) return;
       beginDesignGesture('move', '', event);
     }, true);
+    designHost.addEventListener('pointerup', commitDesignGesture, true);
   };
   const clearDesignGuides = () => {
     designGuideX?.style.setProperty('display', 'none');
@@ -1498,6 +1496,16 @@ const bridge = `<style data-responsiver-bridge-style>
       return;
     }
     designBox.classList.toggle('pending', pending);
+    designBox.classList.toggle('inset-left', rectangle.left <= 8);
+    designBox.classList.toggle('inset-right', rectangle.right >= innerWidth - 8);
+    designBox.classList.toggle('inset-top', rectangle.top <= 8);
+    designBox.classList.toggle('inset-bottom', rectangle.bottom >= innerHeight - 8);
+    designBox.style.setProperty('--handle-left', Math.max(-11, 2 - rectangle.left) + 'px');
+    designBox.style.setProperty('--handle-right', Math.max(-11, rectangle.right - (innerWidth - 2)) + 'px');
+    designBox.style.setProperty('--handle-top', Math.max(-11, 2 - rectangle.top) + 'px');
+    designBox.style.setProperty('--handle-bottom', Math.max(-11, rectangle.bottom - (innerHeight - 2)) + 'px');
+    designBox.style.setProperty('--handle-center-x', ((Math.max(2, rectangle.left) + Math.min(innerWidth - 2, rectangle.right)) / 2 - rectangle.left) + 'px');
+    designBox.style.setProperty('--handle-center-y', ((Math.max(2, rectangle.top) + Math.min(innerHeight - 2, rectangle.bottom)) / 2 - rectangle.top) + 'px');
     designBox.style.setProperty('display', 'block');
     designBox.style.setProperty('left', inspectorRound(rectangle.left) + 'px');
     designBox.style.setProperty('top', inspectorRound(rectangle.top) + 'px');
@@ -1679,6 +1687,14 @@ const bridge = `<style data-responsiver-bridge-style>
       const replaced = /^(?:img|video|canvas|svg)$/.test(tag);
       const horizontal = edge.includes('e') || edge.includes('w');
       const vertical = edge.includes('n') || edge.includes('s');
+      const maxViewportWidth = Math.max(24, innerWidth - 8);
+      const capWidthToViewport = () => {
+        if (right - left <= maxViewportWidth) return false;
+        if (edge.includes('w') && !edge.includes('e')) left = right - maxViewportWidth;
+        else right = left + maxViewportWidth;
+        return true;
+      };
+      if (horizontal) capWidthToViewport();
       if (replaced && horizontal) {
         const ratio = start.width / Math.max(1, start.height);
         const height = (right - left) / ratio;
@@ -1686,6 +1702,10 @@ const bridge = `<style data-responsiver-bridge-style>
       } else if (replaced && vertical) {
         const ratio = start.width / Math.max(1, start.height);
         right = left + (bottom - top) * ratio;
+        if (capWidthToViewport()) {
+          const height = (right - left) / ratio;
+          if (edge.includes('n')) top = bottom - height; else bottom = top + height;
+        }
       }
       gesture.previewRect = { left, top, right, bottom, width: right - left, height: bottom - top };
       clearDesignGuides();
@@ -1719,13 +1739,46 @@ const bridge = `<style data-responsiver-bridge-style>
       if (!target) return null;
       mutations.push({ target, property: 'order', before: String(entry.order), after: String(index) });
     }
-    return { strategy: layout.includes('grid') ? 'grid-order' : 'flex-order', mutations };
+    const selectedRect = gesture.actualStartRect || gesture.startRect;
+    const targetCenter = centers[to];
+    const expectedRect = {
+      left: targetCenter.x - selectedRect.width / 2,
+      top: targetCenter.y - selectedRect.height / 2,
+      right: targetCenter.x + selectedRect.width / 2,
+      bottom: targetCenter.y + selectedRect.height / 2,
+      width: selectedRect.width,
+      height: selectedRect.height
+    };
+    return { strategy: layout.includes('grid') ? 'grid-order' : 'flex-order', mutations, expectedRect };
   };
   const sendDesignCommit = (kind, strategy, mutations, gestureId, warning, pendingRect) => {
     if (!mutations.length) return false;
     if (!designMessage('design-commit', { gestureId, kind, strategy, mutations, warning })) return false;
     if (pendingRect && designSelected?.isConnected) {
-      designPendingGestures.set(gestureId, { rect: pendingRect, gestureId, kind, properties: mutations.map((mutation) => mutation.property), element: designSelected });
+      const ownProperties = mutations.map((mutation) => mutation.property);
+      const inheritedProperties = [];
+      const inheritedExpectations = [];
+      for (const [pendingId, pending] of designPendingGestures) {
+        if (pending.element !== designSelected || !pending.properties.some((property) => ownProperties.includes(property))) continue;
+        pending.supersededBy = gestureId;
+        inheritedProperties.push(...pending.properties);
+        inheritedExpectations.push(...(pending.expectations || []));
+      }
+      const properties = [...new Set([...inheritedProperties, ...ownProperties])];
+      const expectationMap = new Map();
+      for (const expectation of [...inheritedExpectations, ...mutations.map((mutation) => ({ selector: mutation.target.selector, property: mutation.property, after: mutation.after }))]) {
+        expectationMap.set(expectation.selector + '\\n' + expectation.property, expectation);
+      }
+      const before = designSelected.getBoundingClientRect();
+      designPendingGestures.set(gestureId, {
+        rect: pendingRect,
+        beforeRect: { left: before.left, top: before.top, right: before.right, bottom: before.bottom, width: before.width, height: before.height },
+        gestureId,
+        kind,
+        properties,
+        expectations: [...expectationMap.values()],
+        element: designSelected
+      });
       while (designPendingGestures.size > 200) designPendingGestures.delete(designPendingGestures.keys().next().value);
     }
     scheduleDesignPaint();
@@ -1741,7 +1794,7 @@ const bridge = `<style data-responsiver-bridge-style>
     if (gesture.kind === 'move') {
       const reordered = event.shiftKey ? reorderDesignMutations(gesture, event) : null;
       if (reordered) {
-        sendDesignCommit('reorder', reordered.strategy, reordered.mutations, gesture.id, 'visual-order-only', preview);
+        sendDesignCommit('reorder', reordered.strategy, reordered.mutations, gesture.id, 'visual-order-only', reordered.expectedRect);
       } else {
         const computed = getComputedStyle(designSelected);
         const base = parseTranslate(computed.translate);
@@ -1757,7 +1810,6 @@ const bridge = `<style data-responsiver-bridge-style>
       if (!base) { designMessage('design-rejected', { reason: 'existing-complex-transform' }); finishDesignGesture(true); return; }
       const tag = designSelected.tagName.toLowerCase();
       const replaced = /^(?:img|video|canvas|svg)$/.test(tag);
-      const textual = designTextual(designSelected);
       const horizontal = gesture.edge.includes('e') || gesture.edge.includes('w');
       const vertical = gesture.edge.includes('n') || gesture.edge.includes('s');
       const parentStyle = designSelected.parentElement ? getComputedStyle(designSelected.parentElement) : null;
@@ -1766,11 +1818,6 @@ const bridge = `<style data-responsiver-bridge-style>
       const flexColumn = flexParent && /^column/.test(parentStyle?.flexDirection || '');
       const nextWidth = Math.round(preview.width);
       const nextHeight = Math.round(preview.height);
-      if (vertical && textual && !replaced && nextHeight < designMinimumTextHeight(designSelected, computed)) {
-        designMessage('design-rejected', { reason: 'text-height-is-fluid', gestureId: gesture.id });
-        finishDesignGesture(true);
-        return;
-      }
       const mutations = [{ target: gesture.snapshot, property: 'box-sizing', before: computed.boxSizing, after: 'border-box' }];
       if (computed.display === 'inline') mutations.push({ target: gesture.snapshot, property: 'display', before: computed.display, after: 'inline-block' });
       if (horizontal || (replaced && vertical)) {
@@ -1778,23 +1825,18 @@ const bridge = `<style data-responsiver-bridge-style>
         const maxWidth = Number.parseFloat(computed.maxWidth);
         if (Number.isFinite(minWidth) && minWidth > nextWidth) mutations.push({ target: gesture.snapshot, property: 'min-width', before: computed.minWidth, after: '0' });
         if (computed.maxWidth !== 'none' && Number.isFinite(maxWidth) && maxWidth < nextWidth) mutations.push({ target: gesture.snapshot, property: 'max-width', before: computed.maxWidth, after: 'none' });
-        mutations.push({ target: gesture.snapshot, property: 'width', before: computed.width, after: 'min(' + nextWidth + 'px, calc(100vw - 24px))' });
+        mutations.push({ target: gesture.snapshot, property: 'width', before: computed.width, after: 'min(' + nextWidth + 'px, calc(100vw - 8px))' });
       }
-      if (vertical) {
+      if (vertical || (replaced && horizontal)) {
         const minHeight = Number.parseFloat(computed.minHeight);
         const maxHeight = Number.parseFloat(computed.maxHeight);
         if (computed.maxHeight !== 'none' && Number.isFinite(maxHeight) && maxHeight < nextHeight) mutations.push({ target: gesture.snapshot, property: 'max-height', before: computed.maxHeight, after: 'none' });
-        if (textual && !replaced) {
-          mutations.push({ target: gesture.snapshot, property: 'height', before: computed.height, after: 'auto' });
-          mutations.push({ target: gesture.snapshot, property: 'min-height', before: computed.minHeight, after: nextHeight + 'px' });
-        } else {
-          if (Number.isFinite(minHeight) && minHeight > nextHeight) mutations.push({ target: gesture.snapshot, property: 'min-height', before: computed.minHeight, after: '0' });
-          mutations.push({ target: gesture.snapshot, property: 'height', before: computed.height, after: replaced ? 'auto' : nextHeight + 'px' });
-        }
+        if (Number.isFinite(minHeight) && minHeight > nextHeight) mutations.push({ target: gesture.snapshot, property: 'min-height', before: computed.minHeight, after: '0' });
+        mutations.push({ target: gesture.snapshot, property: 'height', before: computed.height, after: replaced ? 'auto' : nextHeight + 'px' });
       }
       const changesFlexMainSize = flexParent && (flexColumn ? vertical : horizontal || (replaced && vertical));
       if (changesFlexMainSize) {
-        const flexBasis = flexColumn ? nextHeight + 'px' : 'min(' + nextWidth + 'px, calc(100vw - 24px))';
+        const flexBasis = flexColumn ? nextHeight + 'px' : 'min(' + nextWidth + 'px, calc(100vw - 8px))';
         mutations.push({ target: gesture.snapshot, property: 'flex-basis', before: computed.flexBasis, after: flexBasis });
         if (Number.parseFloat(computed.flexGrow) !== 0) mutations.push({ target: gesture.snapshot, property: 'flex-grow', before: computed.flexGrow, after: '0' });
         if (Number.parseFloat(computed.flexShrink) !== 0) mutations.push({ target: gesture.snapshot, property: 'flex-shrink', before: computed.flexShrink, after: '0' });
@@ -1802,7 +1844,7 @@ const bridge = `<style data-responsiver-bridge-style>
       const shiftX = Math.round(preview.left - gesture.actualStartRect.left);
       const shiftY = Math.round(preview.top - gesture.actualStartRect.top);
       if (shiftX || shiftY) mutations.push({ target: gesture.snapshot, property: 'translate', before: computed.translate || 'none', after: formatTranslate(base, shiftX, shiftY) });
-      sendDesignCommit('resize', 'responsive-size', mutations, gesture.id, replaced || textual ? undefined : 'fixed-height', preview);
+      sendDesignCommit('resize', 'responsive-size', mutations, gesture.id, vertical && !replaced ? 'fixed-height' : undefined, preview);
     }
     finishDesignGesture(false);
   };
@@ -1857,6 +1899,7 @@ const bridge = `<style data-responsiver-bridge-style>
           if (sync.requestId !== designVisualRequestId) return;
           for (const entry of pending) {
             if (designPendingGestures.get(entry.gestureId) !== entry) continue;
+            if (entry.supersededBy && designPendingGestures.has(entry.supersededBy)) continue;
             if (!entry.element?.isConnected) {
               designMessage('design-rejected', { reason: 'target-detached', gestureId: entry.gestureId, requestId: sync.requestId });
               designPendingGestures.delete(entry.gestureId);
@@ -1864,16 +1907,68 @@ const bridge = `<style data-responsiver-bridge-style>
             }
             const actual = entry.element.getBoundingClientRect();
             const expected = entry.rect;
-            const changedWidth = entry.properties.some((property) => property === 'width' || property === 'min-width' || property === 'max-width' || property === 'flex-basis');
+            const before = entry.beforeRect || actual;
+            const changedWidth = entry.properties.some((property) => property === 'width' || property === 'min-width' || property === 'max-width');
             const changedHeight = entry.properties.some((property) => property === 'height' || property === 'min-height' || property === 'max-height');
-            const changedPosition = entry.kind !== 'resize' || entry.properties.includes('translate');
+            const changedPosition = entry.kind === 'move' || entry.kind === 'nudge' || entry.properties.includes('translate');
             const mismatch = changedPosition && (Math.abs(actual.left - expected.left) > 5 || Math.abs(actual.top - expected.top) > 5) ||
-              (entry.kind !== 'resize' || changedWidth) && Math.abs(actual.width - expected.width) > 5 ||
-              (entry.kind !== 'resize' || changedHeight) && Math.abs(actual.height - expected.height) > 5;
-            designMessage(mismatch ? 'design-rejected' : 'design-verified', mismatch
+              changedWidth && Math.abs(actual.width - expected.width) > 5 ||
+              changedHeight && Math.abs(actual.height - expected.height) > 5;
+            const requestedDelta = {
+              x: expected.left - before.left,
+              y: expected.top - before.top,
+              width: expected.width - before.width,
+              height: expected.height - before.height
+            };
+            const actualDelta = {
+              x: actual.left - before.left,
+              y: actual.top - before.top,
+              width: actual.width - before.width,
+              height: actual.height - before.height
+            };
+            const follows = (requested, applied) => Math.abs(requested) <= 2
+              ? Math.abs(requested - applied) <= 2
+              : Math.sign(requested) === Math.sign(applied) && Math.abs(applied) >= Math.abs(requested) * .6 && Math.abs(applied) <= Math.abs(requested) * 1.4;
+            const reorderApplied = entry.kind !== 'reorder' || (() => {
+              const ordersApplied = entry.expectations.every((expectation) => {
+                if (expectation.property !== 'order') return true;
+                let target = null;
+                try {
+                  const matches = document.querySelectorAll(expectation.selector);
+                  if (matches.length === 1) target = matches[0];
+                } catch {}
+                return target && String(Number.parseInt(getComputedStyle(target).order, 10) || 0) === String(Number.parseInt(expectation.after, 10) || 0);
+              });
+              if (!ordersApplied) return false;
+              const targetCenterX = expected.left + expected.width / 2;
+              const targetCenterY = expected.top + expected.height / 2;
+              const startDistance = Math.hypot(before.left + before.width / 2 - targetCenterX, before.top + before.height / 2 - targetCenterY);
+              const actualDistance = Math.hypot(actual.left + actual.width / 2 - targetCenterX, actual.top + actual.height / 2 - targetCenterY);
+              return actualDistance <= Math.max(12, startDistance * .6);
+            })();
+            const changedAsRequested = (!changedPosition || follows(requestedDelta.x, actualDelta.x) && follows(requestedDelta.y, actualDelta.y)) &&
+              (!changedWidth || follows(requestedDelta.width, actualDelta.width)) &&
+              (!changedHeight || follows(requestedDelta.height, actualDelta.height)) && reorderApplied;
+            designMessage(!changedAsRequested ? 'design-rejected' : 'design-verified', !changedAsRequested
               ? { reason: 'layout-still-constrained', gestureId: entry.gestureId, requestId: sync.requestId }
-              : { gestureId: entry.gestureId, requestId: sync.requestId });
+              : {
+                  gestureId: entry.gestureId,
+                  requestId: sync.requestId,
+                  adjusted: mismatch,
+                  rect: { left: actual.left, top: actual.top, width: actual.width, height: actual.height }
+                });
             designPendingGestures.delete(entry.gestureId);
+            if (changedAsRequested) {
+              const absorb = (verifiedGestureId) => {
+                for (const [pendingId, candidate] of [...designPendingGestures]) {
+                  if (candidate.supersededBy !== verifiedGestureId) continue;
+                  designMessage('design-verified', { gestureId: pendingId, requestId: sync.requestId, absorbed: true });
+                  designPendingGestures.delete(pendingId);
+                  absorb(pendingId);
+                }
+              };
+              absorb(entry.gestureId);
+            }
           }
           scheduleDesignPaint();
         }));

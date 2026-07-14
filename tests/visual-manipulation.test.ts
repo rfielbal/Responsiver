@@ -61,7 +61,7 @@ test('assainit un déplacement direct sans conserver le contenu de la page', () 
   assert.match(css, /route \/index\.html/)
 })
 
-test('convertit un redimensionnement en un lot unique de règles bornées', () => {
+test('convertit un redimensionnement libre en un lot exact et borné par le viewport', () => {
   const result = sanitizeVisualGestureCommit(gesture({
     kind: 'resize',
     strategy: 'responsive-size',
@@ -70,8 +70,8 @@ test('convertit un redimensionnement en un lot unique de règles bornées', () =
       { target: target(), property: 'box-sizing', before: 'content-box', after: 'border-box' },
       { target: target(), property: 'min-width', before: '340px', after: '0' },
       { target: target(), property: 'max-width', before: '260px', after: 'none' },
-      { target: target(), property: 'width', before: '320px', after: 'min(280px, calc(100vw - 24px))' },
-      { target: target(), property: 'flex-basis', before: '0%', after: 'min(280px, calc(100vw - 24px))' },
+      { target: target(), property: 'width', before: '320px', after: 'min(280px, calc(100vw - 8px))' },
+      { target: target(), property: 'flex-basis', before: '0%', after: 'min(280px, calc(100vw - 8px))' },
       { target: target(), property: 'flex-grow', before: '1', after: '0' },
       { target: target(), property: 'flex-shrink', before: '1', after: '0' },
       { target: target(), property: 'max-height', before: '200px', after: 'none' },
@@ -83,7 +83,9 @@ test('convertit un redimensionnement en un lot unique de règles bornées', () =
   assert.ok(result)
   const operations = visualGestureOperations(result, { scope: { kind: 'tablet' }, route: { kind: 'all' } })
   assert.deepEqual(operations.map((entry) => entry.property), ['display', 'box-sizing', 'min-width', 'max-width', 'width', 'flex-basis', 'flex-grow', 'flex-shrink', 'max-height', 'min-height', 'height'])
-  assert.match(compileVisualEditCss(operations).css, /min-width: 768px.*max-width: 1024px/s)
+  const css = compileVisualEditCss(operations).css
+  assert.match(css, /min-width: 768px.*max-width: 1024px/s)
+  assert.match(css, /width: min\(280px, calc\(100vw - 8px\)\) !important/)
 })
 
 test('la portée forgée par la page est ignorée au profit de celle de l’interface', () => {
