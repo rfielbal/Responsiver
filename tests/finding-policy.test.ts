@@ -7,6 +7,7 @@ import {
   consolidateProjectIssues,
   deterministicVisualTarget,
   groupProjectIssues,
+  isExpressEligibleIssue,
   prioritizeProjectIssues
 } from '../src/shared/finding-policy.ts'
 
@@ -203,6 +204,34 @@ test('n’autorise auto-safe que pour une cible source exacte, statique et non c
   const policy = classifyProjectIssue(ambiguous)
   assert.equal(policy.origin, 'correlated')
   assert.notEqual(policy.action, 'auto-safe')
+})
+
+test('réserve Correction Express aux adaptations responsive déterministes et traçables', () => {
+  const responsive = issue({
+    id: 'responsive-source',
+    rule: 'css.min-width-mobile',
+    routePath: '/index.html',
+    source: { file: 'styles.css', line: 40 },
+    fix: {
+      kind: 'css-media-override', file: 'styles.css', confidence: 'review', selector: '.site-nav',
+      property: 'min-width', before: '720px', after: '0', breakpoint: 640
+    }
+  })
+  assert.equal(classifyProjectIssue(responsive).action, 'review-required')
+  assert.equal(isExpressEligibleIssue(responsive), true)
+
+  assert.equal(isExpressEligibleIssue({
+    ...responsive,
+    id: 'compiled-responsive',
+    source: { file: 'dist/styles.css', line: 40 },
+    fix: { ...responsive.fix!, file: 'dist/styles.css' }
+  }), false)
+  assert.equal(isExpressEligibleIssue({
+    ...responsive,
+    id: 'free-form',
+    rule: 'assistant.instruction',
+    fix: { kind: 'manual', file: 'styles.css', confidence: 'review' }
+  }), false)
 })
 
 test('priorise les défauts visuels impactants, respecte le maximum et groupe le résultat', () => {

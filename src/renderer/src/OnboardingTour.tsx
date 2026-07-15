@@ -66,12 +66,12 @@ const steps: TourStep[] = [
   {
     id: 'review',
     chapter: 'Contrôler',
-    eyebrow: 'Révision & application',
-    title: 'Le projet ne change que lorsque vous le décidez.',
-    summary: 'Sélectionnez une correction rapide ou regroupez plusieurs propositions. Responsiver montre ce qui va changer et bloque les conflits.',
+    eyebrow: 'Correction Express & révision',
+    title: 'Vérifiez les vues utiles avant de toucher au projet.',
+    summary: 'Une correction traçable passe par la matrice Mobile, Tablette et Bureau. Les cas plus libres restent dans la révision détaillée.',
     points: [
-      { title: 'Réviser sans modifier', detail: 'Ouvrez l’aperçu et le diff en gardant les fichiers intacts.' },
-      { title: 'Appliquer aux fichiers', detail: 'Écrivez les choix validés, puis réanalysez le projet.' },
+      { title: 'Corriger et vérifier', detail: 'Comparez source et candidat sans écrire les fichiers.' },
+      { title: 'Matrice lisible', detail: 'Repérez les vues améliorées, stables ou en régression.' },
       { title: 'Retour possible', detail: 'La dernière application reste annulable.' }
     ]
   },
@@ -165,7 +165,7 @@ function ReviewScene(): ReactElement {
     <div className="tour-change-row"><i><TourGlyph name="check" size={13} /></i><div><b>Navigation mobile</b><small>responsiver.generated.css</small></div><em>VISUEL</em></div>
     <div className="tour-change-row"><i><TourGlyph name="check" size={13} /></i><div><b>Retour à la ligne sûr</b><small>styles/components.css</small></div><em>CODE</em></div>
     <div className="tour-diff"><code><span>−</span> white-space: nowrap;</code><code><b>+</b> white-space: normal;</code></div>
-    <div className="tour-apply-bar"><span><TourGlyph name="shield" size={15} /> Écriture contrôlée</span><span className="tour-demo-apply">Appliquer aux fichiers</span></div>
+    <div className="tour-apply-bar"><span><TourGlyph name="shield" size={15} /> Aucune source modifiée</span><span className="tour-demo-apply">Corriger et vérifier</span></div>
   </div>
 }
 

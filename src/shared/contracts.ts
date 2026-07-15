@@ -226,6 +226,53 @@ export interface VisualElementSnapshot {
   insideFrame?: boolean
 }
 
+export type CascadeDeclarationStatus = 'winner' | 'overridden' | 'inactive' | 'inherited' | 'inline'
+
+export interface CascadeSourceLocation {
+  /** URL de la feuille telle qu'elle est réellement chargée par le runner. */
+  href: string | null
+  /** Chemin relatif ouvrable dans l'espace Code lorsque la source est locale. */
+  file: string | null
+  line: number | null
+  column: number | null
+  /** Occurrence (indexée à partir de 1) de la règle répétée dans la feuille. */
+  occurrence?: number | null
+  /** Fiabilité du rapprochement CSSOM → texte source. */
+  certainty?: 'exact' | 'estimated' | null
+  kind: 'stylesheet' | 'inline-style' | 'style-attribute' | 'generated' | 'inherited'
+}
+
+export interface CascadeDeclaration {
+  property: string
+  value: string
+  selector: string
+  important: boolean
+  specificity: [number, number, number]
+  order: number
+  media: string[]
+  status: CascadeDeclarationStatus
+  source: CascadeSourceLocation
+}
+
+export interface CascadePropertyTrace {
+  property: string
+  computed: string
+  declarations: CascadeDeclaration[]
+}
+
+/**
+ * Trace bornée de la cascade calculée dans la vraie preview. Les emplacements
+ * sont des indices d'aide à la navigation, jamais une autorisation d'écriture.
+ */
+export interface CascadeTrace {
+  version: 1
+  selector: string
+  route: string
+  generatedAt: string
+  properties: CascadePropertyTrace[]
+  truncated: boolean
+}
+
 export type VisualGestureKind = 'move' | 'resize' | 'reorder' | 'nudge'
 export type VisualGestureStrategy = 'flow-translate' | 'responsive-size' | 'flex-order' | 'grid-order'
 
@@ -465,6 +512,7 @@ export interface RuntimeOverflow {
 }
 
 export type RuntimeAuditRule =
+  | 'responsive.missing-viewport'
   | 'layout.viewport-overflow'
   | 'layout.clipped-content'
   | 'layout.truncated-text'
@@ -473,11 +521,13 @@ export type RuntimeAuditRule =
   | 'layout.density-hierarchy'
   | 'layout.useful-area-overflow'
   | 'typography.disproportionate'
+  | 'typography.mobile-readability'
   | 'interaction.small-target'
   | 'layout.fixed-obstruction'
   | 'media.image-error'
   | 'media.image-distortion'
   | 'accessibility.low-contrast'
+  | 'runtime.page-error'
 
 export interface RuntimeAuditRect {
   x: number
@@ -531,6 +581,106 @@ export interface RuntimeAudit {
   inspectedNodes: number
   truncated: boolean
   limits: RuntimeAuditLimits
+}
+
+export type MatrixStateId = 'initial' | 'navigation-open' | 'keyboard-focus'
+export type MatrixObservationStatus = 'passed' | 'warning' | 'error' | 'unsupported' | 'timeout' | 'render-failed'
+
+export interface MatrixScenarioResult {
+  requestId: string
+  state: MatrixStateId
+  supported: boolean
+  label: string
+  target: string | null
+  detail: string | null
+}
+
+export interface MatrixJob {
+  id: string
+  route: string
+  deviceId: string
+  deviceName: string
+  width: number
+  height: number
+  state: MatrixStateId
+}
+
+export interface MatrixObservation {
+  job: MatrixJob
+  status: MatrixObservationStatus
+  audit: RuntimeAudit | null
+  scenario: MatrixScenarioResult | null
+  durationMs: number
+  detail: string | null
+}
+
+export interface MatrixSnapshot {
+  id: string
+  projectId: string
+  role: 'source' | 'candidate'
+  createdAt: string
+  observations: MatrixObservation[]
+}
+
+export interface RegressionFinding {
+  key: string
+  route: string
+  deviceName: string
+  state: MatrixStateId
+  rule: RuntimeAuditRule
+  selector: string
+  title: string
+  severity: RuntimeAuditFinding['severity']
+  /** Mesure normalisée du défaut lorsque sa règle possède une géométrie comparable. */
+  impact: number | null
+}
+
+export interface RegressionReport {
+  status: 'passed' | 'blocked' | 'inconclusive'
+  generatedAt: string
+  comparableCells: number
+  unsupportedCells: number
+  baselineFindings: number
+  candidateFindings: number
+  fixed: RegressionFinding[]
+  regressions: RegressionFinding[]
+  remaining: RegressionFinding[]
+  reasons: string[]
+}
+
+export interface MatrixRunRequest {
+  projectId: string
+  mode: 'source' | 'compare'
+  routes?: string[]
+  deviceIds?: Array<'mobile' | 'tablet' | 'desktop'>
+  states?: MatrixStateId[]
+}
+
+export interface MatrixRunProgress {
+  runId: string
+  phase: 'source' | 'candidate' | 'comparison'
+  completed: number
+  total: number
+  current: MatrixJob | null
+}
+
+export interface MatrixRunResult {
+  runId: string
+  source: MatrixSnapshot
+  candidate: MatrixSnapshot | null
+  report: RegressionReport | null
+}
+
+export interface StagingVerificationRequest {
+  projectId: string
+  issueIds: string[]
+}
+
+export interface StagingVerificationResult {
+  report: RegressionReport
+  verificationToken: string | null
+  expiresAt: string | null
+  matrix: MatrixRunResult
 }
 
 export interface ExportResult {

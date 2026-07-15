@@ -1,9 +1,9 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, session as electronSession, type IpcMainInvokeEvent } from 'electron'
-import { createHash } from 'node:crypto'
-import { cp, lstat, mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
+import { createHash, randomUUID } from 'node:crypto'
+import { cp, lstat, mkdir, readFile, readdir, realpath, stat, writeFile } from 'node:fs/promises'
 import { dirname, extname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import type { ExportResult, LocalAiRequest, LocalAiResponse, LocalAiStatus, ProjectPreparationProgress, ProjectSnapshot, RecentProjectSummary, RemoteAuditResult, RemoteFocusResult, RemoteInspectorRequest, RemoteInspectorSelection, RemoteInspectorState, RemoteOpenRequest, RemotePageState, RemoteSourceAssociationRequest, RemoteViewBounds, RemoteViewport, RemoteVisualStyleRequest, RemoteVisualStyleResult, RemoteZoomGesture, StagingApplyResult, StagingRequest, StagingSnapshot, StagingUndoResult, WorkspaceApplyResult, WorkspaceDiff, WorkspaceFileSnapshot, WorkspaceFileSummary, WorkspaceSnapshot } from '../shared/contracts'
+import type { ExportResult, LocalAiRequest, LocalAiResponse, LocalAiStatus, MatrixRunProgress, MatrixRunRequest, MatrixRunResult, ProjectIssue, ProjectPreparationProgress, ProjectSnapshot, RecentProjectSummary, RegressionFinding, RegressionReport, RemoteAuditResult, RemoteFocusResult, RemoteInspectorRequest, RemoteInspectorSelection, RemoteInspectorState, RemoteOpenRequest, RemotePageState, RemoteSourceAssociationRequest, RemoteViewBounds, RemoteViewport, RemoteVisualStyleRequest, RemoteVisualStyleResult, RemoteZoomGesture, StagingApplyResult, StagingRequest, StagingSnapshot, StagingUndoResult, StagingVerificationRequest, StagingVerificationResult, WorkspaceApplyResult, WorkspaceDiff, WorkspaceFileSnapshot, WorkspaceFileSummary, WorkspaceSnapshot } from '../shared/contracts'
 import { analyzeProject, createDemoProject } from './project-analyzer'
 import { startProjectServer, type ProjectServer } from './project-server'
 import { buildProjectStaging, type ProjectStaging } from './project-transformer'
@@ -15,6 +15,19 @@ import { probeLocalAi, sendLocalAiRequest } from './local-ai'
 import { resolveExtensionInbox, startExtensionInboxWatcher, type ExtensionOpenUrlRequest } from './extension-inbox'
 import { applyProjectStagingToSource, undoProjectStagingSource, type StagingSourceUndoSnapshot } from './staging-source-apply'
 import { compileVisualEditCss, validateVisualEditOperation } from '../shared/visual-editor'
+import { CANONICAL_MATRIX_DEVICES, canonicalMatrixDevice } from '../shared/device-profiles'
+import { compareMatrixSnapshots } from '../shared/regression-matrix'
+import { classifyProjectIssue, isExpressEligibleIssue } from '../shared/finding-policy'
+import { runProjectMatrix } from './matrix-runner'
+
+interface StagingVerification {
+  token: string
+  stagingDigest: string
+  sourceTreeDigest: string
+  report: RegressionReport
+  expiresAt: number
+  used: boolean
+}
 
 interface ActiveProjectSession {
   root: string
@@ -29,6 +42,7 @@ interface ActiveProjectSession {
   stagingUndo: StagingSourceUndoSnapshot | null
   remoteBrowser: RemoteBrowserSession | null
   workspace: WorkspaceEditor | null
+  verification?: StagingVerification | null
   remoteRouteTruncation?: Map<string, boolean>
 }
 
@@ -47,6 +61,11 @@ let extensionInboxWatcher: ReturnType<typeof startExtensionInboxWatcher> | null 
 const knownPreviewOrigins = new Set<string>()
 const maxClipboardLength = 10 * 1024 * 1024
 const ignoredCopyDirectories = new Set(['.git', 'node_modules'])
+const sourceTreeFingerprintLimits = Object.freeze({
+  maxEntries: 50_000,
+  maxContentBytes: 24 * 1024 * 1024,
+  maxContentBytesPerFile: 2 * 1024 * 1024
+})
 
 const userDataOverride = process.env.RESPONSIVER_USER_DATA_DIR
 if (userDataOverride && userDataOverride.length <= 4_096 && !userDataOverride.includes('\0') && isAbsolute(userDataOverride)) {
@@ -539,6 +558,7 @@ async function replaceWorkspaceFile(expectedProjectId: unknown, value: unknown):
     throw new Error('La modification de fichier est invalide ou trop volumineuse.')
   }
   const { session, workspace } = await workspaceForSession(expectedProjectId)
+  session.verification = null
   const file = await workspace.replaceFile(request.path, request.content, request.expectedVersion as number | undefined)
   if (activeSession !== session) throw new Error('La session projet a changé pendant la préparation du fichier.')
   const previewOrigin = await refreshWorkspacePreview(session)
@@ -568,6 +588,7 @@ function currentEditableSession(): ActiveProjectSession {
 async function buildStaging(value: unknown): Promise<StagingSnapshot> {
   if (!validStagingRequest(value)) throw new Error('La demande de staging est invalide.')
   const session = currentEditableSession()
+  session.verification = null
   if (!session.project.capabilities.staging) throw new Error('Ce projet ne possède pas encore de rendu exploitable à corriger.')
   const staging = await buildProjectStaging(session.root, session.project, value)
   const conflicts = staging.snapshot.outcomes?.filter((outcome) => outcome.status === 'conflict') ?? []
@@ -628,8 +649,346 @@ async function clearStaging(): Promise<void> {
   if (!activeSession) return
   const server = activeSession.stagedServer
   activeSession.staging = null
+  activeSession.verification = null
   activeSession.stagedServer = null
   await closePreviewServer(server)
+}
+
+async function projectSourceTreeDigest(rootValue: string): Promise<string> {
+  const root = await realpath(rootValue)
+  const hash = createHash('sha256')
+  const pending = [root]
+  let entryCount = 0
+  let contentBytes = 0
+
+  while (pending.length) {
+    const directory = pending.pop()!
+    const entries = await readdir(directory, { withFileTypes: true })
+    entries.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)
+
+    for (const entry of entries) {
+      if (ignoredCopyDirectories.has(entry.name.toLowerCase())) continue
+      entryCount += 1
+      if (entryCount > sourceTreeFingerprintLimits.maxEntries) {
+        throw new Error(`Le projet dépasse ${sourceTreeFingerprintLimits.maxEntries.toLocaleString('fr-FR')} entrées : Correction Express ne peut pas certifier tout l’arbre source de façon bornée.`)
+      }
+
+      const absolutePath = join(directory, entry.name)
+      const relativePath = relative(root, absolutePath).split(sep).join('/')
+      const metadata = await lstat(absolutePath)
+      const metadataToken = `${metadata.mode}:${metadata.size}:${metadata.mtimeMs}:${metadata.ctimeMs}`
+
+      if (metadata.isSymbolicLink()) {
+        hash.update(`L\0${relativePath}\0${metadataToken}\0`)
+        continue
+      }
+      if (metadata.isDirectory()) {
+        hash.update(`D\0${relativePath}\0${metadataToken}\0`)
+        pending.push(absolutePath)
+        continue
+      }
+      if (!metadata.isFile()) {
+        hash.update(`O\0${relativePath}\0${metadataToken}\0`)
+        continue
+      }
+
+      hash.update(`F\0${relativePath}\0${metadataToken}\0`)
+      const canHashContent = metadata.size <= sourceTreeFingerprintLimits.maxContentBytesPerFile &&
+        contentBytes + metadata.size <= sourceTreeFingerprintLimits.maxContentBytes
+      if (!canHashContent) {
+        hash.update('M\0')
+        continue
+      }
+      const content = await readFile(absolutePath)
+      const metadataAfterRead = await lstat(absolutePath)
+      if (!metadataAfterRead.isFile() || metadataAfterRead.size !== metadata.size || metadataAfterRead.mtimeMs !== metadata.mtimeMs || metadataAfterRead.ctimeMs !== metadata.ctimeMs) {
+        throw new Error(`Le fichier ${relativePath} a changé pendant le calcul de l’empreinte source.`)
+      }
+      contentBytes += content.length
+      hash.update(`C\0${content.length}\0`)
+      hash.update(content)
+      hash.update('\0')
+    }
+  }
+
+  hash.update(`SUMMARY\0${entryCount}\0${contentBytes}\0`)
+  return hash.digest('hex')
+}
+
+function projectStagingDigest(staging: ProjectStaging): string {
+  const hash = createHash('sha256')
+  for (const [path, body] of [...staging.overrides.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+    hash.update(path)
+    hash.update('\0')
+    hash.update(body)
+    hash.update('\0')
+  }
+  for (const [path, digest] of Object.entries(staging.snapshot.sourceHashes ?? {}).sort(([left], [right]) => left.localeCompare(right))) {
+    hash.update(path)
+    hash.update('\0')
+    hash.update(digest)
+    hash.update('\0')
+  }
+  return hash.digest('hex')
+}
+
+function validMatrixRunRequest(value: unknown): value is MatrixRunRequest {
+  if (!value || typeof value !== 'object') return false
+  const request = value as Partial<MatrixRunRequest>
+  return typeof request.projectId === 'string' && request.projectId.length > 0 && request.projectId.length <= 256 &&
+    (request.mode === 'source' || request.mode === 'compare') &&
+    (request.routes === undefined || Array.isArray(request.routes) && request.routes.length <= 30 && request.routes.every((route) => typeof route === 'string' && route.length > 0 && route.length <= 2_048)) &&
+    (request.deviceIds === undefined || Array.isArray(request.deviceIds) && request.deviceIds.length <= 3 && request.deviceIds.every((id) => id === 'mobile' || id === 'tablet' || id === 'desktop')) &&
+    (request.states === undefined || Array.isArray(request.states) && request.states.length <= 3 && request.states.every((state) => state === 'initial' || state === 'navigation-open' || state === 'keyboard-focus'))
+}
+
+function validStagingVerificationRequest(value: unknown): value is StagingVerificationRequest {
+  if (!value || typeof value !== 'object') return false
+  const request = value as Partial<StagingVerificationRequest>
+  return typeof request.projectId === 'string' && request.projectId.length > 0 && request.projectId.length <= 256 &&
+    Array.isArray(request.issueIds) && request.issueIds.length > 0 && request.issueIds.length <= 6 &&
+    new Set(request.issueIds).size === request.issueIds.length &&
+    request.issueIds.every((id) => typeof id === 'string' && id.length > 0 && id.length <= 256)
+}
+
+function selectedMatrixRoutes(session: ActiveProjectSession, requested: readonly string[] | undefined, limit: number): string[] {
+  const known = session.project.routes.map((route) => route.path)
+  const selected = requested?.length ? [...new Set(requested)] : known
+  const invalid = selected.find((route) => !known.includes(route))
+  if (invalid) throw new Error(`La route ${invalid} n’appartient plus au projet analysé.`)
+  const fallback = session.project.entryPath ?? known[0]
+  const result = selected.slice(0, limit)
+  if (!result.length && fallback) result.push(fallback)
+  if (!result.length) throw new Error('Aucune route exploitable ne peut être vérifiée.')
+  return result
+}
+
+async function runSessionMatrix(session: ActiveProjectSession, request: MatrixRunRequest, routeLimit = 12): Promise<MatrixRunResult> {
+  if (request.projectId !== session.project.id) throw new Error('La matrice demandée ne correspond plus au projet actif.')
+  if (session.project.source.kind !== 'local-project' || !session.sourceServer) {
+    throw new Error('La matrice reproductible est disponible pour les projets locaux servis par Responsiver. Les URL restent auditables dans le Laboratoire.')
+  }
+  if (session.project.previewBasePath || session.project.capabilities.previewStrategy === 'artifact') {
+    throw new Error('Cette sortie compilée peut être auditée, mais pas certifiée comme source durable.')
+  }
+  const compare = request.mode === 'compare'
+  if (compare && (!session.staging || !session.stagedServer)) throw new Error('Préparez une version corrigée avant de lancer la comparaison.')
+  const routes = selectedMatrixRoutes(session, request.routes, routeLimit)
+  const devices = request.deviceIds?.length
+    ? request.deviceIds.map((id) => canonicalMatrixDevice(id)).filter((device): device is NonNullable<typeof device> => Boolean(device))
+    : [...CANONICAL_MATRIX_DEVICES]
+  const states = [...new Set(request.states?.length ? request.states : ['initial', 'navigation-open'] as const)]
+  if (routes.length * devices.length * states.length > 120) throw new Error('Cette matrice dépasse 120 cellules. Réduisez les routes, formats ou états.')
+  const runId = randomUUID()
+  const progress = (update: Omit<MatrixRunProgress, 'runId'>): void => {
+    if (activeSession !== session) throw new Error('La session projet a changé pendant la matrice.')
+    mainWindow?.webContents.send('matrix:progress', { runId, ...update } satisfies MatrixRunProgress)
+  }
+  const source = await runProjectMatrix({
+    projectId: session.project.id,
+    role: 'source',
+    origin: session.sourceServer.origin,
+    routes,
+    devices,
+    states,
+    onProgress: progress
+  })
+  if (activeSession !== session) throw new Error('La session projet a changé pendant la matrice.')
+  let candidate = null
+  let report = null
+  if (compare) {
+    candidate = await runProjectMatrix({
+      projectId: session.project.id,
+      role: 'candidate',
+      origin: session.stagedServer!.origin,
+      routes,
+      devices,
+      states,
+      onProgress: progress
+    })
+    if (activeSession !== session) throw new Error('La session projet a changé pendant la comparaison.')
+    progress({ phase: 'comparison', completed: 0, total: 1, current: null })
+    report = compareMatrixSnapshots(source, candidate)
+    progress({ phase: 'comparison', completed: 1, total: 1, current: null })
+  }
+  return { runId, source, candidate, report }
+}
+
+const expressRuntimeProofRules: Readonly<Record<string, readonly RegressionFinding['rule'][]>> = Object.freeze({
+  'html.viewport-meta': ['responsive.missing-viewport'],
+  'css.fixed-width': ['layout.viewport-overflow', 'layout.clipped-content', 'layout.useful-area-overflow'],
+  'css.min-width-mobile': ['layout.viewport-overflow', 'layout.navigation-wrap', 'layout.clipped-content', 'layout.useful-area-overflow'],
+  'css.nowrap': ['layout.navigation-wrap', 'layout.truncated-text', 'layout.clipped-content']
+})
+
+function comparableMatrixRoute(value: string | null | undefined): string {
+  if (!value) return ''
+  try {
+    const parsed = new URL(value, 'http://responsiver.local')
+    return `${parsed.pathname}${parsed.search}` || '/'
+  } catch {
+    return value.trim()
+  }
+}
+
+function findingMatchesExpressSelector(finding: RegressionFinding, target: string | null | undefined): boolean {
+  const normalizedTarget = (target ?? '').trim().replace(/\s+/g, ' ')
+  if (!normalizedTarget) return true
+  const normalizedFinding = finding.selector.trim().replace(/\s+/g, ' ')
+  if (normalizedFinding === normalizedTarget) return true
+  if (/^[.#][\w-]+$/.test(normalizedTarget)) {
+    const escaped = normalizedTarget.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    return new RegExp(`${escaped}(?![\\w-])`).test(normalizedFinding)
+  }
+  return normalizedFinding.endsWith(normalizedTarget)
+}
+
+function expressIssueHasRuntimeProof(issue: ProjectIssue, report: RegressionReport): boolean {
+  const expectedRules = expressRuntimeProofRules[issue.rule]
+  if (!expectedRules?.length) return true
+  const route = comparableMatrixRoute(issue.routePath ?? issue.evidence?.route)
+  return report.fixed.some((finding) =>
+    expectedRules.includes(finding.rule) &&
+    (!route || comparableMatrixRoute(finding.route) === route) &&
+    findingMatchesExpressSelector(finding, issue.fix?.selector)
+  )
+}
+
+function requireExpressRuntimeProof(report: RegressionReport, issues: readonly ProjectIssue[]): RegressionReport {
+  if (report.status !== 'passed') return report
+  const unproven = issues.filter((issue) =>
+    classifyProjectIssue(issue, issues).action !== 'auto-safe' && !expressIssueHasRuntimeProof(issue, report)
+  )
+  if (!unproven.length) return report
+  const labels = unproven.slice(0, 3).map((issue) => issue.title).join(', ')
+  return {
+    ...report,
+    status: 'inconclusive',
+    reasons: [...report.reasons, `Le défaut ciblé n’a pas pu être prouvé comme corrigé dans la matrice : ${labels}.`]
+  }
+}
+
+function targetsSharedStylesheet(issue: ProjectIssue, allIssues: readonly ProjectIssue[]): boolean {
+  const file = issue.fix?.file.trim().replaceAll('\\', '/')
+  if (!file || !/\.css$/i.test(file)) return false
+  const affectedRoutes = issue.evidence?.measurements?.affectedRoutes
+  if (typeof affectedRoutes === 'number' && affectedRoutes > 1) return true
+  if (/même règle partagée par\s+\d+\s+pages?/i.test(issue.description)) return true
+  const routesForFile = new Set(allIssues
+    .filter((candidate) => candidate.fix?.file.trim().replaceAll('\\', '/') === file)
+    .map((candidate) => candidate.routePath ?? candidate.evidence?.route)
+    .filter((route): route is string => Boolean(route)))
+  return routesForFile.size > 1
+}
+
+function sourceTreeChangedReport(report: RegressionReport, reason: string): RegressionReport {
+  return {
+    ...report,
+    status: 'inconclusive',
+    reasons: [...report.reasons, reason]
+  }
+}
+
+async function verifyCurrentStaging(value: unknown): Promise<StagingVerificationResult> {
+  if (!validStagingVerificationRequest(value)) throw new Error('La demande de vérification Express est invalide.')
+  const session = assertLocalStagingSession()
+  if (value.projectId !== session.project.id) throw new Error('Le projet actif a changé avant la vérification Express.')
+  const staging = session.staging
+  if (!staging || !session.stagedServer || !session.sourceServer) throw new Error('Préparez exactement les corrections à vérifier avant de lancer Correction Express.')
+  const issues = value.issueIds.map((id) => session.project.issues.find((issue) => issue.id === id))
+  if (issues.some((issue) => !issue)) throw new Error('Un constat sélectionné n’existe plus dans la dernière analyse.')
+  if (issues.some((issue) => !isExpressEligibleIssue(issue!, session.project.issues))) {
+    throw new Error('Correction Express est réservée aux corrections déterministes reliées à leur source. Ouvrez la Révision pour les changements libres ou ambigus.')
+  }
+  if (staging.snapshot.themeTarget || staging.snapshot.instructions.length || (staging.snapshot.visualEdits?.length ?? 0)) {
+    throw new Error('Le staging Express contient un thème, une instruction ou un geste visuel supplémentaire. Ouvrez la Révision pour ce plan mixte.')
+  }
+  const requestedFindingIds = new Set(value.issueIds)
+  const appliedOutcomes = (staging.snapshot.outcomes ?? []).filter((outcome) => outcome.status === 'applied')
+  const appliedFindingIds = new Set(appliedOutcomes.flatMap((outcome) => outcome.findingIds))
+  if (appliedOutcomes.some((outcome) => outcome.kind !== 'issue' || outcome.findingIds.some((id) => !requestedFindingIds.has(id)))) {
+    throw new Error('Le staging contient une proposition supplémentaire qui n’a pas été demandée pour Correction Express.')
+  }
+  const missingOutcome = value.issueIds.find((id) => !appliedFindingIds.has(id))
+  if (missingOutcome) throw new Error('Le staging ne contient pas exactement tous les correctifs sélectionnés. Reconstruisez-le.')
+  const issueRoutes = issues.map((issue) => issue!.routePath ?? issue!.evidence?.route).filter((route): route is string => Boolean(route))
+  const touchesSharedStylesheet = issues.some((issue) => targetsSharedStylesheet(issue!, session.project.issues))
+  if (touchesSharedStylesheet && session.project.routes.length > 12) {
+    throw new Error(`Cette feuille CSS est partagée par ${session.project.routes.length} routes. Correction Express s’arrête à 12 routes : lancez une matrice complète puis appliquez depuis la Révision.`)
+  }
+  const routes = touchesSharedStylesheet
+    ? session.project.routes.map((route) => route.path)
+    : [...new Set(issueRoutes)].slice(0, 2)
+  const sourceTreeBefore = await projectSourceTreeDigest(session.root)
+  const matrix = await runSessionMatrix(session, {
+    projectId: session.project.id,
+    mode: 'compare',
+    routes: routes.length ? routes : undefined,
+    deviceIds: ['mobile', 'tablet', 'desktop'],
+    states: ['initial', 'navigation-open']
+  }, touchesSharedStylesheet ? 12 : 2)
+  let report = requireExpressRuntimeProof(matrix.report!, issues as ProjectIssue[])
+  try {
+    const sourceTreeAfter = await projectSourceTreeDigest(session.root)
+    if (sourceTreeAfter !== sourceTreeBefore) {
+      report = sourceTreeChangedReport(report, 'L’arbre source a changé pendant la matrice. Relancez Correction Express sur la version actuelle du projet.')
+    }
+  } catch {
+    report = sourceTreeChangedReport(report, 'L’arbre source n’a pas pu être relu de façon stable après la matrice. Aucune certification ne peut être émise.')
+  }
+  const verifiedMatrix: MatrixRunResult = report === matrix.report ? matrix : { ...matrix, report }
+  const expiresAt = Date.now() + 10 * 60_000
+  const token = report.status === 'passed' ? randomUUID() : null
+  session.verification = token ? {
+    token,
+    stagingDigest: projectStagingDigest(staging),
+    sourceTreeDigest: sourceTreeBefore,
+    report,
+    expiresAt,
+    used: false
+  } : null
+  return {
+    report,
+    verificationToken: token,
+    expiresAt: token ? new Date(expiresAt).toISOString() : null,
+    matrix: verifiedMatrix
+  }
+}
+
+async function applyVerifiedStaging(token: unknown): Promise<StagingApplyResult> {
+  if (typeof token !== 'string' || token.length < 16 || token.length > 256) throw new Error('Le jeton de vérification est invalide.')
+  const session = assertLocalStagingSession()
+  const verification = session.verification
+  const staging = session.staging
+  if (!verification || !staging || verification.token !== token || verification.used || verification.report.status !== 'passed') {
+    throw new Error('Cette version n’est pas couverte par une vérification anti-régression valide.')
+  }
+  if (verification.expiresAt < Date.now()) {
+    session.verification = null
+    throw new Error('La vérification a expiré. Relancez Correction Express avant d’appliquer.')
+  }
+  if (verification.stagingDigest !== projectStagingDigest(staging)) {
+    session.verification = null
+    throw new Error('La version préparée a changé depuis la vérification. Aucune écriture n’a été effectuée.')
+  }
+  let currentSourceTreeDigest: string
+  try {
+    currentSourceTreeDigest = await projectSourceTreeDigest(session.root)
+  } catch {
+    session.verification = null
+    throw new Error('L’arbre source ne peut plus être contrôlé de façon stable. Relancez Correction Express avant toute écriture.')
+  }
+  if (verification.sourceTreeDigest !== currentSourceTreeDigest) {
+    session.verification = null
+    throw new Error('Le projet source a changé depuis la vérification. Aucune écriture n’a été effectuée.')
+  }
+  verification.used = true
+  try {
+    return await applyStagingToSource()
+  } catch (error) {
+    session.verification = null
+    throw error
+  }
 }
 
 function assertLocalStagingSession(): ActiveProjectSession {
@@ -653,6 +1012,7 @@ async function invalidateSourceMutationPreviews(session: ActiveProjectSession, p
   session.proposalServer = null
   session.workspaceServer = null
   session.workspace = null
+  session.verification = null
   await Promise.all(servers.map((server) => closePreviewServer(server)))
   mainWindow?.webContents.send('workspace:preview-origin', null)
   // Le renderer peut recharger le rendu source et réanalyser les chemins
@@ -1200,6 +1560,19 @@ function registerIpcHandlers(): void {
   ipcMain.handle('staging:apply-source', async (event): Promise<StagingApplyResult> => {
     requireTrustedWindow(event)
     return queueSessionOperation(() => queueWorkspaceOperation(applyStagingToSource))
+  })
+  ipcMain.handle('matrix:run', async (event, request: unknown): Promise<MatrixRunResult> => {
+    requireTrustedWindow(event)
+    if (!validMatrixRunRequest(request)) throw new Error('Le plan de matrice est invalide.')
+    return queueSessionOperation(() => runSessionMatrix(currentEditableSession(), request))
+  })
+  ipcMain.handle('staging:verify', async (event, request: unknown): Promise<StagingVerificationResult> => {
+    requireTrustedWindow(event)
+    return queueSessionOperation(() => verifyCurrentStaging(request))
+  })
+  ipcMain.handle('staging:apply-verified', async (event, token: unknown): Promise<StagingApplyResult> => {
+    requireTrustedWindow(event)
+    return queueSessionOperation(() => queueWorkspaceOperation(() => applyVerifiedStaging(token)))
   })
   ipcMain.handle('staging:undo-source', async (event): Promise<StagingUndoResult> => {
     requireTrustedWindow(event)

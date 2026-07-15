@@ -42,6 +42,13 @@ const MISSING_VIEWPORT_RULES = new Set([
   'responsive.missing-viewport'
 ])
 
+const EXPRESS_SOURCE_RULES = new Set([
+  'html.viewport-meta',
+  'css.fixed-width',
+  'css.min-width-mobile',
+  'css.nowrap'
+])
+
 const VISUAL_RUNTIME_PREFIXES = [
   'layout.',
   'typography.',
@@ -253,6 +260,21 @@ export function classifyProjectIssue(issue: ProjectIssue, allIssues: readonly Pr
     priority: priorityFor(issue, group, origin, action),
     correlatedIssueIds: correlations.map((candidate) => candidate.id)
   }
+}
+
+/**
+ * Correction Express accepte les remplacements déjà classés sûrs ainsi que
+ * quelques adaptations responsive bornées et exactement reliées à une source.
+ * Ces dernières restent « à relire » hors Express : c'est la matrice
+ * source/candidat qui apporte la preuve supplémentaire avant toute écriture.
+ */
+export function isExpressEligibleIssue(issue: ProjectIssue, allIssues: readonly ProjectIssue[] = [issue]): boolean {
+  const policy = classifyProjectIssue(issue, allIssues)
+  if (policy.action === 'auto-safe') return true
+  if (policy.action !== 'review-required' || !EXPRESS_SOURCE_RULES.has(issue.rule)) return false
+  if (!hasExactFixTarget(issue) || !issue.fix || issue.fix.kind === 'manual') return false
+  if (isArtifactPath(issue.source?.file) || isArtifactPath(issue.fix.file) || isCodeDiagnosticRule(issue.rule)) return false
+  return issue.fix.kind === 'html-insert' || issue.fix.kind === 'css-replace' || issue.fix.kind === 'css-media-override'
 }
 
 export function classifyProjectIssues(issues: readonly ProjectIssue[]): readonly ClassifiedProjectIssue[] {

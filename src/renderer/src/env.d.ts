@@ -5,6 +5,9 @@ import type {
   LocalAiRequest,
   LocalAiResponse,
   LocalAiStatus,
+  MatrixRunProgress,
+  MatrixRunRequest,
+  MatrixRunResult,
   ProjectPreparationProgress,
   ProjectIssue as SharedProjectIssue,
   ProjectSnapshot as SharedProjectSnapshot,
@@ -26,6 +29,8 @@ import type {
   StagingRequest,
   StagingSnapshot,
   StagingUndoResult,
+  StagingVerificationRequest,
+  StagingVerificationResult,
   WorkspaceApplyResult,
   WorkspaceDiff,
   WorkspaceFileSnapshot,
@@ -84,6 +89,10 @@ declare global {
     buildStaging: (request: StagingRequest) => Promise<StagingSnapshot>
     clearStaging: () => Promise<void>
     applyStagingToSource: () => Promise<StagingApplyResult>
+    runMatrix: (request: MatrixRunRequest) => Promise<MatrixRunResult>
+    onMatrixProgress: (listener: (progress: MatrixRunProgress) => void) => () => void
+    verifyStaging: (request: StagingVerificationRequest) => Promise<StagingVerificationResult>
+    applyVerifiedStaging: (token: string) => Promise<StagingApplyResult>
     undoLastStagingApply: () => Promise<StagingUndoResult>
     exportPatch: () => Promise<string | null>
     exportChangedFiles: () => Promise<ExportResult | null>

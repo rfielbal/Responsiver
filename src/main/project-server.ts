@@ -165,10 +165,15 @@ const bridge = `<style data-responsiver-bridge-style>
     }
   };
   const runtimeErrors = [];
+  try {
+    Object.defineProperty(window, '__responsiverRuntimeErrorsV1', { value: runtimeErrors, configurable: false, enumerable: false, writable: false });
+  } catch {}
   const recordRuntimeError = (type, value, url = '', line = 0) => {
     if (runtimeErrors.length >= 12) return;
     const detail = String(value || 'Erreur inconnue').replace(/\s+/g, ' ').trim().slice(0, 240);
-    runtimeErrors.push({ type, detail, url: String(url || '').slice(0, 500), line: Number(line) || 0 });
+    const source = String(url || '').slice(0, 500);
+    const lineNumber = Number(line) || 0;
+    runtimeErrors.push({ type, detail, url: source, line: lineNumber, kind: type, message: detail, source, column: 0 });
     queueMicrotask(() => schedule());
   };
   addEventListener('error', (event) => {
@@ -1169,6 +1174,310 @@ const bridge = `<style data-responsiver-bridge-style>
       text
     };
   };
+  const cascadeProperties = Object.freeze([
+    'display', 'position', 'width', 'height', 'min-width', 'max-width', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left',
+    'padding-top', 'padding-right', 'padding-bottom', 'padding-left', 'gap', 'flex-direction', 'flex-wrap', 'justify-content', 'align-items',
+    'grid-template-columns', 'font-size', 'font-weight', 'line-height', 'white-space', 'color', 'background-color', 'border-radius', 'overflow-x', 'overflow-y', 'z-index', 'transform'
+  ]);
+  const cascadeTextCache = new Map();
+  let cascadeRevision = 0;
+  const cascadeSelectorBranches = (selector) => {
+    const source = String(selector || '');
+    const branches = [];
+    let start = 0;
+    let quote = '';
+    let escaped = false;
+    let parentheses = 0;
+    let brackets = 0;
+    for (let index = 0; index < source.length; index += 1) {
+      const character = source[index];
+      if (escaped) { escaped = false; continue; }
+      if (character === '\\\\') { escaped = true; continue; }
+      if (quote) {
+        if (character === quote) quote = '';
+        continue;
+      }
+      if (character === '"' || character === "'") { quote = character; continue; }
+      if (character === '(') { parentheses += 1; continue; }
+      if (character === ')') { parentheses = Math.max(0, parentheses - 1); continue; }
+      if (character === '[') { brackets += 1; continue; }
+      if (character === ']') { brackets = Math.max(0, brackets - 1); continue; }
+      if (character !== ',' || parentheses > 0 || brackets > 0) continue;
+      const branch = source.slice(start, index).trim();
+      if (branch) branches.push(branch);
+      start = index + 1;
+    }
+    const branch = source.slice(start).trim();
+    if (branch) branches.push(branch);
+    return branches;
+  };
+  const cascadeBranchSpecificity = (selector) => {
+    const source = String(selector || '').replace(/:where\\([^)]*\\)/g, '').replace(/\\([^)]*\\)/g, '');
+    const ids = (source.match(/#[\\w-]+/g) || []).length;
+    const classes = (source.match(/\\.[\\w-]+|\\[[^\\]]+\\]|:(?!:)[\\w-]+/g) || []).length;
+    const types = (source.match(/(^|[\\s>+~,(])(?:[a-z][\\w-]*|::[\\w-]+)/gi) || []).length;
+    return [ids, classes, types];
+  };
+  const cascadeSpecificity = (selector, element) => {
+    const matchingBranches = cascadeSelectorBranches(selector).filter((branch) => {
+      try { return element.matches(branch); } catch { return false; }
+    });
+    let winner = [0, 0, 0];
+    for (const branch of matchingBranches) {
+      const candidate = cascadeBranchSpecificity(branch);
+      if (candidate[0] > winner[0] || candidate[0] === winner[0] && (candidate[1] > winner[1] || candidate[1] === winner[1] && candidate[2] > winner[2])) winner = candidate;
+    }
+    return winner;
+  };
+  const cascadeFileForHref = (href) => {
+    if (!href) return inspectorClean(location.pathname.replace(/^\\/+/, ''), 1024) || null;
+    try {
+      const url = new URL(href, location.href);
+      if (url.origin !== location.origin) return null;
+      return inspectorClean(decodeURIComponent(url.pathname).replace(/^\\/+/, ''), 1024) || null;
+    } catch { return null; }
+  };
+  const cascadeSourceText = async (href, inlineText) => {
+    const key = href || 'document:' + location.pathname;
+    if (cascadeTextCache.has(key)) return cascadeTextCache.get(key);
+    let text = '';
+    try {
+      if (href) {
+        const url = new URL(href, location.href);
+        if (url.origin !== location.origin) return '';
+        text = await fetch(url.href, { credentials: 'same-origin', cache: 'no-store' }).then((response) => response.ok ? response.text() : '');
+      } else {
+        text = await fetch(location.href, { credentials: 'same-origin', cache: 'no-store' }).then((response) => response.ok ? response.text() : '');
+        if (inlineText && !text.includes(inlineText)) text = inlineText;
+      }
+    } catch {}
+    text = String(text || '').slice(0, 1024 * 1024);
+    cascadeTextCache.set(key, text);
+    return text;
+  };
+  const cascadeNthIndexOf = (text, value, occurrence) => {
+    if (!value) return -1;
+    let cursor = 0;
+    let current = 0;
+    while (cursor <= text.length) {
+      const index = text.indexOf(value, cursor);
+      if (index < 0) return -1;
+      if (current === occurrence) return index;
+      current += 1;
+      cursor = index + Math.max(1, value.length);
+    }
+    return -1;
+  };
+  const cascadeBlockEnd = (text, opening) => {
+    let depth = 0;
+    let quote = '';
+    let escaped = false;
+    let comment = false;
+    for (let index = opening; index < text.length; index += 1) {
+      const character = text[index];
+      const next = text[index + 1];
+      if (comment) {
+        if (character === '*' && next === '/') { comment = false; index += 1; }
+        continue;
+      }
+      if (escaped) { escaped = false; continue; }
+      if (character === '\\\\') { escaped = true; continue; }
+      if (quote) {
+        if (character === quote) quote = '';
+        continue;
+      }
+      if (character === '/' && next === '*') { comment = true; index += 1; continue; }
+      if (character === '"' || character === "'") { quote = character; continue; }
+      if (character === '{') { depth += 1; continue; }
+      if (character !== '}') continue;
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+    return Math.min(text.length, opening + 16000);
+  };
+  const cascadePropertyIndex = (text, property, start, end) => {
+    let quote = '';
+    let escaped = false;
+    let comment = false;
+    let nestedDepth = 0;
+    for (let index = start; index < end; index += 1) {
+      const character = text[index];
+      const next = text[index + 1];
+      if (comment) {
+        if (character === '*' && next === '/') { comment = false; index += 1; }
+        continue;
+      }
+      if (escaped) { escaped = false; continue; }
+      if (character === '\\\\') { escaped = true; continue; }
+      if (quote) {
+        if (character === quote) quote = '';
+        continue;
+      }
+      if (character === '/' && next === '*') { comment = true; index += 1; continue; }
+      if (character === '"' || character === "'") { quote = character; continue; }
+      if (character === '{') { nestedDepth += 1; continue; }
+      if (character === '}') { nestedDepth = Math.max(0, nestedDepth - 1); continue; }
+      if (nestedDepth > 0 || !text.startsWith(property, index)) continue;
+      const previous = index > start ? text[index - 1] : '';
+      let after = index + property.length;
+      while (after < end && /\\s/.test(text[after])) after += 1;
+      if ((!previous || !/[\\w-]/.test(previous)) && text[after] === ':') return index;
+    }
+    return -1;
+  };
+  const cascadeLocationFromOffset = (text, offset, certainty, occurrence) => {
+    const before = text.slice(0, Math.max(0, offset));
+    const line = before.split('\\n').length;
+    const lastBreak = before.lastIndexOf('\\n');
+    return { line, column: Math.max(1, offset - lastBreak), certainty, occurrence: occurrence + 1 };
+  };
+  const cascadeLocate = async (declaration) => {
+    const text = await cascadeSourceText(declaration.href, declaration.inlineText);
+    const occurrence = Number.isSafeInteger(declaration.sourceOccurrence) && declaration.sourceOccurrence >= 0 ? declaration.sourceOccurrence : 0;
+    if (!text) return { line: null, column: null, certainty: null, occurrence: occurrence + 1 };
+    let searchStart = declaration.inlineText && !declaration.href ? text.indexOf(declaration.inlineText) : 0;
+    if (searchStart < 0) searchStart = 0;
+    const sourceSelector = declaration.sourceSelector || declaration.selector;
+    const relativeSelectorOffset = cascadeNthIndexOf(text.slice(searchStart), sourceSelector, occurrence);
+    const selectorOffset = relativeSelectorOffset < 0 ? -1 : searchStart + relativeSelectorOffset;
+    if (selectorOffset >= 0) {
+      const opening = text.indexOf('{', selectorOffset + sourceSelector.length);
+      if (opening >= 0 && opening - selectorOffset < 4096) {
+        const closing = cascadeBlockEnd(text, opening);
+        const propertyOffset = cascadePropertyIndex(text, declaration.property, opening + 1, closing);
+        if (propertyOffset >= 0) return cascadeLocationFromOffset(text, propertyOffset, 'exact', occurrence);
+        return cascadeLocationFromOffset(text, selectorOffset, 'estimated', occurrence);
+      }
+      return cascadeLocationFromOffset(text, selectorOffset, 'estimated', occurrence);
+    }
+    const fallbackOffset = cascadePropertyIndex(text, declaration.property, searchStart, Math.min(text.length, searchStart + 16000));
+    if (fallbackOffset >= 0) return cascadeLocationFromOffset(text, fallbackOffset, 'estimated', occurrence);
+    return { line: null, column: null, certainty: 'estimated', occurrence: occurrence + 1 };
+  };
+  const cascadeCompare = (left, right) => {
+    if (left.important !== right.important) return left.important ? 1 : -1;
+    for (let index = 0; index < 3; index += 1) {
+      if (left.specificity[index] !== right.specificity[index]) return left.specificity[index] - right.specificity[index];
+    }
+    return left.order - right.order;
+  };
+  const inspectorCascade = async (element, selector) => {
+    const revision = ++cascadeRevision;
+    if (!isInspectable(element) || selector.includes(' >>> ')) return;
+    const computed = getComputedStyle(element);
+    const declarations = [];
+    let order = 0;
+    let truncated = false;
+    const collect = (rules, sheet, media = [], active = true, selectorOccurrences = new Map()) => {
+      if (!rules || declarations.length >= 240) { truncated = true; return; }
+      for (const rule of [...rules]) {
+        if (declarations.length >= 240) { truncated = true; break; }
+        if (rule && typeof rule.selectorText === 'string' && rule.style) {
+          const sourceSelector = String(rule.selectorText).slice(0, 2048);
+          const sourceOccurrence = selectorOccurrences.get(sourceSelector) || 0;
+          selectorOccurrences.set(sourceSelector, sourceOccurrence + 1);
+          let matches = false;
+          try { matches = element.matches(rule.selectorText); } catch {}
+          if (!matches) { order += 1; continue; }
+          const inlineText = sheet.ownerNode instanceof HTMLStyleElement ? sheet.ownerNode.textContent || '' : '';
+          const specificity = cascadeSpecificity(rule.selectorText, element);
+          for (const property of cascadeProperties) {
+            const value = rule.style.getPropertyValue(property);
+            if (!value) continue;
+            declarations.push({
+              property,
+              value: inspectorClean(value, 240),
+              selector: inspectorClean(sourceSelector, 640),
+              sourceSelector,
+              important: rule.style.getPropertyPriority(property) === 'important',
+              specificity,
+              order,
+              media,
+              active,
+              href: sheet.href || null,
+              inlineText,
+              sourceOccurrence
+            });
+          }
+          order += 1;
+          continue;
+        }
+        if (rule && rule.cssRules) {
+          let condition = inspectorClean(rule.conditionText || rule.media && rule.media.mediaText || '', 240);
+          let conditionActive = active;
+          if (condition && typeof rule.media !== 'undefined') {
+            try { conditionActive = active && matchMedia(condition).matches; } catch { conditionActive = false; }
+          } else if (condition && typeof CSS.supports === 'function' && String(rule.constructor && rule.constructor.name).includes('Supports')) {
+            try { conditionActive = active && CSS.supports(condition); } catch { conditionActive = false; }
+          }
+          collect(rule.cssRules, sheet, condition ? [...media, condition] : media, conditionActive, selectorOccurrences);
+        }
+      }
+    };
+    for (const sheet of [...document.styleSheets].slice(0, 64)) {
+      const owner = sheet.ownerNode;
+      if (owner instanceof Element && (owner.hasAttribute('data-responsiver-bridge-style') || owner.hasAttribute('data-responsiver-visual-preview'))) continue;
+      try { collect(sheet.cssRules, sheet, [], true, new Map()); } catch { truncated = true; }
+    }
+    for (const property of cascadeProperties) {
+      const value = element.style.getPropertyValue(property);
+      if (!value) continue;
+      declarations.push({
+        property,
+        value: inspectorClean(value, 240),
+        selector: 'element.style',
+        important: element.style.getPropertyPriority(property) === 'important',
+        specificity: [1000000, 0, 0],
+        order: ++order,
+        media: [],
+        active: true,
+        href: null,
+        inlineText: '',
+        sourceOccurrence: 0
+      });
+    }
+    const properties = [];
+    for (const property of cascadeProperties) {
+      const candidates = declarations.filter((declaration) => declaration.property === property);
+      if (!candidates.length) continue;
+      const activeCandidates = candidates.filter((declaration) => declaration.active).sort(cascadeCompare);
+      const winner = activeCandidates.at(-1) || null;
+      const normalized = [];
+      for (const declaration of candidates.slice(0, 32)) {
+        const location = declaration.selector === 'element.style' ? { line: null, column: null } : await cascadeLocate(declaration);
+        const file = declaration.selector === 'element.style' ? cascadeFileForHref(null) : cascadeFileForHref(declaration.href);
+        normalized.push({
+          property,
+          value: declaration.value,
+          selector: declaration.selector,
+          important: declaration.important,
+          specificity: declaration.specificity,
+          order: declaration.order,
+          media: declaration.media,
+          status: !declaration.active ? 'inactive' : declaration === winner ? declaration.selector === 'element.style' ? 'inline' : 'winner' : 'overridden',
+          source: {
+            href: declaration.href,
+            file,
+            line: location.line,
+            column: location.column,
+            occurrence: location.occurrence,
+            certainty: location.certainty,
+            kind: declaration.selector === 'element.style' ? 'style-attribute' : file && file.includes('.responsiver/') ? 'generated' : declaration.href ? 'stylesheet' : 'inline-style'
+          }
+        });
+      }
+      properties.push({ property, computed: inspectorClean(computed.getPropertyValue(property), 240), declarations: normalized });
+    }
+    if (revision !== cascadeRevision || !element.isConnected) return;
+    message('cascade-trace', {
+      version: 1,
+      selector,
+      route: inspectorClean(location.pathname + location.search + location.hash, VISUAL_MAX_ROUTE_LENGTH),
+      generatedAt: new Date().toISOString(),
+      properties,
+      truncated
+    });
+  };
   const createInspectorOverlay = (kind) => {
     const overlay = document.createElement('div');
     overlay.setAttribute('data-responsiver-inspector-overlay', kind);
@@ -1243,7 +1552,7 @@ const bridge = `<style data-responsiver-bridge-style>
     inspectorHovered = target;
     scheduleInspectorHighlights();
     const payload = inspectorPayload(target, true);
-    if (payload) message('inspector-selected', payload);
+    if (payload) { message('inspector-selected', payload); void inspectorCascade(target, payload.selector); }
   };
   let designActive = false;
   let designPort = null;
@@ -2068,7 +2377,7 @@ const bridge = `<style data-responsiver-bridge-style>
         inspectorSelected = target;
         scheduleInspectorHighlights();
         const payload = inspectorPayload(target, true);
-        if (payload) message('inspector-selected', payload);
+        if (payload) { message('inspector-selected', payload); void inspectorCascade(target, payload.selector); }
       }
       if (type === 'mousedown') event.preventDefault();
       event.stopImmediatePropagation();
@@ -2084,9 +2393,45 @@ const bridge = `<style data-responsiver-bridge-style>
     inspectorSelected = target;
     scheduleInspectorHighlights();
     const payload = changed ? inspectorPayload(target, true) : null;
-    if (payload) message('inspector-selected', payload);
+    if (payload) { message('inspector-selected', payload); void inspectorCascade(target, payload.selector); }
   }, true);
   addEventListener('scroll', scheduleInspectorHighlights, true);
+  const applyMatrixScenario = async (requestedState) => {
+    const stateName = requestedState === 'navigation-open' || requestedState === 'keyboard-focus' ? requestedState : 'initial';
+    if (stateName === 'initial') {
+      message('matrix-scenario-applied', { state: stateName, supported: true, target: null });
+      return;
+    }
+    if (stateName === 'keyboard-focus') {
+      const target = [...document.querySelectorAll('button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')]
+        .find((element) => element instanceof HTMLElement && element.isConnected && element.getClientRects().length > 0);
+      if (!(target instanceof HTMLElement)) {
+        message('matrix-scenario-applied', { state: stateName, supported: false, target: null });
+        return;
+      }
+      target.focus({ preventScroll: true });
+      message('matrix-scenario-applied', { state: stateName, supported: true, target: target.id ? '#' + CSS.escape(target.id) : target.tagName.toLowerCase() });
+      return;
+    }
+    const explicit = [...document.querySelectorAll('[aria-controls][aria-expanded], button[data-bs-toggle="collapse"], .navbar-toggler, .menu-toggle, .hamburger')];
+    const labelled = [...document.querySelectorAll('button:not([disabled]), [role="button"][aria-label]')]
+      .filter((element) => /menu|navigation/i.test((element.getAttribute('aria-label') || '') + ' ' + (element.textContent || '')));
+    const target = [...explicit, ...labelled].find((element) => {
+      if (!(element instanceof HTMLElement) || !element.isConnected || !element.getClientRects().length) return false;
+      if (element.closest('form') && ((element instanceof HTMLButtonElement && element.type !== 'button') || element instanceof HTMLInputElement)) return false;
+      return !element.closest('a[href], [contenteditable="true"]');
+    });
+    if (!(target instanceof HTMLElement)) {
+      message('matrix-scenario-applied', { state: stateName, supported: false, target: null });
+      return;
+    }
+    if (target.getAttribute('aria-expanded') !== 'true') target.click();
+    await new Promise((done) => setTimeout(done, 220));
+    const controlledId = target.getAttribute('aria-controls');
+    const controlled = controlledId ? document.getElementById(controlledId) : null;
+    const supported = target.getAttribute('aria-expanded') === 'true' || controlled instanceof HTMLElement && controlled.getClientRects().length > 0 && getComputedStyle(controlled).visibility !== 'hidden';
+    message('matrix-scenario-applied', { state: stateName, supported, target: target.id ? '#' + CSS.escape(target.id) : target.tagName.toLowerCase() });
+  };
   addEventListener('message', (event) => {
     const data = event.data;
     if (!data || data.channel !== channel) return;
@@ -2102,6 +2447,7 @@ const bridge = `<style data-responsiver-bridge-style>
     if (data.type === 'forward') history.forward();
     if (data.type === 'reload') location.reload();
     if (data.type === 'audit') audit();
+    if (data.type === 'matrix-scenario') void applyMatrixScenario(data.state);
     if (data.type === 'set-theme-preview') applyThemePreview(data.theme);
     if (data.type === 'clear-theme-preview') clearThemePreview();
     if (data.type === 'inspector-start' && acceptInteractionRevision(data.interactionRevision)) startInspector();

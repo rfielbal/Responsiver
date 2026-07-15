@@ -6,6 +6,7 @@ interface CodeWorkspaceProps {
   projectId: string
   enabled: boolean
   preferredPath?: string | null
+  preferredLocation?: { file: string; line: number | null; column: number | null } | null
   onNotice: (message: string) => void
   onPreviewOrigin: (origin: string | null) => void
 }
@@ -21,9 +22,10 @@ function languageFor(path: string): string {
   return languages[extension ?? ''] ?? 'plaintext'
 }
 
-function MonacoFile({ path, content, onChange }: { path: string; content: string; onChange: (content: string) => void }): ReactElement {
+function MonacoFile({ path, content, preferredLine, preferredColumn, onChange }: { path: string; content: string; preferredLine?: number | null; preferredColumn?: number | null; onChange: (content: string) => void }): ReactElement {
   const host = useRef<HTMLDivElement>(null)
   const modelRef = useRef<ReturnType<typeof monaco.editor.createModel> | null>(null)
+  const editorRef = useRef<ReturnType<typeof monaco.editor.create> | null>(null)
   const syncingExternalContent = useRef(false)
   const change = useRef(onChange)
   change.current = onChange
@@ -48,12 +50,32 @@ function MonacoFile({ path, content, onChange }: { path: string; content: string
       theme: 'vs-dark',
       ariaLabel: `Éditeur de ${path}`
     })
+    editorRef.current = editor
+    let revealFrame: number | null = null
+    if (preferredLine && preferredLine > 0) {
+      const line = Math.min(model.getLineCount(), preferredLine)
+      const column = Math.min(model.getLineMaxColumn(line), Math.max(1, preferredColumn ?? 1))
+      const reveal = (): void => {
+        editor.setPosition({ lineNumber: line, column })
+        editor.revealPositionInCenter({ lineNumber: line, column })
+        editor.focus()
+      }
+      reveal()
+      revealFrame = window.requestAnimationFrame(() => {
+        revealFrame = window.requestAnimationFrame(() => {
+          editor.layout()
+          reveal()
+        })
+      })
+    }
     const subscription = editor.onDidChangeModelContent(() => {
       if (!syncingExternalContent.current) change.current(model.getValue())
     })
     return () => {
+      if (revealFrame !== null) window.cancelAnimationFrame(revealFrame)
       subscription.dispose()
       editor.dispose()
+      editorRef.current = null
       model.dispose()
       modelRef.current = null
     }
@@ -66,10 +88,28 @@ function MonacoFile({ path, content, onChange }: { path: string; content: string
       syncingExternalContent.current = false
     }
   }, [content])
+  useEffect(() => {
+    const editor = editorRef.current
+    const model = modelRef.current
+    if (!editor || !model || !preferredLine || preferredLine < 1) return
+    const line = Math.min(model.getLineCount(), preferredLine)
+    const column = Math.min(model.getLineMaxColumn(line), Math.max(1, preferredColumn ?? 1))
+    const reveal = (): void => {
+      editor.layout()
+      editor.setPosition({ lineNumber: line, column })
+      editor.revealPositionInCenter({ lineNumber: line, column })
+      editor.focus()
+    }
+    reveal()
+    let revealFrame = window.requestAnimationFrame(() => {
+      revealFrame = window.requestAnimationFrame(reveal)
+    })
+    return () => window.cancelAnimationFrame(revealFrame)
+  }, [preferredColumn, preferredLine])
   return <div className="monaco-host" ref={host} />
 }
 
-export default function CodeWorkspace({ projectId, enabled, preferredPath, onNotice, onPreviewOrigin }: CodeWorkspaceProps): ReactElement {
+export default function CodeWorkspace({ projectId, enabled, preferredPath, preferredLocation, onNotice, onPreviewOrigin }: CodeWorkspaceProps): ReactElement {
   const [files, setFiles] = useState<WorkspaceFileSummary[]>([])
   const [selected, setSelected] = useState<string | null>(null)
   const [file, setFile] = useState<WorkspaceFileSnapshot | null>(null)
@@ -92,8 +132,8 @@ export default function CodeWorkspace({ projectId, enabled, preferredPath, onNot
     setFiles(next)
     setSelected((current) => current && next.some((entry) => entry.path === current)
       ? current
-      : preferredPath && next.some((entry) => entry.path === preferredPath)
-        ? preferredPath
+      : (preferredLocation?.file ?? preferredPath) && next.some((entry) => entry.path === (preferredLocation?.file ?? preferredPath))
+        ? (preferredLocation?.file ?? preferredPath)!
         : next[0]?.path ?? null)
   }
 
@@ -109,9 +149,10 @@ export default function CodeWorkspace({ projectId, enabled, preferredPath, onNot
   }, [enabled, projectId])
 
   useEffect(() => {
-    if (!enabled || !preferredPath || !files.some((entry) => entry.path === preferredPath)) return
-    setSelected(preferredPath)
-  }, [enabled, files, preferredPath])
+    const preferred = preferredLocation?.file ?? preferredPath
+    if (!enabled || !preferred || !files.some((entry) => entry.path === preferred)) return
+    setSelected(preferred)
+  }, [enabled, files, preferredLocation?.file, preferredPath])
 
   useEffect(() => {
     if (!selected) { setFile(null); return }
@@ -200,7 +241,7 @@ export default function CodeWorkspace({ projectId, enabled, preferredPath, onNot
     </aside>
     <section className="code-editor-panel">
       <header className="code-editor-toolbar"><div><span>{file?.path ?? 'Aucun fichier'}</span>{saving && <small>Synchronisation de l’aperçu…</small>}</div><div className="code-view-switch"><button className={view === 'edit' ? 'is-active' : ''} onClick={() => setView('edit')}>Édition</button><button className={view === 'diff' ? 'is-active' : ''} onClick={() => setView('diff')} disabled={!file?.dirty}>Diff</button></div><div><button className="button button--quiet" onClick={() => void discard()} disabled={!file?.dirty || busy}>Écarter</button><button className="button button--primary" onClick={() => void apply()} disabled={!file?.dirty || busy}>Appliquer au fichier</button></div></header>
-      {busy && !file ? <div className="code-loading"><span /> Lecture sécurisée…</div> : file ? view === 'edit' ? <MonacoFile key={file.path} path={file.path} content={file.content} onChange={changeContent} /> : <pre className="workspace-diff">{file.diff?.text || 'Aucune différence enregistrée.'}</pre> : <div className="code-empty"><strong>Aucun fichier texte disponible</strong><p>Les dépendances, secrets, sorties compilées et fichiers binaires sont volontairement exclus.</p></div>}
+      {busy && !file ? <div className="code-loading"><span /> Lecture sécurisée…</div> : file ? view === 'edit' ? <MonacoFile key={file.path} path={file.path} content={file.content} preferredLine={preferredLocation?.file === file.path ? preferredLocation.line : null} preferredColumn={preferredLocation?.file === file.path ? preferredLocation.column : null} onChange={changeContent} /> : <pre className="workspace-diff">{file.diff?.text || 'Aucune différence enregistrée.'}</pre> : <div className="code-empty"><strong>Aucun fichier texte disponible</strong><p>Les dépendances, secrets, sorties compilées et fichiers binaires sont volontairement exclus.</p></div>}
       <footer><span><i /> Overlay en mémoire</span><span>Écriture uniquement après confirmation</span><span>Secrets exclus</span></footer>
     </section>
   </div>

@@ -770,7 +770,7 @@ try {
   for (const [file, source] of sourcesBefore) assert.equal(await readFile(join(demoRoot, file), 'utf8'), source, `${file} ne doit pas être modifié.`)
   assert.ok(pageErrors.includes('Erreur de montage contrôlée'))
   assert.deepEqual(pageErrors.filter((message) => message !== 'Erreur de montage contrôlée'), [])
-  process.stdout.write('E2E Electron v0.6 : import qualifié, smoke-test runtime, historique, navigation, propositions, thème, redimensionnement, staging, révision et export — OK\n')
+  process.stdout.write('E2E Electron v0.7 : import qualifié, smoke-test runtime, historique, navigation, propositions, thème, redimensionnement, staging, révision et export — OK\n')
 } finally {
   await application.close()
   await rm(testStateRoot, { recursive: true, force: true })

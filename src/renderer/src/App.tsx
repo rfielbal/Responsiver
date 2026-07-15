@@ -1,7 +1,7 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactElement } from 'react'
 
-import type { ProjectPreparationProgress, RecentProjectSummary, RemoteAuditResult, RemoteInspectorSelection, RemotePageState, RemoteViewport, RuntimeAudit, VisualElementSnapshot, VisualGestureCommit } from '../../shared/contracts'
-import { classifyProjectIssue, consolidateProjectIssues, deterministicVisualTarget, type FindingGroup, type FindingPolicy } from '../../shared/finding-policy'
+import type { CascadeTrace, MatrixObservation, MatrixRunProgress, MatrixRunResult, MatrixStateId, ProjectPreparationProgress, RecentProjectSummary, RemoteAuditResult, RemoteInspectorSelection, RemotePageState, RemoteViewport, RuntimeAudit, StagingVerificationResult, VisualElementSnapshot, VisualGestureCommit } from '../../shared/contracts'
+import { classifyProjectIssue, consolidateProjectIssues, deterministicVisualTarget, isExpressEligibleIssue, type FindingGroup, type FindingPolicy } from '../../shared/finding-policy'
 import { frameworkSupportFor } from '../../shared/framework-support'
 import { authorizeVisualEditor, compileVisualEditCss, createVisualEditOperation, visualEditOperationKey, type VisualEditOperation, type VisualEditProperty, type VisualEditScope } from '../../shared/visual-editor'
 import {
@@ -21,8 +21,9 @@ import { isOnboardingHidden, persistOnboardingHidden } from './onboarding'
 import { clampPreviewScale, stepPreviewScale, wheelPreviewScale } from './preview-zoom'
 
 const CodeWorkspace = React.lazy(() => import('./CodeWorkspace'))
+const MatrixView = React.lazy(() => import('./MatrixView'))
 
-type Destination = 'projects' | 'lab' | 'visual' | 'code' | 'review' | 'export'
+type Destination = 'projects' | 'lab' | 'matrix' | 'visual' | 'code' | 'review' | 'export'
 type InspectorTab = 'findings' | 'fixes' | 'theme' | 'conversation'
 type DeviceFamily = 'smartphone' | 'tablet' | 'computer'
 type LabMode = 'device' | 'compare'
@@ -161,6 +162,12 @@ interface VisualGestureCheckpoint {
   revision: number
 }
 
+interface ExpressVerificationState {
+  issueIds: string[]
+  token: string | null
+  result: StagingVerificationResult
+}
+
 interface ConversationMessage {
   id: string
   author: 'user' | 'system'
@@ -197,6 +204,7 @@ const auditDevices: Device[] = [
 const destinations: Array<{ id: Destination; label: string; icon: string }> = [
   { id: 'projects', label: 'Projets', icon: 'projects' },
   { id: 'lab', label: 'Laboratoire', icon: 'ruler' },
+  { id: 'matrix', label: 'Matrice', icon: 'matrix' },
   { id: 'visual', label: 'Atelier visuel', icon: 'cursor' },
   { id: 'code', label: 'Code', icon: 'code' },
   { id: 'review', label: 'Révision', icon: 'changes' },
@@ -215,6 +223,7 @@ function Icon({ name, size = 18 }: { name: string; size?: number }): ReactElemen
   const paths: Record<string, ReactElement> = {
     projects: <><path d="M4 6.5h6l1.6 2H20v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2Z" /><path d="M2 11h20" /></>,
     ruler: <><rect x="3" y="5" width="18" height="14" rx="2" /><path d="M7 5v4M11 5v2M15 5v4M19 5v2" /></>,
+    matrix: <><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M3 9h18M3 15h18M9 3v18M15 3v18" /></>,
     changes: <><path d="M7 4v13M4 7l3-3 3 3" /><path d="M17 20V7m-3 10 3 3 3-3" /></>,
     export: <><path d="M12 3v12m-4-4 4 4 4-4" /><path d="M4 18v2h16v-2" /></>,
     folder: <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />,
@@ -366,6 +375,7 @@ function previewRoute(value: string): string {
 }
 
 const runtimeAuditRules = new Set<RuntimeAudit['findings'][number]['rule']>([
+  'responsive.missing-viewport',
   'layout.viewport-overflow',
   'layout.clipped-content',
   'layout.truncated-text',
@@ -374,11 +384,13 @@ const runtimeAuditRules = new Set<RuntimeAudit['findings'][number]['rule']>([
   'layout.density-hierarchy',
   'layout.useful-area-overflow',
   'typography.disproportionate',
+  'typography.mobile-readability',
   'interaction.small-target',
   'layout.fixed-obstruction',
   'media.image-error',
   'media.image-distortion',
-  'accessibility.low-contrast'
+  'accessibility.low-contrast',
+  'runtime.page-error'
 ])
 
 function cleanRuntimeText(value: unknown, maximum: number): string {
@@ -635,7 +647,7 @@ const inspectableStyleProperties = new Set([
   'gap', 'row-gap', 'column-gap', 'flex-direction', 'flex-wrap', 'justify-content', 'align-items', 'align-self', 'justify-self', 'order',
   'grid-template-columns', 'grid-template-rows', 'font-family', 'font-size', 'font-weight', 'line-height',
   'letter-spacing', 'text-align', 'color', 'background-color', 'border-color', 'border-width', 'border-style',
-  'border-radius', 'box-shadow', 'opacity', 'overflow', 'object-fit', 'visibility'
+  'border-radius', 'box-shadow', 'opacity', 'overflow', 'overflow-x', 'overflow-y', 'object-fit', 'visibility', 'white-space', 'z-index', 'transform'
 ])
 
 function cleanInspectionText(value: unknown, maximum: number): string {
@@ -689,6 +701,62 @@ function sanitizeVisualElement(value: unknown): VisualElementSnapshot | null {
   }
 }
 
+function sanitizeCascadeTrace(value: unknown): CascadeTrace | null {
+  if (!value || typeof value !== 'object') return null
+  const candidate = value as Record<string, unknown>
+  if (candidate.version !== 1 || !Array.isArray(candidate.properties)) return null
+  const selector = cleanInspectionText(candidate.selector, 640)
+  const route = cleanInspectionText(candidate.route, 2_048)
+  if (!selector || !route) return null
+  const statuses = new Set(['winner', 'overridden', 'inactive', 'inherited', 'inline'])
+  const kinds = new Set(['stylesheet', 'inline-style', 'style-attribute', 'generated', 'inherited'])
+  const properties: CascadeTrace['properties'] = []
+  for (const rawProperty of candidate.properties.slice(0, 32)) {
+    if (!rawProperty || typeof rawProperty !== 'object') continue
+    const entry = rawProperty as Record<string, unknown>
+    const property = cleanInspectionText(entry.property, 80)
+    if (!inspectableStyleProperties.has(property) || !Array.isArray(entry.declarations)) continue
+    const declarations: CascadeTrace['properties'][number]['declarations'] = []
+    for (const rawDeclaration of entry.declarations.slice(0, 32)) {
+      if (!rawDeclaration || typeof rawDeclaration !== 'object') continue
+      const declaration = rawDeclaration as Record<string, unknown>
+      const status = cleanInspectionText(declaration.status, 24)
+      const source = declaration.source && typeof declaration.source === 'object' ? declaration.source as Record<string, unknown> : null
+      const specificity = Array.isArray(declaration.specificity) ? declaration.specificity.slice(0, 3).map((part) => typeof part === 'number' && Number.isFinite(part) ? Math.max(0, Math.min(1_000_000, Math.round(part))) : 0) : [0, 0, 0]
+      const kind = cleanInspectionText(source?.kind, 32)
+      if (!statuses.has(status) || !kinds.has(kind) || specificity.length !== 3) continue
+      declarations.push({
+        property,
+        value: cleanInspectionText(declaration.value, 240),
+        selector: cleanInspectionText(declaration.selector, 640),
+        important: declaration.important === true,
+        specificity: specificity as [number, number, number],
+        order: typeof declaration.order === 'number' && Number.isSafeInteger(declaration.order) ? Math.max(0, declaration.order) : 0,
+        media: Array.isArray(declaration.media) ? declaration.media.map((condition) => cleanInspectionText(condition, 240)).filter(Boolean).slice(0, 8) : [],
+        status: status as CascadeTrace['properties'][number]['declarations'][number]['status'],
+        source: {
+          href: cleanInspectionText(source?.href, 2_048) || null,
+          file: cleanInspectionText(source?.file, 1_024) || null,
+          line: typeof source?.line === 'number' && Number.isSafeInteger(source.line) && source.line > 0 ? source.line : null,
+          column: typeof source?.column === 'number' && Number.isSafeInteger(source.column) && source.column > 0 ? source.column : null,
+          occurrence: typeof source?.occurrence === 'number' && Number.isSafeInteger(source.occurrence) && source.occurrence > 0 ? Math.min(10_000, source.occurrence) : null,
+          certainty: source?.certainty === 'exact' || source?.certainty === 'estimated' ? source.certainty : null,
+          kind: kind as CascadeTrace['properties'][number]['declarations'][number]['source']['kind']
+        }
+      })
+    }
+    if (declarations.length) properties.push({ property, computed: cleanInspectionText(entry.computed, 240), declarations })
+  }
+  return {
+    version: 1,
+    selector,
+    route,
+    generatedAt: cleanInspectionText(candidate.generatedAt, 80) || new Date().toISOString(),
+    properties,
+    truncated: candidate.truncated === true
+  }
+}
+
 function previewOwnsMessageSource(frame: HTMLIFrameElement | null, source: MessageEventSource | null): boolean {
   const root = frame?.contentWindow
   if (!root || !source) return false
@@ -711,7 +779,7 @@ function previewOwnsMessageSource(frame: HTMLIFrameElement | null, source: Messa
   return false
 }
 
-function PreviewFrame({ project, origin, device, path, compact = false, label, focusSelector, themeOverride, resizable = false, allowUpscale = false, zoomable = false, inspectorEnabled = false, composerEnabled = false, visualCss = '', onResize, onPathChange, onThemeChange, onExternal, onAudit, onRenderStatus, onEscape, onInspectElement, onInspectorReady, onInspectorStop, onInspectorShortcut, onComposerGesture, onComposerVerified, onComposerRejected, onComposerNotice }: {
+function PreviewFrame({ project, origin, device, path, compact = false, label, focusSelector, themeOverride, scenarioState = null, resizable = false, allowUpscale = false, zoomable = false, inspectorEnabled = false, composerEnabled = false, visualCss = '', onResize, onPathChange, onThemeChange, onExternal, onAudit, onRenderStatus, onEscape, onInspectElement, onCascadeTrace, onInspectorReady, onInspectorStop, onInspectorShortcut, onComposerGesture, onComposerVerified, onComposerRejected, onComposerNotice }: {
   project: ProjectSnapshot & ProjectExtra
   origin: string | null
   device: Device
@@ -720,6 +788,7 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
   label?: string
   focusSelector?: string | null
   themeOverride?: ThemeTarget | null
+  scenarioState?: MatrixStateId | null
   resizable?: boolean
   allowUpscale?: boolean
   zoomable?: boolean
@@ -734,6 +803,7 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
   onRenderStatus?: (status: RuntimeRenderState | null) => void
   onEscape?: () => void
   onInspectElement?: (element: VisualElementSnapshot, phase: 'hover' | 'selected') => void
+  onCascadeTrace?: (trace: CascadeTrace) => void
   onInspectorReady?: () => void
   onInspectorStop?: () => void
   onInspectorShortcut?: () => void
@@ -757,6 +827,7 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
   const [frameNavigationKey, setFrameNavigationKey] = useState(0)
   const focusSelectorRef = useRef(focusSelector)
   const themeOverrideRef = useRef(themeOverride)
+  const scenarioStateRef = useRef(scenarioState)
   const inspectorEnabledRef = useRef(inspectorEnabled)
   const composerEnabledRef = useRef(composerEnabled)
   const visualCssRef = useRef(visualCss)
@@ -786,6 +857,7 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
   const reportedPathRef = useRef(path)
   focusSelectorRef.current = focusSelector
   themeOverrideRef.current = themeOverride
+  scenarioStateRef.current = scenarioState
   inspectorEnabledRef.current = inspectorEnabled
   composerEnabledRef.current = composerEnabled
   visualCssRef.current = visualCss
@@ -1009,13 +1081,17 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
         const element = sanitized && !directFrameMessage ? { ...sanitized, insideFrame: true, editable: false } : sanitized
         if (element) onInspectElement?.(element, data.type === 'inspector-hover' ? 'hover' : 'selected')
       }
+      if (data.type === 'cascade-trace') {
+        const trace = sanitizeCascadeTrace(data)
+        if (trace) onCascadeTrace?.(trace)
+      }
       if (data.type === 'inspector-started' && inspectorEnabledRef.current) onInspectorReady?.()
       if (data.type === 'inspector-stopped' && inspectorEnabledRef.current && data.reason === 'escape') onInspectorStop?.()
       if (data.type === 'inspector-shortcut') onInspectorShortcut?.()
     }
     window.addEventListener('message', listener)
     return () => window.removeEventListener('message', listener)
-  }, [device, onAudit, onEscape, onExternal, onInspectElement, onInspectorReady, onInspectorShortcut, onInspectorStop, onPathChange, onRenderStatus, onThemeChange, origin, zoomable])
+  }, [device, onAudit, onCascadeTrace, onEscape, onExternal, onInspectElement, onInspectorReady, onInspectorShortcut, onInspectorStop, onPathChange, onRenderStatus, onThemeChange, origin, zoomable])
 
   const post = (type: string, payload: Record<string, unknown> = {}): void => frameRef.current?.contentWindow?.postMessage({ channel: 'responsiver-preview', type, ...payload }, origin ?? '*')
 
@@ -1143,6 +1219,8 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
       scheduleVisualStylePreview(0)
       post(currentTheme ? 'set-theme-preview' : 'clear-theme-preview', currentTheme ? { theme: currentTheme } : {})
       post(currentFocus ? 'focus-selector' : 'clear-focus', currentFocus ? { selector: currentFocus } : {})
+      const currentScenario = scenarioStateRef.current
+      if (currentScenario && currentScenario !== 'initial') post('matrix-scenario', { state: currentScenario })
     }, 90)
   }
 
@@ -1287,6 +1365,11 @@ export default function App(): ReactElement {
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>('findings')
   const [project, setProject] = useState<(ProjectSnapshot & ProjectExtra) | null>(null)
   const [staging, setStaging] = useState<StagingSnapshot | null>(null)
+  const [matrixResult, setMatrixResult] = useState<MatrixRunResult | null>(null)
+  const [matrixProgress, setMatrixProgress] = useState<MatrixRunProgress | null>(null)
+  const [matrixBusy, setMatrixBusy] = useState(false)
+  const [matrixScenario, setMatrixScenario] = useState<{ route: string; state: MatrixStateId } | null>(null)
+  const [expressVerification, setExpressVerification] = useState<ExpressVerificationState | null>(null)
   const [proposal, setProposal] = useState<StagingSnapshot | null>(null)
   const [proposalContext, setProposalContext] = useState<ProposalContext | null>(null)
   const [previewMode, setPreviewMode] = useState<PreviewMode>('source')
@@ -1297,6 +1380,9 @@ export default function App(): ReactElement {
   const [inspectorLocation, setInspectorLocation] = useState<InspectorLocation>(null)
   const [inspectorPhase, setInspectorPhase] = useState<InspectorPhase>('idle')
   const [inspectedElement, setInspectedElement] = useState<VisualElementSnapshot | null>(null)
+  const [cascadeTrace, setCascadeTrace] = useState<CascadeTrace | null>(null)
+  const [cascadeLoading, setCascadeLoading] = useState(false)
+  const [codeLocation, setCodeLocation] = useState<{ file: string; line: number | null; column: number | null } | null>(null)
   const [visualScope, setVisualScope] = useState<VisualEditScope>({ kind: 'mobile' })
   const [visualRouteScope, setVisualRouteScope] = useState<'current' | 'all'>('current')
   const [visualMultipleConfirmed, setVisualMultipleConfirmed] = useState(false)
@@ -1342,6 +1428,7 @@ export default function App(): ReactElement {
   const [previewBusy, setPreviewBusy] = useState(false)
   const [undoAvailable, setUndoAvailable] = useState(false)
   const noticeTimer = useRef<number | null>(null)
+  const appMainRef = useRef<HTMLElement>(null)
   const previewSequence = useRef(0)
   const draftRevision = useRef(0)
   const activeProjectId = useRef<string | null>(null)
@@ -1465,10 +1552,13 @@ export default function App(): ReactElement {
     const unsubscribeRemoteInspector = window.responsiver.onRemoteInspectorSelection((selection: RemoteInspectorSelection) => {
       if (selection.projectId !== activeProjectId.current) return
       setInspectedElement(selection)
+      setCascadeTrace(null)
+      setCascadeLoading(false)
       setInspectorPhase('active')
       setVisualMultipleConfirmed(false)
     })
     const unsubscribeWorkspace = window.responsiver.onWorkspacePreviewOrigin(setWorkspaceOrigin)
+    const unsubscribeMatrix = window.responsiver.onMatrixProgress((progress) => setMatrixProgress(progress))
     const unsubscribeApplied = window.responsiver.onWorkspaceApplied(() => {
       const renderedProject = renderedProjectRef.current
       const queuedIssuesToPreserve = queuedIssueIdsRef.current
@@ -1494,7 +1584,7 @@ export default function App(): ReactElement {
         })
       }
     })
-    return () => { unsubscribe?.(); unsubscribeExtension(); unsubscribeBlocked(); unsubscribeRemoteInspector(); unsubscribeWorkspace(); unsubscribeApplied() }
+    return () => { unsubscribe?.(); unsubscribeExtension(); unsubscribeBlocked(); unsubscribeRemoteInspector(); unsubscribeWorkspace(); unsubscribeMatrix(); unsubscribeApplied() }
   }, [])
 
   useEffect(() => {
@@ -1541,6 +1631,10 @@ export default function App(): ReactElement {
 
   useEffect(() => {
     if (destination !== 'lab') setStageFullscreen(false)
+  }, [destination])
+
+  useLayoutEffect(() => {
+    appMainRef.current?.scrollTo({ top: 0, left: 0 })
   }, [destination])
 
   useEffect(() => {
@@ -1640,6 +1734,9 @@ export default function App(): ReactElement {
   useEffect(() => window.responsiver.onRemoteInspectorCanceled((projectId) => {
     if (projectId !== activeProjectId.current) return
     setInspectedElement(null)
+    setCascadeTrace(null)
+    setCascadeLoading(false)
+    setCodeLocation(null)
     setInspectorPhase('idle')
     if (destination === 'visual') setVisualMode('interact')
     else setInspectorLocation(null)
@@ -1716,6 +1813,11 @@ export default function App(): ReactElement {
     localRuntimeAudits.current.clear()
     setProject(displayedNext)
     setStaging(null)
+    setMatrixResult(null)
+    setMatrixProgress(null)
+    setMatrixBusy(false)
+    setMatrixScenario(null)
+    setExpressVerification(null)
     setProposal(null)
     setProposalContext(null)
     setPreviewMode('source')
@@ -1852,6 +1954,9 @@ export default function App(): ReactElement {
 
   function invalidateStaging(): void {
     draftRevision.current += 1
+    setExpressVerification(null)
+    setMatrixResult(null)
+    setMatrixProgress(null)
     if (!staging) return
     setStaging(null)
     if (previewMode === 'staging') setPreviewMode('source')
@@ -2344,6 +2449,7 @@ export default function App(): ReactElement {
     if (!api().buildStaging) { flash('Le moteur de préparation sera disponible dans l’application desktop.'); return null }
     const requestedRevision = draftRevision.current
     const requestedProjectId = project.id
+    setExpressVerification(null)
     setBusy(true)
     try {
       const result = await api().buildStaging!(request)
@@ -2455,13 +2561,102 @@ export default function App(): ReactElement {
 
   async function applyQueuedSafeIssues(issueIds: string[]): Promise<void> {
     if (!project) return
-    const safeIds = issueIds.filter((id) => {
+    const expressIds = issueIds.filter((id) => {
       const issue = project.issues.find((candidate) => candidate.id === id)
-      return issue && classifyProjectIssue(issue, project.issues).action === 'auto-safe'
+      return issue && isExpressEligibleIssue(issue, project.issues)
     })
-    if (!safeIds.length) { flash('Aucune correction sûre sélectionnée.'); return }
-    const next: ChangePlanRequest = { issueIds: [...new Set(safeIds)], themeTarget: null, instructions: [], visualEdits: [] }
-    await applyPlanToSource(next, `${safeIds.length} correction${safeIds.length > 1 ? 's' : ''} sûre${safeIds.length > 1 ? 's' : ''} appliquée${safeIds.length > 1 ? 's' : ''}, puis projet réanalysé.`, safeIds)
+    if (!expressIds.length) { flash('Aucune correction vérifiable en mode Express n’est sélectionnée.'); return }
+    const next: ChangePlanRequest = { issueIds: [...new Set(expressIds)], themeTarget: null, instructions: [], visualEdits: [] }
+    invalidateStaging()
+    const prepared = await buildStaging(next)
+    if (!prepared) return
+    retainPlan(next)
+    setMatrixBusy(true)
+    setMatrixProgress(null)
+    try {
+      const result = await window.responsiver.verifyStaging({ projectId: project.id, issueIds: expressIds })
+      setMatrixResult(result.matrix)
+      setExpressVerification({ issueIds: expressIds, token: result.verificationToken, result })
+      if (result.report.status === 'passed') {
+        flash(`${result.report.comparableCells} vues vérifiées sans régression. Le correctif exact est prêt à être appliqué.`)
+        setInspectorTab('fixes')
+      } else {
+        setDestination('matrix')
+        flash(result.report.status === 'blocked' ? 'Une régression a été détectée : aucune source n’a été modifiée.' : 'La preuve est incomplète : ouvrez les détails avant toute application.')
+      }
+    } catch (error) {
+      flash(actionError(error, 'La vérification anti-régression n’a pas pu aboutir. Les sources restent intactes.'))
+    } finally {
+      setMatrixBusy(false)
+    }
+  }
+
+  async function applyExpressVerification(): Promise<void> {
+    if (!project || !staging || !expressVerification?.token) return
+    const projectBeforeWrite = project
+    const pathBeforeWrite = activePath
+    const appliedIds = new Set(expressVerification.issueIds)
+    const queuedIssuesToPreserve = queuedIssueIds
+      .filter((id) => !appliedIds.has(id))
+      .map((id) => project.issues.find((issue) => issue.id === id))
+      .filter((issue): issue is ProjectIssue => Boolean(issue))
+    setBusy(true)
+    fastApplyInFlight.current = true
+    try {
+      const result = await window.responsiver.applyVerifiedStaging(expressVerification.token)
+      setStaging(null)
+      setProposal(null)
+      setProposalContext(null)
+      setExpressVerification(null)
+      setPreviewMode('source')
+      const refreshed = await refreshProjectAfterSourceWrite(projectBeforeWrite, pathBeforeWrite, queuedIssuesToPreserve)
+      setUndoAvailable(result.undoAvailable)
+      flash(refreshed
+        ? `Correctif vérifié appliqué à ${result.paths.length} fichier${result.paths.length > 1 ? 's' : ''}. Vous pouvez encore annuler cette application.`
+        : 'Le correctif vérifié a été appliqué, mais la réanalyse automatique a échoué. Vous pouvez encore annuler.')
+    } catch (error) {
+      setExpressVerification(null)
+      flash(actionError(error, 'La version ou ses sources ont changé depuis la vérification. Aucune écriture partielle n’a été conservée.'))
+    } finally {
+      fastApplyInFlight.current = false
+      setBusy(false)
+    }
+  }
+
+  async function runMatrix(compare: boolean): Promise<void> {
+    if (!project) return
+    if (compare && !staging) { flash('Préparez d’abord une version corrigée depuis Révision.'); return }
+    setMatrixBusy(true)
+    setMatrixProgress(null)
+    try {
+      const result = await window.responsiver.runMatrix({
+        projectId: project.id,
+        mode: compare ? 'compare' : 'source',
+        deviceIds: ['mobile', 'tablet', 'desktop'],
+        states: ['initial', 'navigation-open']
+      })
+      setMatrixResult(result)
+      flash(result.report?.status === 'passed' ? 'La version préparée ne crée aucune régression détectable.' : `Matrice terminée : ${result.source.observations.length} vues mesurées.`)
+    } catch (error) {
+      flash(actionError(error, 'La matrice n’a pas pu terminer toutes ses vues.'))
+    } finally {
+      setMatrixBusy(false)
+    }
+  }
+
+  function openMatrixCell(observation: MatrixObservation): void {
+    const job = observation.job
+    const replayableState = job.state === 'initial' || observation.scenario?.supported === true
+    setActivePath(job.route)
+    setWidth(String(job.width))
+    setHeight(String(job.height))
+    setFamily(job.width < 600 ? 'smartphone' : job.width < 1_100 ? 'tablet' : 'computer')
+    setDeviceId('custom')
+    setLabMode('device')
+    setMatrixScenario(replayableState ? { route: job.route, state: job.state } : null)
+    setDestination('lab')
+    const stateLabel = job.state === 'navigation-open' ? 'navigation ouverte' : job.state === 'keyboard-focus' ? 'focus clavier' : 'état initial'
+    flash(`${job.deviceName} · ${job.width} × ${job.height} · ${replayableState ? stateLabel : `${stateLabel} non applicable, vue initiale`} · ${job.route}`)
   }
 
   async function undoLastApply(): Promise<void> {
@@ -2495,6 +2690,9 @@ export default function App(): ReactElement {
   async function clearStaging(): Promise<void> {
     try { await api().clearStaging?.() } catch { /* le serveur sera remplacé à la prochaine construction */ }
     setStaging(null)
+    setExpressVerification(null)
+    setMatrixResult(null)
+    setMatrixProgress(null)
     setPreviewMode('source')
     flash('La version corrigée a été supprimée. Les sources restent intactes.')
   }
@@ -2604,7 +2802,12 @@ export default function App(): ReactElement {
       flash('La comparaison de la version corrigée exige un projet local. Le rapport URL reste disponible dans Exporter.')
       return
     }
+    if (next === 'matrix' && project?.source.kind !== 'local-project') {
+      flash('La matrice reproductible exige le runner local. Pour une URL ou un localhost, utilisez l’audit multi-format du Laboratoire.')
+      return
+    }
     if (next === 'visual') alignVisualDeviceWithScope(visualScope)
+    if (next === 'code') setCodeLocation(selectedIssue?.source ? { file: selectedIssue.source.file, line: selectedIssue.source.line, column: null } : null)
     if ((next === 'lab' || next === 'code') && next !== destination) {
       setInspectorLocation(null)
       setInspectorPhase('idle')
@@ -2632,18 +2835,43 @@ export default function App(): ReactElement {
     setInspectorPhase(opening ? 'starting' : 'idle')
   }
 
+  function receiveInspectedElement(element: VisualElementSnapshot, phase: 'hover' | 'selected'): void {
+    if (phase === 'selected') {
+      setInspectedElement(element)
+      setCascadeTrace(null)
+      setCascadeLoading(!element.insideFrame && element.editable !== false)
+      setVisualMultipleConfirmed(false)
+      return
+    }
+    if (!inspectedElement) setInspectedElement(element)
+  }
+
+  function receiveCascadeTrace(trace: CascadeTrace): void {
+    setCascadeTrace((current) => current?.selector === trace.selector && current.generatedAt > trace.generatedAt ? current : trace)
+    setCascadeLoading(false)
+  }
+
+  function openCascadeSource(file: string, line: number | null, column: number | null): void {
+    setCodeLocation({ file, line, column })
+    setDestination('code')
+    setInspectorLocation(null)
+    setInspectorPhase('idle')
+  }
+
   function selectFamily(next: DeviceFamily): void {
     const first = devices.find((device) => device.family === next)!
     setFamily(next)
     setDeviceId(first.id)
     setWidth(String(first.width))
     setHeight(String(first.height))
+    setMatrixScenario(null)
   }
 
   function selectDevice(id: string): void {
     setDeviceId(id)
     const device = devices.find((candidate) => candidate.id === id)
     if (device) { setWidth(String(device.width)); setHeight(String(device.height)) }
+    setMatrixScenario(null)
   }
 
   function alignVisualDeviceWithScope(scope: VisualEditScope): void {
@@ -2686,6 +2914,7 @@ export default function App(): ReactElement {
   function changePreviewPath(path: string): void {
     if (path !== activePath && previewMode === 'source') setRuntimeTheme('unknown')
     if (path !== activePath) {
+      setMatrixScenario(null)
       setInspectedElement(null)
       setVisualMultipleConfirmed(false)
     }
@@ -2833,13 +3062,13 @@ export default function App(): ReactElement {
       <div className="rail-head"><button className="brand" onClick={() => go('projects')} aria-label="Responsiver — Projets"><Mark /><span><strong>Responsiver</strong><small>Responsive workbench</small></span></button><button className="rail-toggle" type="button" onClick={() => setRailCollapsed((current) => !current)} aria-label={railCollapsed ? 'Déployer le menu latéral' : 'Replier le menu latéral'} aria-expanded={!railCollapsed} title={railCollapsed ? 'Déployer le menu' : 'Replier le menu'}><Icon name={railCollapsed ? 'panelExpand' : 'panelCollapse'} size={17} /></button></div>
       <nav>{destinations.map((item) => {
         const visualUnavailable = item.id === 'visual' && Boolean(project && (!project.source.localRoot || project.source.readOnly || project.source.kind === 'remote-url'))
-        const limited = (isRemote && item.id === 'review') || visualUnavailable
+        const limited = (isRemote && (item.id === 'review' || item.id === 'matrix')) || visualUnavailable
         return <button key={item.id} className={`${destination === item.id ? 'nav-link is-active' : 'nav-link'}${limited ? ' is-limited' : ''}`} onClick={() => go(item.id)} aria-label={item.label} aria-current={destination === item.id ? 'page' : undefined} aria-disabled={visualUnavailable || undefined} title={visualUnavailable ? 'Sources locales requises' : item.label}><Icon name={item.icon} /><span>{item.label}</span>{item.id === 'review' && counts.changes > 0 && <b>{counts.changes}</b>}</button>
       })}<button ref={onboardingTriggerRef} type="button" className="nav-link nav-link--guide" onClick={openOnboarding} aria-label="Ouvrir le guide de prise en main" aria-haspopup="dialog" aria-expanded={onboardingState.open && !showPreparation} aria-controls="responsiver-onboarding" title="Guide de prise en main"><Icon name="help" /><span>Guide</span></button></nav>
-      <div className="rail-foot"><span><Icon name="shield" size={15} /> Local strict par défaut</span><small>v0.6 · open source</small></div>
+      <div className="rail-foot"><span><Icon name="shield" size={15} /> Local strict par défaut</span><small>v0.7 · open source</small></div>
     </aside>
 
-    <main className="app-main">
+    <main ref={appMainRef} className="app-main">
       <header className="titlebar">
         <div className="project-identity"><span>{project ? project.source.kind === 'remote-url' ? 'Audit URL' : project.source.kind === 'linked-localhost' ? 'Localhost associé' : 'Projet actif' : 'Espace local'}</span><strong>{project?.name ?? 'Aucun projet ouvert'}</strong>{project && <code title={project.source.url ?? project.root}>{project.source.url ?? project.root}</code>}</div>
         <div className="title-actions">
@@ -2862,7 +3091,7 @@ export default function App(): ReactElement {
             <button className={previewMode === 'staging' ? 'is-active' : ''} onClick={() => staging ? setPreviewMode('staging') : flash('Préparez la version corrigée depuis les corrections validées.')} disabled={!staging} aria-pressed={previewMode === 'staging'}>Version corrigée {staging && <b>{staging.changes.length}</b>}</button>
           </div> : <div className="remote-mode-label"><span><i /> Rendu réel</span><small>{project.source.readOnly ? 'Lecture seule' : workspaceOrigin ? 'Overlay code actif' : 'Sources associées'}</small></div>}
           <div className="command-spacer" />
-          {labMode === 'device' && <DeviceControls family={family} devices={familyDevices} selectedId={deviceId} width={width} height={height} onFamily={selectFamily} onDevice={selectDevice} onWidth={(value) => { setWidth(value); setDeviceId('custom') }} onHeight={(value) => { setHeight(value); setDeviceId('custom') }} onRotate={() => { setWidth(height); setHeight(width); setDeviceId('custom') }} />}
+          {labMode === 'device' && <DeviceControls family={family} devices={familyDevices} selectedId={deviceId} width={width} height={height} onFamily={selectFamily} onDevice={selectDevice} onWidth={(value) => { setMatrixScenario(null); setWidth(value); setDeviceId('custom') }} onHeight={(value) => { setMatrixScenario(null); setHeight(value); setDeviceId('custom') }} onRotate={() => { setMatrixScenario(null); setWidth(height); setHeight(width); setDeviceId('custom') }} />}
         </div>
 
         <div className="lab-grid">
@@ -2878,17 +3107,19 @@ export default function App(): ReactElement {
               {isRemote ? <RemotePreview projectId={project.id} device={currentDevice} visible={destination === 'lab' && !interfaceOverlayOpen} allowUpscale={stageFullscreen} onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onAudit={applyRemoteAudit} onState={(state) => { setRemoteState(state); changePreviewPath(state.path) }} onNotice={flash} /> : labMode === 'device' && previewMode === 'before-after' && proposal ? <div className="before-after-grid" aria-label="Comparaison avant et après le correctif">
                 <div className="comparison-pane"><header><span>Avant</span><strong>Version actuelle</strong></header><PreviewFrame compact zoomable project={project} origin={project.previewOrigin} device={currentDevice} path={activePath} label="Avant — Version actuelle" focusSelector={focusedSelector} onPathChange={changePreviewPath} onThemeChange={setRuntimeTheme} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} /></div>
                 <div className="comparison-pane comparison-pane--after"><header><span>Après</span><strong>Correctif non validé</strong></header><PreviewFrame compact zoomable project={project} origin={proposal.previewOrigin} device={currentDevice} path={activePath} label="Après — Correctif en cours" focusSelector={focusedSelector} onPathChange={changePreviewPath} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} /></div>
-              </div> : labMode === 'device' ? <PreviewFrame project={project} origin={activeOrigin} device={currentDevice} path={activePath} focusSelector={focusedSelector} themeOverride={nativeThemeTarget} resizable allowUpscale={stageFullscreen} zoomable inspectorEnabled={!isRemote && inspectorLocation === 'lab'} onInspectElement={(element, phase) => { if (phase === 'selected' || !inspectedElement) setInspectedElement(element) }} onInspectorReady={() => setInspectorPhase('active')} onInspectorStop={() => { setInspectorLocation(null); setInspectorPhase('idle') }} onInspectorShortcut={() => toggleInspector('lab')} onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onPathChange={changePreviewPath} onThemeChange={activeOrigin === project.previewOrigin ? setRuntimeTheme : undefined} onAudit={activeOrigin === project.previewOrigin ? applyRuntimeAudit : undefined} onRenderStatus={setRuntimeRenderStatus} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} /> : <div className="comparison-grid">{compareDevices.map((device) => <PreviewFrame key={device.id} project={project} origin={activeOrigin} device={device} path={activePath} compact focusSelector={focusedSelector} themeOverride={nativeThemeTarget} label={device.family === 'smartphone' ? 'Smartphone' : device.family === 'tablet' ? 'Tablette' : 'Ordinateur'} onPathChange={changePreviewPath} onThemeChange={activeOrigin === project.previewOrigin ? setRuntimeTheme : undefined} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} />)}</div>}
+              </div> : labMode === 'device' ? <PreviewFrame project={project} origin={activeOrigin} device={currentDevice} path={activePath} focusSelector={focusedSelector} themeOverride={nativeThemeTarget} scenarioState={matrixScenario && documentPath(matrixScenario.route) === documentPath(activePath) ? matrixScenario.state : null} resizable allowUpscale={stageFullscreen} zoomable inspectorEnabled={!isRemote && inspectorLocation === 'lab'} onInspectElement={receiveInspectedElement} onCascadeTrace={receiveCascadeTrace} onInspectorReady={() => setInspectorPhase('active')} onInspectorStop={() => { setInspectorLocation(null); setInspectorPhase('idle') }} onInspectorShortcut={() => toggleInspector('lab')} onResize={(nextWidth, nextHeight) => { setMatrixScenario(null); setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onPathChange={changePreviewPath} onThemeChange={activeOrigin === project.previewOrigin ? setRuntimeTheme : undefined} onAudit={activeOrigin === project.previewOrigin ? applyRuntimeAudit : undefined} onRenderStatus={setRuntimeRenderStatus} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} /> : <div className="comparison-grid">{compareDevices.map((device) => <PreviewFrame key={device.id} project={project} origin={activeOrigin} device={device} path={activePath} compact focusSelector={focusedSelector} themeOverride={nativeThemeTarget} label={device.family === 'smartphone' ? 'Smartphone' : device.family === 'tablet' ? 'Tablette' : 'Ordinateur'} onPathChange={changePreviewPath} onThemeChange={activeOrigin === project.previewOrigin ? setRuntimeTheme : undefined} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} />)}</div>}
             </div>
-            {inspectorLocation === 'lab' && <QuickInspectorPanel element={inspectedElement} phase={inspectorPhase} readOnly={project.source.kind === 'remote-url'} onClose={() => { setInspectorLocation(null); setInspectorPhase('idle') }} onEdit={() => go('visual')} />}
+            {inspectorLocation === 'lab' && <QuickInspectorPanel element={inspectedElement} phase={inspectorPhase} readOnly={project.source.kind === 'remote-url' || Boolean(project.previewBasePath)} cascade={cascadeTrace} cascadeLoading={cascadeLoading} onOpenSource={openCascadeSource} onClose={() => { setInspectorLocation(null); setInspectorPhase('idle') }} onEdit={() => go('visual')} />}
           </div>
-          {scopedProject && <Inspector project={scopedProject} allIssues={project.issues} activeIssueCount={routeIssues.length} totalIssueCount={project.issues.length} showAllIssues={showAllIssues} onShowAllIssues={setShowAllIssues} tab={inspectorTab} onTab={setInspectorTab} selectedIssue={selectedIssue} selectedIds={selectedIssueIds} queuedIds={queuedIssueIds} visualEditCount={visualHistory.present.length} onPreviewIssue={(issue) => void previewIssue(issue)} onPreviewBatch={(ids) => void previewQueuedIssues(ids)} onToggleIssue={toggleAcceptedIssue} onToggleQueued={toggleQueuedIssue} runtimeTheme={runtimeTheme} themeTarget={themeTarget} previewThemeTarget={previewThemeTarget} onPreviewTheme={(target) => void previewTheme(target)} onRemoveTheme={removeTheme} proposal={proposal} proposalContext={proposalContext} previewBusy={previewBusy} staging={staging} runtimeAudit={runtimeAudit} runtimeRenderStatus={runtimeRenderStatus} instructions={instructions} onRemoveInstruction={removeInstruction} messages={messages} draft={draft} onDraft={setDraft} onSubmit={submitInstruction} busy={busy} onAcceptProposal={acceptProposal} onAcceptAndApply={() => void acceptAndApplyProposal()} onRejectProposal={rejectProposal} onApplySafe={(ids) => void applyQueuedSafeIssues(ids)} undoAvailable={undoAvailable} onUndo={() => void undoLastApply()} directApplyAvailable={directApplyAvailable} onReview={() => void prepareAndOpenReview()} onClear={() => void clearStaging()} assistantRoute={remoteState?.path ?? activePath} assistantViewport={{ width: currentDevice.width, height: currentDevice.height, deviceScaleFactor: 1, mobile: currentDevice.family !== 'computer', touch: currentDevice.family !== 'computer' }} assistantScreenshot={remoteAudit?.screenshotDataUrl ?? null} workspaceEnabled={workspaceEnabled} onWorkspacePreviewOrigin={setWorkspaceOrigin} onNotice={flash} onOpenCode={() => go('code')} />}
+          {scopedProject && <Inspector project={scopedProject} allIssues={project.issues} activeIssueCount={routeIssues.length} totalIssueCount={project.issues.length} showAllIssues={showAllIssues} onShowAllIssues={setShowAllIssues} tab={inspectorTab} onTab={setInspectorTab} selectedIssue={selectedIssue} selectedIds={selectedIssueIds} queuedIds={queuedIssueIds} visualEditCount={visualHistory.present.length} onPreviewIssue={(issue) => void previewIssue(issue)} onPreviewBatch={(ids) => void previewQueuedIssues(ids)} onToggleIssue={toggleAcceptedIssue} onToggleQueued={toggleQueuedIssue} runtimeTheme={runtimeTheme} themeTarget={themeTarget} previewThemeTarget={previewThemeTarget} onPreviewTheme={(target) => void previewTheme(target)} onRemoveTheme={removeTheme} proposal={proposal} proposalContext={proposalContext} previewBusy={previewBusy} staging={staging} runtimeAudit={runtimeAudit} runtimeRenderStatus={runtimeRenderStatus} instructions={instructions} onRemoveInstruction={removeInstruction} messages={messages} draft={draft} onDraft={setDraft} onSubmit={submitInstruction} busy={busy || matrixBusy} expressVerification={expressVerification} onApplyExpress={() => void applyExpressVerification()} onAcceptProposal={acceptProposal} onAcceptAndApply={() => void acceptAndApplyProposal()} onRejectProposal={rejectProposal} onApplySafe={(ids) => void applyQueuedSafeIssues(ids)} undoAvailable={undoAvailable} onUndo={() => void undoLastApply()} directApplyAvailable={directApplyAvailable} onReview={() => void prepareAndOpenReview()} onClear={() => void clearStaging()} assistantRoute={remoteState?.path ?? activePath} assistantViewport={{ width: currentDevice.width, height: currentDevice.height, deviceScaleFactor: 1, mobile: currentDevice.family !== 'computer', touch: currentDevice.family !== 'computer' }} assistantScreenshot={remoteAudit?.screenshotDataUrl ?? null} workspaceEnabled={workspaceEnabled} onWorkspacePreviewOrigin={setWorkspaceOrigin} onNotice={flash} onOpenCode={() => go('code')} />}
         </div>
         {!isRemote && previewMode === 'source' && project.previewOrigin && (project.previewReadiness.status === 'ready' || project.previewReadiness.status === 'degraded') && <div className="runtime-audit-probes" aria-hidden="true" inert>
           {auditDevices.map((device) => <PreviewFrame key={`${project.id}:${device.id}`} compact project={project} origin={project.previewOrigin} device={device} path={activePath} label={`Sonde ${auditFamily(device.width)}`} onAudit={(audit) => applyRuntimeAudit(audit, false)} />)}
         </div>}
         <footer className="activity-bar"><span><i className="status-dot status-dot--ok" /> {isRemote ? `${remoteAudits.current.size} route${remoteAudits.current.size > 1 ? 's' : ''} auditée${remoteAudits.current.size > 1 ? 's' : ''}` : `${project.routes.length} page${project.routes.length > 1 ? 's' : ''}`}</span>{project.capabilities?.buildRequired ? <span className="activity-alert" title="Responsiver n’exécute jamais les scripts arbitraires d’un projet sans consentement. Ouvrez plutôt le fichier HTML généré dans dist ou out.">Sources à compiler · choisir dist/out</span> : <span className={counts.blockers ? 'activity-alert' : ''}>{counts.blockers} bloquant{counts.blockers > 1 ? 's' : ''}</span>}<span>{isRemote ? remoteAudit ? `${project.issues.length} constats cumulés · ${remoteAudit.viewports.length} largeurs` : 'Audit visuel en préparation' : localAuditProfileCount ? `${routeIssues.length} constat${routeIssues.length > 1 ? 's' : ''} consolidé${routeIssues.length > 1 ? 's' : ''} · ${localAuditProfileCount}/${auditDevices.length} formats` : 'Audit visuel en attente'}</span><span className="activity-end"><Icon name="shield" size={13} /> {project.source.network === 'local-only' ? 'Hors ligne' : project.source.network === 'localhost' ? 'Serveur local · dépendances web autorisées' : 'Session réseau éphémère'}</span></footer>
       </div>}
+
+      {destination === 'matrix' && project && <React.Suspense fallback={<div className="code-loading"><span /> Préparation de la matrice…</div>}><MatrixView project={project} result={matrixResult} progress={matrixProgress} busy={matrixBusy} compareAvailable={Boolean(staging)} onRun={(compare) => void runMatrix(compare)} onOpenCell={openMatrixCell} onReview={() => go('review')} /></React.Suspense>}
 
       {destination === 'visual' && project && visualAuthorization?.allowed && <VisualEditorView
         project={project}
@@ -2946,15 +3177,15 @@ export default function App(): ReactElement {
         <h1 className="sr-only">Code</h1>
         <div className="code-context-bar"><span className="code-overlay-state"><Icon name="shield" size={14} /> Overlay en mémoire · disque intact</span><div className="code-head-actions">{project.source.kind === 'linked-localhost' && <span className="code-runtime-chip" title="Le CSS est prévisualisé instantanément. Pour HTML, Twig, PHP, JavaScript ou les fichiers de framework, appliquez explicitement le fichier puis laissez votre serveur local le recharger."><Icon name="info" size={13} /> CSS instantané · autres sources après validation</span>}{project.source.network === 'localhost' && !workspaceEnabled && <button className="button button--secondary" type="button" onClick={() => void associateCurrentLocalhostRoot()} disabled={busy}><Icon name="folder" size={15} /> Associer les sources</button>}<span className={workspaceEnabled ? 'code-capability is-ready' : 'code-capability'}><i />{workspaceEnabled ? 'Sources locales liées' : 'Lecture seule'}</span>{frameworkSupport && <details className="framework-support"><summary><Icon name="code" size={13} /><span>{frameworkSupport.stack}</span><b>{frameworkSupport.editingLabel}</b></summary><p>{frameworkSupport.detail}</p></details>}</div></div>
         <div className="code-studio">
-          <React.Suspense fallback={<div className="code-workspace code-loading"><span /> Chargement de l’éditeur local…</div>}><CodeWorkspace projectId={project.id} enabled={workspaceEnabled} preferredPath={selectedIssue?.source?.file ?? null} onNotice={flash} onPreviewOrigin={setWorkspaceOrigin} /></React.Suspense>
+          <React.Suspense fallback={<div className="code-workspace code-loading"><span /> Chargement de l’éditeur local…</div>}><CodeWorkspace projectId={project.id} enabled={workspaceEnabled} preferredPath={selectedIssue?.source?.file ?? null} preferredLocation={codeLocation} onNotice={flash} onPreviewOrigin={setWorkspaceOrigin} /></React.Suspense>
           <aside className={`code-live-preview${inspectorLocation === 'code' ? ' is-inspecting' : ''}`}>
             <header><div><span className="overline">Aperçu direct</span><strong>{currentDevice.name}</strong></div><div className="code-preview-actions"><button className={`${inspectorLocation === 'code' ? 'text-button is-active' : 'text-button'}${inspectorLocation === 'code' && inspectorPhase === 'starting' ? ' is-starting' : ''}`} onClick={() => toggleInspector('code')} aria-pressed={inspectorLocation === 'code'} aria-busy={inspectorLocation === 'code' && inspectorPhase === 'starting'} title="Inspecter un élément · F12"><Icon name="cursor" size={14} /> {inspectorLocation === 'code' && inspectorPhase === 'starting' ? 'Activation…' : 'Inspecter'}</button><button className="text-button" onClick={() => go('lab')}><Icon name="fullscreen" size={14} /> Ouvrir en grand</button></div></header>
             <div className="code-preview-body">
               {isRemote
                 ? <RemotePreview projectId={project.id} device={currentDevice} visible={destination === 'code' && !interfaceOverlayOpen} embedded automaticAudit={false} onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onAudit={applyRemoteAudit} onState={(state) => { setRemoteState(state); changePreviewPath(state.path) }} onNotice={flash} />
-                : <PreviewFrame compact zoomable project={project} origin={workspaceOrigin ?? project.previewOrigin} device={currentDevice} path={activePath} resizable inspectorEnabled={inspectorLocation === 'code'} onInspectElement={(element, phase) => { if (phase === 'selected' || !inspectedElement) setInspectedElement(element) }} onInspectorReady={() => setInspectorPhase('active')} onInspectorStop={() => { setInspectorLocation(null); setInspectorPhase('idle') }} onInspectorShortcut={() => toggleInspector('code')} onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onPathChange={changePreviewPath} onThemeChange={setRuntimeTheme} onAudit={!workspaceOrigin ? applyRuntimeAudit : undefined} onRenderStatus={setRuntimeRenderStatus} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} />}
+                : <PreviewFrame compact zoomable project={project} origin={workspaceOrigin ?? project.previewOrigin} device={currentDevice} path={activePath} resizable inspectorEnabled={inspectorLocation === 'code'} onInspectElement={receiveInspectedElement} onCascadeTrace={receiveCascadeTrace} onInspectorReady={() => setInspectorPhase('active')} onInspectorStop={() => { setInspectorLocation(null); setInspectorPhase('idle') }} onInspectorShortcut={() => toggleInspector('code')} onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onPathChange={changePreviewPath} onThemeChange={setRuntimeTheme} onAudit={!workspaceOrigin ? applyRuntimeAudit : undefined} onRenderStatus={setRuntimeRenderStatus} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} />}
             </div>
-            {inspectorLocation === 'code' && <QuickInspectorPanel element={inspectedElement} phase={inspectorPhase} readOnly={project.source.kind === 'remote-url'} onClose={() => { setInspectorLocation(null); setInspectorPhase('idle') }} onEdit={() => go('visual')} />}
+            {inspectorLocation === 'code' && <QuickInspectorPanel element={inspectedElement} phase={inspectorPhase} readOnly={project.source.kind === 'remote-url' || Boolean(project.previewBasePath)} cascade={cascadeTrace} cascadeLoading={cascadeLoading} onOpenSource={openCascadeSource} onClose={() => { setInspectorLocation(null); setInspectorPhase('idle') }} onEdit={() => go('visual')} />}
             <footer><span><i /> Overlay en mémoire</span><code>{currentDevice.width} × {currentDevice.height}</code></footer>
           </aside>
         </div>
@@ -2971,7 +3202,10 @@ export default function App(): ReactElement {
   </div>
 }
 
-function QuickInspectorPanel({ element, phase, readOnly, onClose, onEdit }: { element: VisualElementSnapshot | null; phase: InspectorPhase; readOnly: boolean; onClose: () => void; onEdit: () => void }): ReactElement {
+function QuickInspectorPanel({ element, phase, readOnly, cascade, cascadeLoading, onOpenSource, onClose, onEdit }: { element: VisualElementSnapshot | null; phase: InspectorPhase; readOnly: boolean; cascade: CascadeTrace | null; cascadeLoading: boolean; onOpenSource: (file: string, line: number | null, column: number | null) => void; onClose: () => void; onEdit: () => void }): ReactElement {
+  const [tab, setTab] = useState<'computed' | 'origin'>('computed')
+  const [cascadeProperty, setCascadeProperty] = useState('')
+  useEffect(() => { setTab('computed'); setCascadeProperty('') }, [element?.selector])
   const essentialStyles = element ? [
     ['display', element.styles.display],
     ['width', element.styles.width],
@@ -2979,16 +3213,31 @@ function QuickInspectorPanel({ element, phase, readOnly, onClose, onEdit }: { el
     ['font-size', element.styles['font-size']],
     ['line-height', element.styles['line-height']],
     ['color', element.styles.color],
-    ['background', element.styles['background-color']],
+    ['background-color', element.styles['background-color']],
     ['gap', element.styles.gap]
   ].filter((entry): entry is [string, string] => Boolean(entry[1])) : []
   const effectiveReadOnly = readOnly || element?.editable === false
+  const tracedProperties = cascade && element && cascade.selector === element.selector ? cascade.properties : []
+  const selectedTrace = tracedProperties.find((property) => property.property === cascadeProperty) ?? (!cascadeProperty ? tracedProperties.find((property) => property.declarations.some((declaration) => declaration.status === 'winner' || declaration.status === 'inline')) ?? tracedProperties[0] : undefined)
+  const winningDeclaration = selectedTrace?.declarations.find((declaration) => declaration.status === 'winner' || declaration.status === 'inline') ?? null
+  const cascadeSourceControl = (declaration: CascadeTrace['properties'][number]['declarations'][number], withIcon = false): ReactElement => {
+    const source = declaration.source
+    if (source.file && source.kind !== 'generated' && !readOnly) {
+      const estimated = source.certainty === 'estimated'
+      return <button type="button" title={estimated ? 'Emplacement rapproché du texte source : ligne estimée' : 'Ouvrir cette déclaration dans le fichier source'} onClick={() => onOpenSource(source.file!, source.line, source.column)}>{withIcon && <Icon name="code" size={13} />} {estimated ? '≈ ' : ''}{source.file}{source.line ? `:${source.line}` : ''}{source.occurrence && source.occurrence > 1 ? ` · occurrence ${source.occurrence}` : ''}</button>
+    }
+    if (source.kind === 'generated') return <span>Feuille générée par Responsiver · lecture seule</span>
+    if (source.file && readOnly) return <span>{source.file} · source auteur indisponible</span>
+    return <span>Source externe ou runtime · lecture seule</span>
+  }
   return <aside className="quick-inspector" aria-label="Inspecteur de la prévisualisation">
     <header><div><span className="overline">Inspecteur</span><strong>{element ? `<${element.tag}>` : 'Sélection DOM'}</strong></div><button className="icon-button" type="button" onClick={onClose} aria-label="Fermer l’inspecteur"><Icon name="close" size={14} /></button></header>
     {!element ? <div className={`quick-inspector-empty${phase === 'starting' ? ' is-starting' : ''}`}><span className="inspector-cursor"><Icon name="cursor" size={22} /></span><strong>{phase === 'starting' ? 'Activation de l’inspecteur…' : 'Pointez un élément'}</strong><p>{phase === 'starting' ? 'Responsiver attend que le rendu soit prêt. Vous pourrez cliquer dès que le curseur devient actif.' : 'Survolez la preview puis cliquez sur un texte, un bouton, une image ou un conteneur.'}</p><small>{phase === 'starting' ? 'Le bouton reste synchronisé avec le moteur de rendu.' : 'Échap quitte le mode sélection.'}</small></div> : <div className="quick-inspector-content">
       <section className="dom-summary"><div><code>{element.selector}</code><span>{element.occurrences} correspondance{element.occurrences > 1 ? 's' : ''}</span></div>{element.text && <p>{element.text}</p>}<dl><div><dt>Route</dt><dd>{element.route}</dd></div><div><dt>Dimensions</dt><dd>{Math.round(element.rect.width)} × {Math.round(element.rect.height)} px</dd></div>{element.role && <div><dt>Rôle</dt><dd>{element.role}</dd></div>}{element.ariaLabel && <div><dt>Nom accessible</dt><dd>{element.ariaLabel}</dd></div>}</dl></section>
-      <section className="box-model-card"><span className="overline">Modèle de boîte</span><div className="box-model-visual"><span>margin<em>{element.styles['margin-top'] ?? '0'}</em><i>border<em>{element.styles['border-width'] ?? '0'}</em><b>padding<em>{element.styles['padding-top'] ?? '0'}</em><strong>{Math.round(element.rect.width)} × {Math.round(element.rect.height)}</strong></b></i></span></div></section>
-      <section className="computed-style-list"><span className="overline">Styles calculés</span>{essentialStyles.map(([property, value]) => <div key={property}><code>{property}</code><span>{value}</span></div>)}</section>
+      <div className="inspector-detail-tabs" role="tablist" aria-label="Détails des styles"><button type="button" role="tab" aria-selected={tab === 'computed'} className={tab === 'computed' ? 'is-active' : ''} onClick={() => setTab('computed')}>Calculés</button><button type="button" role="tab" aria-selected={tab === 'origin'} className={tab === 'origin' ? 'is-active' : ''} onClick={() => setTab('origin')}>Origine {cascadeLoading && <i />}</button></div>
+      {tab === 'computed' ? <><section className="box-model-card"><span className="overline">Modèle de boîte</span><div className="box-model-visual"><span>margin<em>{element.styles['margin-top'] ?? '0'}</em><i>border<em>{element.styles['border-width'] ?? '0'}</em><b>padding<em>{element.styles['padding-top'] ?? '0'}</em><strong>{Math.round(element.rect.width)} × {Math.round(element.rect.height)}</strong></b></i></span></div></section><section className="computed-style-list"><span className="overline">Styles calculés</span>{essentialStyles.map(([property, value]) => <button type="button" key={property} onClick={() => { setCascadeProperty(property); setTab('origin') }}><code>{property}</code><span>{value}</span><Icon name="arrow" size={11} /></button>)}</section></> : <section className="cascade-panel" role="tabpanel">
+        {cascadeLoading ? <div className="cascade-empty"><span className="loading-mark" /><strong>Traçage de la cascade…</strong><p>Responsiver relie le style prioritaire calculé à la feuille réellement chargée.</p></div> : !tracedProperties.length ? <div className="cascade-empty"><Icon name="info" size={18} /><strong>Origine partielle</strong><p>Cette source est distante, encapsulée ou fournie par le navigateur. Le style calculé reste disponible.</p></div> : <><label>Propriété<select value={selectedTrace?.property ?? ''} onChange={(event) => setCascadeProperty(event.target.value)}>{tracedProperties.map((property) => <option key={property.property} value={property.property}>{property.property} · {property.computed}</option>)}</select></label>{winningDeclaration && <article className="cascade-winner"><header><span>Priorité calculée</span><b>{winningDeclaration.important ? '!important' : `0-${winningDeclaration.specificity.join('-')}`}</b></header><code>{winningDeclaration.selector} {'{'} {selectedTrace?.property}: {winningDeclaration.value}; {'}'}</code>{winningDeclaration.media.map((condition) => <small key={condition}>@media {condition} · actif</small>)}{cascadeSourceControl(winningDeclaration, true)}</article>}<div className="cascade-stack">{selectedTrace?.declarations.filter((declaration) => declaration !== winningDeclaration).map((declaration, index) => <article className={`is-${declaration.status}`} key={`${declaration.selector}:${declaration.order}:${index}`}><header><span>{declaration.status === 'inactive' ? 'Condition inactive' : 'Écrasée'}</span>{declaration.media.length > 0 && <b>{declaration.media[0]}</b>}</header><code>{declaration.selector}</code><p>{selectedTrace.property}: {declaration.value}{declaration.important ? ' !important' : ''}</p>{cascadeSourceControl(declaration)}</article>)}</div>{cascade?.truncated && <small className="cascade-limit">Trace partielle : la page dépasse les limites de collecte sûres.</small>}</>}
+      </section>}
       <footer><span className={effectiveReadOnly ? 'source-badge is-readonly' : 'source-badge'}><i />{element.insideFrame ? 'Sous-frame · inspection seule' : effectiveReadOnly ? 'Lecture seule' : 'Surcharge CSS sûre'}</span>{!effectiveReadOnly && <button className="button button--primary button--compact" type="button" onClick={onEdit}><Icon name="cursor" size={14} /> Modifier dans l’Atelier</button>}</footer>
     </div>}
   </aside>
@@ -3279,7 +3528,7 @@ function proposalOutcomeNotice(snapshot: StagingSnapshot | null): string | undef
   return reasons.length ? reasons.join(' · ') : 'Aucune transformation applicable n’a été produite.'
 }
 
-function Inspector({ project, allIssues, activeIssueCount, totalIssueCount, showAllIssues, onShowAllIssues, tab, onTab, selectedIssue, selectedIds, queuedIds, visualEditCount, onPreviewIssue, onPreviewBatch, onToggleIssue, onToggleQueued, runtimeTheme, themeTarget, previewThemeTarget, onPreviewTheme, onRemoveTheme, proposal, proposalContext, previewBusy, staging, runtimeAudit, runtimeRenderStatus, instructions, onRemoveInstruction, messages, draft, onDraft, onSubmit, busy, onAcceptProposal, onAcceptAndApply, onRejectProposal, onApplySafe, undoAvailable, onUndo, directApplyAvailable, onReview, onClear, assistantRoute, assistantViewport, assistantScreenshot, workspaceEnabled, onWorkspacePreviewOrigin, onNotice, onOpenCode }: {
+function Inspector({ project, allIssues, activeIssueCount, totalIssueCount, showAllIssues, onShowAllIssues, tab, onTab, selectedIssue, selectedIds, queuedIds, visualEditCount, onPreviewIssue, onPreviewBatch, onToggleIssue, onToggleQueued, runtimeTheme, themeTarget, previewThemeTarget, onPreviewTheme, onRemoveTheme, proposal, proposalContext, previewBusy, staging, runtimeAudit, runtimeRenderStatus, instructions, onRemoveInstruction, messages, draft, onDraft, onSubmit, busy, expressVerification, onApplyExpress, onAcceptProposal, onAcceptAndApply, onRejectProposal, onApplySafe, undoAvailable, onUndo, directApplyAvailable, onReview, onClear, assistantRoute, assistantViewport, assistantScreenshot, workspaceEnabled, onWorkspacePreviewOrigin, onNotice, onOpenCode }: {
   project: ProjectSnapshot & ProjectExtra
   allIssues: ProjectIssue[]
   activeIssueCount: number
@@ -3314,6 +3563,8 @@ function Inspector({ project, allIssues, activeIssueCount, totalIssueCount, show
   onDraft: (value: string) => void
   onSubmit: (event: FormEvent) => void
   busy: boolean
+  expressVerification: ExpressVerificationState | null
+  onApplyExpress: () => void
   onAcceptProposal: () => void
   onAcceptAndApply: () => void
   onRejectProposal: () => void
@@ -3364,7 +3615,9 @@ function Inspector({ project, allIssues, activeIssueCount, totalIssueCount, show
   const selectedActionable = canStage && selectedPolicy?.action !== 'advisory' && Boolean(issueExtra?.fix && issueExtra.fix.kind !== 'manual' || selectedInstruction)
   const instructionProposal = proposalContext?.kind === 'instruction' ? proposal : null
   const queuedClassified = allClassifiedIssues.filter(({ issue, policy }) => queuedSet.has(issue.id) && policy.action !== 'advisory')
-  const safeQueuedIds = queuedClassified.filter(({ policy }) => policy.action === 'auto-safe').map(({ issue }) => issue.id)
+  const expressQueuedIds = queuedClassified.filter(({ issue }) => isExpressEligibleIssue(issue, allIssues)).map(({ issue }) => issue.id)
+  const selectedExpressIds = allClassifiedIssues.filter(({ issue }) => selectedIds.includes(issue.id) && isExpressEligibleIssue(issue, allIssues)).map(({ issue }) => issue.id)
+  const expressPlanEligible = selectedExpressIds.length > 0 && selectedExpressIds.length === selectedIds.length && !themeTarget && !instructions.length && !visualEditCount
   const queuedBatchIds = queuedClassified.map(({ issue }) => issue.id)
   const batchIssueIds = proposalContext?.kind === 'batch' ? proposalContext.issueIds ?? [] : []
   const batchIssues = batchIssueIds.map((id) => allIssues.find((issue) => issue.id === id)).filter((issue): issue is ProjectIssue => Boolean(issue))
@@ -3430,7 +3683,7 @@ function Inspector({ project, allIssues, activeIssueCount, totalIssueCount, show
         <div className="change-plan-counts"><span><b>{acceptedCount}</b> validé{acceptedCount > 1 ? 's' : ''}</span><span className={queuedClassified.length ? 'is-pending' : ''}><b>{queuedClassified.length}</b> sélectionné{queuedClassified.length > 1 ? 's' : ''}</span>{staging && <span><b>{staging.changes.length}</b> préparé{staging.changes.length > 1 ? 's' : ''}</span>}</div>
         <div className="change-plan-actions">
           {undoAvailable && <button className="text-button" type="button" onClick={onUndo} disabled={busy}><Icon name="back" size={13} /> Annuler la dernière application</button>}
-          {findingGroup === 'code' && safeQueuedIds.length > 0 && acceptedCount === 0 && directApplyAvailable && <button className="button button--quiet button--compact" type="button" onClick={() => onApplySafe(safeQueuedIds)} disabled={busy || previewBusy}>Appliquer uniquement {safeQueuedIds.length} sûr{safeQueuedIds.length > 1 ? 's' : ''}</button>}
+          {expressQueuedIds.length > 0 && acceptedCount === 0 && directApplyAvailable && <button className="button button--quiet button--compact" type="button" onClick={() => onApplySafe(expressQueuedIds)} disabled={busy || previewBusy}><Icon name="shield" size={13} /> Corriger et vérifier ({expressQueuedIds.length})</button>}
           {queuedBatchIds.length > 0 && !queuedBatchIsDisplayed && <button className="button button--primary button--compact" type="button" onClick={() => onPreviewBatch(queuedBatchIds)} disabled={busy || previewBusy}><Icon name="compare" size={13} /> Comparer la sélection ({queuedBatchIds.length})</button>}
           {acceptedCount > 0 && <button className="button button--secondary button--compact" type="button" onClick={() => onTab('fixes')}><Icon name="changes" size={13} /> Réviser les corrections</button>}
         </div>
@@ -3471,7 +3724,9 @@ function Inspector({ project, allIssues, activeIssueCount, totalIssueCount, show
         {visualEditCount > 0 && <article><span className="confidence confidence--safe">Atelier</span><strong>{visualEditCount} ajustement{visualEditCount > 1 ? 's visuels' : ' visuel'}</strong><code>Conservé dans le plan de corrections</code></article>}
       </> : <div className="empty-panel"><Icon name="changes" /><strong>Aucun choix validé</strong><span>Prévisualisez un constat, un thème ou une instruction, puis validez sa proposition.</span></div>}</div>
         {queuedClassified.length > 0 && <section className="pending-fixes"><header><span><i /> Sélection à comparer</span><strong>{queuedClassified.length}</strong></header><p>{queuedBatchIsDisplayed ? 'La comparaison est affichée ci-dessus. Validez-la pour conserver ce lot.' : 'Ces constats ne rejoindront le plan qu’après votre validation de la comparaison.'}</p><div>{queuedClassified.slice(0, 4).map(({ issue, policy }) => <button type="button" key={issue.id} onClick={() => onPreviewIssue(issue)}><span>{issue.title}</span><em>{policy.group === 'visual' ? 'Avant/après' : policy.action === 'auto-safe' ? 'Diff sûr' : 'À relire'}</em></button>)}</div>{queuedClassified.length > 4 && <small>+ {queuedClassified.length - 4} autre{queuedClassified.length - 4 > 1 ? 's' : ''}</small>}{!queuedBatchIsDisplayed && <button className="button button--secondary button--full" type="button" onClick={() => onPreviewBatch(queuedBatchIds)} disabled={busy || previewBusy}>Comparer la sélection ({queuedBatchIds.length})</button>}</section>}
+        {expressVerification && <section className={`express-verdict is-${expressVerification.result.report.status}`} aria-live="polite"><header><span><Icon name="shield" size={15} /> Correction Express</span><strong>{expressVerification.result.report.status === 'passed' ? 'Vérifiée' : 'À réviser'}</strong></header><h3>{expressVerification.result.report.status === 'passed' ? 'Prêt à appliquer' : expressVerification.result.report.status === 'blocked' ? 'Régression détectée' : 'Preuve incomplète'}</h3><p>{expressVerification.result.report.status === 'passed' ? `${expressVerification.result.report.comparableCells} vues comparées · ${expressVerification.result.report.fixed.length} signal${expressVerification.result.report.fixed.length > 1 ? 's corrigés' : ' corrigé'} · 0 régression.` : expressVerification.result.report.reasons[0] ?? 'La vérification demande une révision manuelle.'}</p>{expressVerification.token ? <button className="button button--primary button--full" type="button" onClick={onApplyExpress} disabled={busy}><Icon name="check" size={14} /> Appliquer la version vérifiée</button> : <button className="button button--secondary button--full" type="button" onClick={onReview} disabled={busy}>Ouvrir la révision</button>}</section>}
         {staging && <div className="staging-summary"><span><i /> Version corrigée prête</span><strong>{staging.changes.length} changement{staging.changes.length > 1 ? 's' : ''} · {staging.changedFiles.length} fichier{staging.changedFiles.length > 1 ? 's' : ''}</strong><button className="text-button" onClick={onClear} disabled={busy}>Supprimer la version préparée</button></div>}
+        {expressPlanEligible && !expressVerification && <button className="button button--secondary button--full inspector-action" type="button" onClick={() => onApplySafe(selectedExpressIds)} disabled={busy || previewBusy}><Icon name="shield" size={14} /> Corriger et vérifier</button>}
         <button className="button button--primary button--full inspector-action" onClick={onReview} disabled={busy || previewBusy || !acceptedCount || !canStage}>{busy ? 'Préparation…' : staging ? 'Ouvrir la révision' : 'Préparer et ouvrir la révision'} <Icon name="arrow" /></button>
       </>}
       {tab === 'theme' && <>{!canStage && <div className="manual-review"><Icon name="info" size={15} /><span>La variante de thème sera disponible après qu’un rendu exploitable aura été détecté.</span></div>}<ThemePanel project={project} runtimeTheme={runtimeTheme} acceptedTarget={themeTarget} previewTarget={previewThemeTarget} proposal={proposalContext?.kind === 'theme' ? proposal : null} busy={previewBusy} disabled={busy || !canStage} onPreview={onPreviewTheme} onAccept={onAcceptProposal} onReject={onRejectProposal} onRemoveAccepted={onRemoveTheme} /></>}

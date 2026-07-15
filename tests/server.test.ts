@@ -49,6 +49,8 @@ test('le runner sert uniquement localhost, injecte le bridge et gère les média
   assert.match(pageBody, /data\.type === 'visual-style-preview'/)
   assert.match(pageBody, /data\.type === 'visual-style-clear'/)
   assert.match(pageBody, /data\.type === 'state-request'/)
+  assert.match(pageBody, /data\.type === 'matrix-scenario'/)
+  assert.match(pageBody, /__responsiverRuntimeErrorsV1/)
   assert.match(pageBody, /const documentId =/)
   assert.match(pageBody, /state\(data\.requestId\)/)
   assert.match(pageBody, /message\('inspector-shortcut'\)/)
