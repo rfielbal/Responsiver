@@ -30,6 +30,8 @@ jobs:
         run: npm run test:native-host
       - name: Tester la session URL dans Electron
         run: xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24" npm run test:e2e:remote
+      - name: Tester la matrice anti-régression dans Electron
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24" npm run test:e2e:matrix
       - name: Construire l’application
         run: npm run build
       - name: Auditer les dépendances de production

@@ -2,7 +2,7 @@
 
 Responsiver est un laboratoire desktop open source pour inspecter la responsivité d’un projet local, d’un localhost ou d’un site public, puis préparer et valider des corrections sans service cloud imposé.
 
-La version 0.6 ajoute l’audit d’URL dans une session Chromium isolée, l’analyse visuelle multi-viewport, un inspecteur intégré, un Atelier visuel, un espace code Monaco, un assistant IA local facultatif via Ollama ou llama.cpp et un compagnon Chrome. Le laboratoire sépare les défauts de rendu des diagnostics de code et propose des parcours courts, réversibles, pour corriger une responsivité sans traverser inutilement tout le workflow d’export.
+La version 0.7 ajoute une matrice reproductible routes × tailles × états, une Correction Express vérifiée avant toute écriture et un traçage borné de la cascade CSS jusqu’au fichier local et à l’emplacement estimé de la déclaration. Elle conserve l’audit d’URL Chromium, l’Atelier visuel, Monaco, l’assistant IA local facultatif et le compagnon Chrome de la version précédente.
 
 ## Trois sources, trois niveaux d’accès
 
@@ -49,6 +49,15 @@ Responsiver ne prétend pas retrouver le code auteur d’un site public à parti
 - Sélection multiple indépendante de l’ouverture du détail : les constats réellement corrigeables sont comparés ensemble, puis validés ou écartés comme un lot. Un point sans transformation fiable reste clairement consultatif et n’entre pas dans une fausse file d’application.
 - Avant / Après contextualisé avant validation, mini-diff pour le code, retrait direct d’un choix déjà validé et accès explicite à la révision combinée.
 - Thème clair ou sombre prévisualisé immédiatement ; une variante existante est activée sans doublon. Une variante absente n’est générée que si les rôles fond/texte et leurs contrastes sont fiables ; images, filtres et accents de marque restent intacts, sinon le moteur refuse prudemment.
+
+### Correction Express, cascade et matrice
+
+- **Correction Express** prépare uniquement des transformations déterministes reliées à une source locale durable, puis compare la source et le candidat sur Mobile, Tablette et Bureau avant de proposer l’écriture.
+- La vérification utilise le même staging que l’application : son empreinte SHA-256, une empreinte bornée de l’arbre source, le rapport et un jeton éphémère à usage unique sont recontrôlés dans le processus principal. Un timeout, une vue tronquée, un nouveau défaut ou une source modifiée bloque l’écriture.
+- Pour les adaptations visuelles bornées, le défaut ciblé doit réellement disparaître de la matrice ; l’absence de nouvelle régression ne suffit pas à produire un faux verdict vert.
+- La page **Matrice** croise automatiquement les routes retenues, les formats 393 × 852, 768 × 1024 et 1440 × 900, puis les états initial et navigation ouverte lorsqu’elle existe. Un worker Chromium isolé est réutilisé pendant un passage, mais son stockage est purgé avant chaque cellule ; un clic restaure la route, le format et l’état reproductible dans le Laboratoire.
+- L’inspecteur sépare **Calculés** et **Origine**. Pour un runner local, il affiche la règle calculée comme prioritaire dans la cascade collectée, les règles écrasées ou inactives, `!important`, spécificité, media queries et fichier avec une ligne estimée ; un clic ouvre Monaco à cet emplacement.
+- Les feuilles cross-origin ou générées restent signalées comme partielles ou en lecture seule. La certification anti-régression est volontairement limitée aux projets locaux durables ; URL, localhost et sorties compilées restent auditables sans promesse d’écriture automatique.
 
 ### Atelier visuel et inspecteur intégré
 
@@ -116,12 +125,13 @@ L’installation est encore manuelle. Le connecteur ne démarre pas Responsiver 
 
 ## Corrections et écritures
 
-Quatre niveaux coexistent afin qu’une correction simple reste rapide sans supprimer les garde-fous :
+Cinq niveaux coexistent afin qu’une correction simple reste rapide sans supprimer les garde-fous :
 
-1. **Parcours court** : constat visuel → Avant/Après → **Appliquer le plan maintenant**. Sans autre choix validé, seule la correction affichée est écrite ; si un plan existe déjà, le bouton annonce et applique explicitement l’ensemble. La route et le viewport sont conservés après réanalyse.
-2. **Workflow groupé sur un projet local** : sélectionner les constats → **Comparer la sélection** → **Valider la correction** → **Préparer et ouvrir la révision** → appliquer ou exporter. Le même parcours réunit défauts visuels, changements de code, thèmes, instructions et ajustements de l’Atelier. Un artefact local compilé peut être comparé et exporté, mais pas appliqué directement. Un localhost lié utilise l’export CSS ou l’espace Code ; une URL publique reste limitée au rapport d’audit.
-3. **Atelier visuel** : **Composer** ou **Inspecter** → **Tester** le vrai site → Avant/Après → **Réviser sans modifier** ou **Appliquer aux fichiers** ; sur un artefact ou localhost lié, **Préparer l’export CSS**.
-4. **Code et assistant** : Source → Overlay Monaco → Preview + Diff → **Appliquer au fichier**.
+1. **Correction Express** : sélectionner une adaptation traçable → **Corriger et vérifier** → matrice source/candidat → **Appliquer la version vérifiée**. Rien n’est écrit avant le dernier bouton et le jeton n’autorise que les octets effectivement contrôlés.
+2. **Parcours court** : constat visuel → Avant/Après → **Appliquer le plan maintenant**. Sans autre choix validé, seule la correction affichée est écrite ; si un plan existe déjà, le bouton annonce et applique explicitement l’ensemble. La route et le viewport sont conservés après réanalyse.
+3. **Workflow groupé sur un projet local** : sélectionner les constats → **Comparer la sélection** → **Valider la correction** → **Préparer et ouvrir la révision** → appliquer ou exporter. Le même parcours réunit défauts visuels, changements de code, thèmes, instructions et ajustements de l’Atelier. Un artefact local compilé peut être comparé et exporté, mais pas appliqué directement. Un localhost lié utilise l’export CSS ou l’espace Code ; une URL publique reste limitée au rapport d’audit.
+4. **Atelier visuel** : **Composer** ou **Inspecter** → **Tester** le vrai site → Avant/Après → **Réviser sans modifier** ou **Appliquer aux fichiers** ; sur un artefact ou localhost lié, **Préparer l’export CSS**.
+5. **Code et assistant** : Source → Overlay Monaco → Preview + Diff → **Appliquer au fichier**.
 
 L’action **Appliquer aux fichiers** est réservée aux sources HTML/CSS locales durables, pas aux URLs, localhost ou artefacts compilés. Tous les chemins et hashes sont validés avant la première substitution ; les fichiers sont remplacés atomiquement, les conflits bloquent le lot entier et la dernière application reste annulable tant que personne n’a remodifié les fichiers. L’annulation restaure aussi les nouveaux fichiers et dossiers créés. La feuille gérée `.responsiver/responsiver.generated.css` est réutilisée au lieu d’accumuler des variantes numérotées, et un nouveau geste sur la même cible remplace son ancien bloc géré.
 
@@ -167,6 +177,7 @@ npm run test:native-host
 npm run test:e2e
 npm run test:e2e:onboarding
 npm run test:e2e:visual
+npm run test:e2e:matrix
 npm run test:e2e:remote
 npm run test:e2e:localhost-link
 npm run build

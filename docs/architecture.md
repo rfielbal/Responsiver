@@ -1,4 +1,4 @@
-# Architecture de Responsiver 0.6
+# Architecture de Responsiver 0.7
 
 ```text
 Renderer React de confiance
@@ -22,6 +22,8 @@ Electron main — ActiveProjectSession
   │     └── audit visuel multi-viewport
   ├── WorkspaceEditor
   │     └── fichiers sûrs + overlays + diff + application atomique
+  ├── MatrixRunner
+  │     └── Chromium isolé + scénarios bornés + comparaison source/candidat
   ├── Local AI adapter
   │     └── Ollama ou llama.cpp sur HTTP loopback uniquement
   ├── Extension inbox
@@ -156,6 +158,14 @@ Le zoom de travail transforme uniquement la représentation native ou le contene
 
 Dans le pipeline interne de préparation, les opérations sont revalidées dans le processus principal. **Réviser sans modifier** construit un aperçu et un diff avec les seules opérations de l’Atelier, sans écrire dans les sources. **Appliquer aux fichiers** reconstruit ce même plan, l’écrit atomiquement, réanalyse le projet et conserve une sauvegarde d’annulation. Un projet local durable reçoit `.responsiver/responsiver.generated.css` et un lien dans les pages concernées. Chaque règle visuelle possède des marqueurs gérés stables : un nouveau geste sur la même cible/propriété/portée remplace le bloc précédent au lieu d’accumuler des déclarations concurrentes. Pour « page actuelle », le transformeur ajoute un attribut `data-responsiver-route` déterministe sur le document et préfixe la règle ; si plusieurs routes dynamiques partagent le même HTML, il refuse cette portée. Un artefact compilé ou localhost lié expose seulement **Préparer l’export CSS**, à intégrer aux sources auteur. Une URL publique n’accède jamais à l’Atelier.
 
+## Cascade CSS, matrice et Correction Express
+
+Le runner local trace la cascade seulement après une sélection explicite. La collecte CSSOM est bornée à une liste fermée de propriétés, de feuilles et de déclarations. Elle calcule un candidat prioritaire dans le sous-ensemble collecté et distingue règles écrasées, conditions inactives, spécificité, `!important` et ordre source. Ce résultat reste une aide ciblée, pas une réimplémentation complète des DevTools pour tous les cas de `@layer`, d’héritage ou de sélecteurs complexes. Les feuilles de même origine sont rapprochées de leur fichier relatif et d’une ligne estimée à partir du texte source ; une feuille cross-origin, un style runtime ou une sortie générée produit une trace partielle et non une fausse source éditable. Le renderer assainit encore le payload avant affichage. Monaco reçoit cet emplacement estimé et le révèle après son layout effectif.
+
+La matrice est exécutée dans le processus principal, jamais déclarée réussie par le renderer. Un worker Chromium caché et sandboxé est créé dans une partition éphémère pour un passage, puis réutilisé afin d’éviter le coût d’un nouveau processus par cellule. Avant chaque cellule, son stockage est purgé ; la page est rechargée et rejoue une route, un profil canonique et un état issu d’une DSL fermée (`initial`, `navigation-open`, `keyboard-focus`). Les requêtes capables d’écrire sont bloquées. Animations, transitions et caret sont stabilisés ; polices, images et deux frames sont attendues dans une limite de temps stricte. Les identités de défaut ignorent les identifiants volatils et conservent route, appareil, état, règle et sélecteur normalisé. À la fin du passage, le worker est détruit et le stockage éphémère est de nouveau vidé.
+
+Correction Express reconstruit le staging puis compare exactement le serveur source et le serveur candidat. Les adaptations visuelles bornées exigent en plus la disparition d’un signal runtime correspondant au constat ciblé. Un rapport vert crée dans `ActiveProjectSession` un jeton à usage unique lié au digest exact des overrides, aux hashes des fichiers écrits et à une empreinte bornée de l’arbre source. Juste avant l’application, le processus principal contrôle jeton, expiration, digest, empreinte du projet et préflight atomique. Toute modification du workspace, du staging, du projet ou des sources invalide cette preuve. La certification est limitée aux projets locaux durables ; URL, localhost et artefacts restent auditables sans écriture Express.
+
 ## Proposition déterministe et version corrigée
 
 Le workflow de correction conserve quatre étapes visibles :
@@ -234,4 +244,4 @@ Les rapports et exports ne sont créés qu’après choix explicite d’une dest
 
 Responsiver ne lance aucune commande issue d’un projet. Il ne démarre pas PHP, Symfony, MySQL, Docker Compose, un build frontend ou des migrations.
 
-Un projet dynamique fonctionne lorsque l’utilisateur démarre lui-même son environnement puis ouvre le localhost. Responsiver agit alors comme un navigateur d’audit. L’association facultative du dossier source active l’éditeur, sans donner accès à la base. L’orchestration Docker automatique reste hors du périmètre de la version 0.6.
+Un projet dynamique fonctionne lorsque l’utilisateur démarre lui-même son environnement puis ouvre le localhost. Responsiver agit alors comme un navigateur d’audit. L’association facultative du dossier source active l’éditeur, sans donner accès à la base. L’orchestration Docker automatique reste hors du périmètre de la version 0.7.

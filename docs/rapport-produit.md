@@ -1,16 +1,16 @@
-# Rapport produit — Responsiver 0.6
+# Rapport produit — Responsiver 0.7
 
 ## Résultat
 
-Responsiver 0.6 élargit le laboratoire local à trois usages cohérents : travailler sur un projet local, auditer une URL publique en lecture seule et inspecter un localhost éventuellement lié à ses sources.
+Responsiver 0.7 transforme le laboratoire en chaîne de correction vérifiable : comprendre la priorité calculée dans la cascade CSS collectée, couvrir automatiquement les vues importantes et appliquer seulement la version exacte qui vient de passer l’anti-régression.
 
-La version ajoute un rendu distant Chromium réellement navigable, un audit visuel sur cinq largeurs, un inspecteur F12 intégré, un Atelier visuel, un espace Monaco avec overlays et application explicite, un assistant facultatif connecté uniquement à Ollama ou llama.cpp en local, ainsi qu’un compagnon Chrome minimal. Le laboratoire distingue le rendu du code, consolide les preuves statiques/runtime et ajoute des parcours directs réversibles pour les corrections locales simples.
+La version ajoute une matrice Chromium isolée, un comparateur de signaux stables, un jeton d’application lié au staging exact et un traçage CSSOM jusqu’à un emplacement source estimé dans Monaco. Elle conserve le rendu distant navigable, l’Atelier visuel, l’espace Code, l’assistant local et le compagnon Chrome. Le laboratoire distingue le rendu du code, consolide les preuves statiques/runtime et garde les parcours avancés lorsque la preuve Express est incomplète.
 
 La direction UI conserve sa propre grammaire — rail graphite, papier minéral, accent vermillon, densité d’outil professionnel et panneaux maître/détail — en s’inspirant des principes opérationnels observés dans [Agency Agents](https://github.com/msitarzewski/agency-agents), sans reprendre son code, ses assets ou son identité.
 
 ## Traçabilité des demandes
 
-| Demande | Livraison 0.6 | Limite ou preuve |
+| Demande | Livraison 0.7 | Limite ou preuve |
 | --- | --- | --- |
 | Déposer un fichier ou dossier | Sélecteurs, chemin et glisser-déposer | Pipeline local testé |
 | Comprendre l’application au premier lancement | Visite illustrée en six pages, progression libre et parcours clavier | Masquage local facultatif et relance permanente par `?` |
@@ -30,6 +30,9 @@ La direction UI conserve sa propre grammaire — rail graphite, papier minéral,
 | Ouvrir un constat dans son contexte | Route exacte, viewport, sélecteur, scroll et contour temporaire | L’interface signale si le sélecteur n’existe plus |
 | Conserver l’audit URL | Agrégation de session, synthèse copiable et rapport JSON | Aucune persistance sans export explicite |
 | Voir l’avant/après | **Version actuelle** et **Correctif temporaire** séparés | Projets locaux déterministes |
+| Corriger vite sans sacrifier la sûreté | **Correction Express** avec staging, matrice, preuve du défaut supprimé et jeton à usage unique | Projets locaux durables et transformations traçables uniquement |
+| Couvrir plusieurs pages et états | Matrice routes × Mobile/Tablette/Bureau × état initial/navigation | Scénarios fermés, cellules tronquées ou expirées jamais validées |
+| Comprendre la cascade | Onglets **Calculés / Origine**, priorité calculée, règles écrasées, conditions et lien Monaco vers une ligne estimée | Source locale de même origine ; cas complexes et feuilles externes signalés partiels |
 | Inspecter comme avec F12 | Sélection DOM intégrée dans Laboratoire et Code, sans ouvrir les DevTools natifs | Photographie bornée ; aucune valeur de formulaire, HTML ou stockage |
 | Modifier visuellement | Atelier sémantique : cible, propriété, portée écran/page, undo/redo et preview CSS | Projet local durable ou export CSS avec sources associées |
 | Travailler sur une seule taille | Portées toutes tailles/mobile/tablette/personnalisée, synchronisées avec le viewport | Media queries explicites et visibles avant application |
@@ -160,17 +163,18 @@ Les paquets restent non signés. Une diffusion sans avertissements système et u
 - Le compagnon Chrome ne s’installe ni ne démarre l’app automatiquement ; Windows attend encore son host natif.
 - La signature et la notarisation restent hors du paquet actuel.
 
-## Validation réalisée pour la livraison 0.6
+## Validation réalisée pour la livraison 0.7
 
 Contrôles reproductibles exécutés sur l’état consolidé :
 
 - `npm run typecheck` : réussi ;
-- `npm test` : 126 tests applicatifs réussis ;
+- `npm test` : suite applicative complète réussie ;
 - `npm run test:native-host` : 17 tests du protocole Chrome réussis ;
 - `npm run test:e2e:visual` : F12 dans l’iframe, sélection réelle, application route-scopée et rendu après réanalyse réussis ;
 - `npm run test:e2e:onboarding` : premier lancement, pagination, préférence locale, relance par le rail, focus et rendu mobile vérifiés ;
 - `npm run test:e2e:remote` : redirection, audit mobile et formulaire localhost réussis ;
 - `npm run test:e2e` : parcours Electron complet, catégories, inspecteur, Atelier, avant/après, application réelle, conservation de route et annulation réussis ;
+- `npm run test:e2e:matrix` : cascade vers Monaco, matrice source/candidat, rejet d’une preuve périmée, application vérifiée et annulation réussis ;
 - `npm run test:e2e:localhost-link` : association et remplacement à chaud sans écriture implicite réussis ;
 - `npm run build` : réussi ;
 - `npm run package:dir` : paquet macOS arm64 construit ;
