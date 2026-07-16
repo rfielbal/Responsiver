@@ -18,10 +18,11 @@ Responsiver ne prétend pas retrouver le code auteur d’un site public à parti
 
 ### Prise en main guidée
 
-- Visite en six pages au premier lancement : sources, Appareil/Studio, Atelier/Code, distinction Studio/Matrice, révision et application.
+- Visite en six chapitres au premier lancement : parcours, sources, Laboratoire, diagnostic/Matrice, Atelier/Code, puis révision et livraison.
 - Illustrations intégrées, progression cliquable, navigation Précédent/Continuer et commandes clavier gauche/droite.
 - Option **Ne plus afficher au démarrage** persistée uniquement dans le stockage local de l’application.
 - Relance permanente depuis le bouton `?` du menu, y compris lorsque l’affichage automatique a été désactivé.
+- Guide `?` contextuel sur les sept pages du menu : trois étapes au plus, limites adaptées à la source et accès direct au chapitre complet correspondant.
 - Dialogue accessible : arrière-plan neutralisé, focus contenu dans la visite, fermeture par `Échap` et restitution du focus au raccourci d’aide.
 
 ### Projets locaux
@@ -42,10 +43,12 @@ Responsiver ne prétend pas retrouver le code auteur d’un site public à parti
 - Bibliothèque locale de plus de 60 profils : téléphones, tablettes, pliables, portables et bureaux. La recherche, les favoris, les formats personnalisés et les suites personnelles restent sur la machine.
 - Quatre suites prêtes à l’emploi couvrent les essentiels, le mobile, le multi-plateforme et les postes de travail. Une sélection de un à cinq formats peut être enregistrée comme suite.
 - Un écran **pilote** conduit la synchronisation. Chaque autre écran peut rester lié ou être isolé avec sa propre route.
+- Dans le Studio, le panneau de constats est replié par défaut pour privilégier la planche ; son état reste indépendant de celui du mode Appareil et peut être mémorisé.
 - La navigation et le défilement sont activables séparément. Le scroll privilégie un repère sémantique visible dans le conteneur dominant, puis utilise sa progression en repli — page entière ou zone `overflow` d’une SPA — afin de rester pertinent sur des hauteurs différentes.
+- Une ancre HTML ordinaire synchronise la position sans recréer les vues ni relancer l’audit. Seuls les fragments de route `#/…` ou `#!/…` sont traités comme une nouvelle page logique.
 - Sur le runner local, la synchronisation d’interactions est désactivée par défaut et limitée aux commandes explicitement sûres : toggles, résumés, sélections et quelques champs non sensibles. Liens, soumissions, mots de passe, fichiers, coordonnées, actions destructives et éléments ambigus ne sont jamais rejoués.
 - Une image locale peut être superposée comme maquette avec une opacité réglable. **Capturer** enregistre en PNG la planche locale actuellement visible après confirmation du chemin ; l’image de référence et la capture ne sont pas téléversées.
-- Sur une URL publique ou un localhost, Responsiver crée jusqu’à cinq vues Chromium natives isolées — une principale et quatre supplémentaires — avec navigation et défilement synchronisables depuis le pilote. Les clics et formulaires restent propres à chaque écran ; la maquette et la capture groupée sont indisponibles afin de ne pas masquer ou mélanger ces vues natives.
+- Sur une URL publique ou un localhost, Responsiver crée jusqu’à cinq vues Chromium natives isolées — une principale et quatre supplémentaires. La navigation est propagée comme une intention idempotente avec jusqu’à quatre reprises bornées pendant l’initialisation ; le scroll est contrôlé toutes les 240 ms, privilégie le document puis une zone interne dominante et tolère les faibles écarts de rendu. Les clics et formulaires restent propres à chaque écran ; la maquette et la capture groupée sont indisponibles.
 
 ### Appareils et validation
 
@@ -67,7 +70,7 @@ Responsiver ne prétend pas retrouver le code auteur d’un site public à parti
 - **Correction Express** prépare uniquement des transformations déterministes reliées à une source locale durable, puis compare la source et le candidat sur Mobile, Tablette et Bureau avant de proposer l’écriture.
 - La vérification utilise le même staging que l’application : son empreinte SHA-256, une empreinte bornée de l’arbre source, le rapport et un jeton éphémère à usage unique sont recontrôlés dans le processus principal. Un timeout, une vue tronquée, un nouveau défaut ou une source modifiée bloque l’écriture.
 - Pour les adaptations visuelles bornées, le défaut ciblé doit réellement disparaître de la matrice ; l’absence de nouvelle régression ne suffit pas à produire un faux verdict vert.
-- La page **Matrice** croise automatiquement les routes retenues, les formats 393 × 852, 768 × 1024 et 1440 × 900, puis les états initial et navigation ouverte lorsqu’elle existe. Un worker Chromium isolé est réutilisé pendant un passage, mais son stockage est purgé avant chaque cellule ; un clic restaure la route, le format et l’état reproductible dans le Laboratoire.
+- La page **Matrice** croise automatiquement les routes retenues, les formats 393 × 852, 768 × 1024 et 1440 × 900, puis les états initial et navigation ouverte lorsqu’elle existe. Son en-tête compact privilégie l’action utile, range les actions secondaires et replie les détails d’un verdict validé. Un worker Chromium isolé est réutilisé pendant un passage, mais son stockage est purgé avant chaque cellule ; un clic restaure la route, le format et l’état reproductible dans le Laboratoire.
 - L’inspecteur sépare **Calculés** et **Origine**. Pour un runner local, il affiche la règle calculée comme prioritaire dans la cascade collectée, les règles écrasées ou inactives, `!important`, spécificité, media queries et fichier avec une ligne estimée ; un clic ouvre Monaco à cet emplacement.
 - Les feuilles cross-origin ou générées restent signalées comme partielles ou en lecture seule. La certification anti-régression est volontairement limitée aux projets locaux durables ; URL, localhost et sorties compilées restent auditables sans promesse d’écriture automatique.
 
@@ -85,7 +88,7 @@ Le **Studio** et la **Matrice** n’ont pas le même rôle. Le Studio est un esp
 - Sélection multiple explicitement confirmée lorsqu’un sélecteur touche plusieurs éléments ; Shadow DOM et frames tierces restent inspectables mais non persistables.
 - Prévisualisation CSS éphémère, undo/redo et avant/après. **Réviser sans modifier** ouvre l’aperçu et le diff en gardant les fichiers intacts ; **Appliquer aux fichiers** écrit les ajustements, réanalyse le projet et reste annulable. Un artefact ou localhost lié propose seulement **Préparer l’export CSS**.
 - Plein écran propre à l’Atelier : le canvas et le panneau Inspecter restent ensemble, la route et le viewport sont conservés, `Échap` ferme la vue et rend le focus au bouton d’origine.
-- Espaces Code et Atelier volontairement compacts : le projet actif reste visible, les grands titres sont remplacés par un guide `?` contextuel et la surface est réservée au rendu, au code et à l’inspection.
+- Espaces Code et Atelier volontairement compacts : le projet actif reste visible et la surface est réservée au rendu, au code et à l’inspection. Le même guide `?` contextuel est disponible sur les sept pages.
 
 Une URL publique peut être inspectée dans le Laboratoire, mais l’Atelier reste désactivé sans sources. Sur un localhost lié, les réglages CSS sont visibles immédiatement puis préparés comme feuille à intégrer au framework ; le mode Composer direct reste désactivé tant que la `WebContentsView` distante ne dispose pas du même pont privé que le runner local. Responsiver ne prétend pas retrouver automatiquement le composant Twig, JSX, Vue ou Tailwind auteur.
 
@@ -97,7 +100,7 @@ Une URL publique peut être inspectée dans le Laboratoire, mais l’Atelier res
 - Émulation Chromium des dimensions, du DPR, du tactile et du mode mobile.
 - Audit automatique de cinq largeurs : 360, 390, 768, 1024 et 1440 CSS px.
 - Le Studio distant affiche jusqu’à cinq `WebContentsView` interactives et isolées. Les vues liées suivent la navigation et le défilement du pilote ; une vue isolée garde sa route et sa position. Clics, champs et formulaires ne sont pas dupliqués entre les sessions.
-- Chaque nouvelle route réellement visitée est auditée après son chargement ; les constats restent cumulés route par route sans exploration autonome des liens.
+- Chaque nouvelle route réellement visitée est auditée après son chargement ; une ancre ordinaire reste rattachée au même document et n’ouvre pas un nouvel audit. Les constats restent cumulés route par route sans exploration autonome des liens.
 - Détection objective des débordements, contenus masqués, textes tronqués, navigations illisibles ou mal réparties, chevauchements, densité incohérente, typographie disproportionnée, groupes tactiles ambigus, éléments fixes obstructifs, images absentes ou déformées, contrastes faibles et erreurs JavaScript.
 - Un même défaut DOM mesuré à plusieurs tailles est regroupé avec ses viewports et sa preuve la plus sévère ; les familles bruyantes sont plafonnées.
 - Clic sur un constat distant pour restaurer sa route exacte, son viewport et mettre en évidence l’élément s’il existe encore.
