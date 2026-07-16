@@ -2,7 +2,53 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { REMOTE_INSPECTOR_LIMITS, sanitizeRemoteInspectorSelection } from '../src/main/remote-session.ts'
+import { MAX_REMOTE_BROWSER_VIEWS, REMOTE_INSPECTOR_LIMITS, REMOTE_SCROLL_LIMITS, normalizeRemoteViewId, sanitizeRemoteInspectorSelection, sanitizeRemoteScrollSnapshot } from '../src/main/remote-session.ts'
+
+test('les identifiants du Studio distant sont bornés et la vue historique reste implicite', () => {
+  assert.equal(MAX_REMOTE_BROWSER_VIEWS, 5)
+  assert.equal(normalizeRemoteViewId(undefined), null)
+  assert.equal(normalizeRemoteViewId('studio-4.tablet'), 'studio-4.tablet')
+  assert.throws(() => normalizeRemoteViewId('vue avec espaces'), /invalide/)
+  assert.throws(() => normalizeRemoteViewId(`v${'x'.repeat(64)}`), /invalide/)
+})
+
+test('le snapshot de défilement ne transporte que progression et repère sémantique bornés', () => {
+  const snapshot = sanitizeRemoteScrollSnapshot({
+    version: 1,
+    xProgress: 1.4,
+    yProgress: 0.31415926535,
+    anchor: { kind: 'section', index: 12, viewportOffset: -8, text: 'secret', selector: '#privé' },
+    url: 'https://secret.example/compte',
+    content: 'information à ne jamais relayer'
+  })
+  assert.deepEqual(snapshot, {
+    version: 1,
+    xProgress: 1,
+    yProgress: 0.314159,
+    anchor: { kind: 'section', index: 12, viewportOffset: -REMOTE_SCROLL_LIMITS.maxViewportOffset }
+  })
+  assert.equal(sanitizeRemoteScrollSnapshot({ version: 1, xProgress: '0.5', yProgress: 0, anchor: null }), null)
+  assert.equal(sanitizeRemoteScrollSnapshot({ version: 1, xProgress: 0, yProgress: 0, anchor: { kind: 'form', index: 0, viewportOffset: 0 } }), null)
+  assert.equal(sanitizeRemoteScrollSnapshot({ version: 1, xProgress: 0, yProgress: 0, anchor: { kind: 'main', index: REMOTE_SCROLL_LIMITS.maxAnchorIndex, viewportOffset: 0 } }), null)
+})
+
+test('le snapshot distant identifie un conteneur interne uniquement par un rang borné', () => {
+  assert.deepEqual(sanitizeRemoteScrollSnapshot({
+    version: 1,
+    xProgress: 0,
+    yProgress: 0.75,
+    container: { kind: 'scrollable', index: 3, selector: '#secret', text: 'privé' },
+    anchor: null
+  }), {
+    version: 1,
+    xProgress: 0,
+    yProgress: 0.75,
+    container: { kind: 'scrollable', index: 3 },
+    anchor: null
+  })
+  assert.equal(sanitizeRemoteScrollSnapshot({ version: 1, xProgress: 0, yProgress: 0, container: { kind: 'selector', index: 0 }, anchor: null }), null)
+  assert.equal(sanitizeRemoteScrollSnapshot({ version: 1, xProgress: 0, yProgress: 0, container: { kind: 'scrollable', index: REMOTE_SCROLL_LIMITS.maxContainerIndex }, anchor: null }), null)
+})
 
 test('la sélection CDP est bornée avant de rejoindre le renderer', () => {
   const selection = sanitizeRemoteInspectorSelection({
@@ -83,4 +129,22 @@ test('le moteur utilise le mode inspecteur CDP sans DevTools ni collecte de form
   assert.match(runtime, /excludesEditableText/)
   assert.match(runtime, /insideFrame: window\.top !== window/)
   assert.match(source, /mode === 'localhost' && Boolean\(this\.linkedSourceRoot\)/)
+  assert.match(source, /if \(key === 'escape'\)/)
+  assert.match(source, /this\.callbacks\.onEscape\?\.\(\)/)
+})
+
+test('le pont de scroll distant ne collecte ni texte, ni sélecteur applicatif, ni formulaire', async () => {
+  const path = fileURLToPath(new URL('../src/main/remote-session.ts', import.meta.url))
+  const source = await readFile(path, 'utf8')
+  const runtime = source.match(/const remoteScrollSnapshotFunction = `([\s\S]*?)`\n\nfunction cleanInspectorText/)?.[1]
+  assert.ok(runtime)
+  assert.match(runtime, /xProgress/)
+  assert.match(runtime, /yProgress/)
+  assert.match(runtime, /viewportOffset/)
+  assert.match(runtime, /container: \{ kind: 'scrollable', index: selected\.index \}/)
+  assert.match(runtime, /createTreeWalker/)
+  assert.match(runtime, /nodes\.length < \$\{REMOTE_SCROLL_LIMITS\.maxScrollableNodes\}/)
+  assert.doesNotMatch(runtime, /querySelectorAll\('body \*'\)/)
+  assert.doesNotMatch(runtime, /innerText|textContent|innerHTML|outerHTML|\.value\b|localStorage|sessionStorage|indexedDB/)
+  assert.doesNotMatch(runtime, /\.id\b|classList|CSS\.escape/)
 })

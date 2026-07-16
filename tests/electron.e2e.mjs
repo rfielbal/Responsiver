@@ -560,10 +560,11 @@ try {
   console.log('E2E · version préparée invalidée après retrait puis reconstruite')
 
   await openLab()
-  await page.getByRole('button', { name: '3 écrans', exact: true }).click()
-  await page.waitForFunction(() => document.querySelectorAll('.comparison-grid iframe').length === 3)
-  assert.equal(await page.locator('.comparison-grid iframe').count(), 3)
-  console.log('E2E · comparaison simultanée sur trois appareils vérifiée')
+  await page.getByRole('button', { name: /Studio/ }).click()
+  await page.waitForFunction(() => document.querySelectorAll('.studio-wall .studio-screen iframe').length === 3)
+  assert.equal(await page.locator('.studio-wall .studio-screen iframe').count(), 3)
+  assert.equal(await page.locator('.studio-screen.is-pilot').count(), 1)
+  console.log('E2E · Studio simultané sur la suite essentielle vérifié')
 
   await page.getByRole('button', { name: 'Appareil', exact: true }).click()
   const stagingOriginBeforeInstruction = new URL(await page.locator('.stage-canvas iframe').first().getAttribute('src')).origin
@@ -770,7 +771,7 @@ try {
   for (const [file, source] of sourcesBefore) assert.equal(await readFile(join(demoRoot, file), 'utf8'), source, `${file} ne doit pas être modifié.`)
   assert.ok(pageErrors.includes('Erreur de montage contrôlée'))
   assert.deepEqual(pageErrors.filter((message) => message !== 'Erreur de montage contrôlée'), [])
-  process.stdout.write('E2E Electron v0.7 : import qualifié, smoke-test runtime, historique, navigation, propositions, thème, redimensionnement, staging, révision et export — OK\n')
+  process.stdout.write('E2E Electron v0.8 : import qualifié, smoke-test runtime, historique, navigation, propositions, thème, redimensionnement, staging, révision et export — OK\n')
 } finally {
   await application.close()
   await rm(testStateRoot, { recursive: true, force: true })

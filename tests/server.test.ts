@@ -4,7 +4,13 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { LOCAL_RUNTIME_AUDIT_LIMITS, LOCAL_VISUAL_BRIDGE_LIMITS, startProjectServer } from '../src/main/project-server.ts'
+import {
+  LOCAL_PREVIEW_SYNC_LIMITS,
+  LOCAL_RUNTIME_AUDIT_LIMITS,
+  LOCAL_VISUAL_BRIDGE_LIMITS,
+  previewSyncInteractionKind,
+  startProjectServer
+} from '../src/main/project-server.ts'
 
 function requestWithHost(origin: string, path: string, host: string, method = 'GET'): Promise<{ status: number; body: string }> {
   const url = new URL(path, origin)
@@ -50,6 +56,30 @@ test('le runner sert uniquement localhost, injecte le bridge et gère les média
   assert.match(pageBody, /data\.type === 'visual-style-clear'/)
   assert.match(pageBody, /data\.type === 'state-request'/)
   assert.match(pageBody, /data\.type === 'matrix-scenario'/)
+  assert.match(pageBody, /message\('sync-scroll'/)
+  assert.match(pageBody, /message\('sync-interaction'/)
+  assert.match(pageBody, /data\.type === 'sync-apply-scroll'/)
+  assert.match(pageBody, /data\.type === 'sync-apply-interaction'/)
+  assert.match(pageBody, /message\('sync-apply-result'/)
+  assert.match(pageBody, /anchor: container \|\| syncAnchor\(\)/)
+  assert.match(pageBody, /progress: \{ x: syncProgress/)
+  assert.match(pageBody, /SYNC_SCROLL_CONTAINER_PREFIX = '@responsiver-scroll:'/)
+  assert.match(pageBody, /syncPendingScroller instanceof HTMLElement/)
+  assert.match(pageBody, /syncContainerLocatorFor\(scroller\)/)
+  assert.match(pageBody, /syncResolveContainer\(data\.anchor\)/)
+  assert.match(pageBody, /data\.route !== syncRoute\(\)/)
+  assert.match(pageBody, /syncRememberedEvents\.has\(data\.eventId\)/)
+  assert.match(pageBody, /performance\.now\(\) < syncApplyScrollUntil/)
+  assert.match(pageBody, /!event\.isTrusted \|\| syncInteractionReplayDepth/)
+  assert.match(pageBody, /element\.closest\('\[contenteditable\], \[data-responsiver-sensitive\]'/)
+  assert.match(pageBody, /data-responsiver-sync-safe/)
+  assert.match(pageBody, /\['submit', 'reset', 'image', 'file', 'password', 'hidden', 'email', 'tel'\]/)
+  assert.match(pageBody, /tag === 'a'/)
+  assert.match(pageBody, /SYNC_DESTRUCTIVE_PATTERN\.test\(semantic\)/)
+  assert.match(pageBody, /document\.addEventListener\('submit'/)
+  assert.match(pageBody, /event\.preventDefault\(\)/)
+  assert.match(pageBody, /selectedIndices/)
+  assert.doesNotMatch(pageBody, /target\.files|\.files\[|new FormData/)
   assert.match(pageBody, /__responsiverRuntimeErrorsV1/)
   assert.match(pageBody, /const documentId =/)
   assert.match(pageBody, /state\(data\.requestId\)/)
@@ -147,6 +177,14 @@ test('le runner sert uniquement localhost, injecte le bridge et gère les média
   assert.match(pageBody, new RegExp('const VISUAL_MAX_SELECTOR_LENGTH = ' + LOCAL_VISUAL_BRIDGE_LIMITS.maxSelectorLength))
   assert.match(pageBody, new RegExp('const VISUAL_MAX_TEXT_LENGTH = ' + LOCAL_VISUAL_BRIDGE_LIMITS.maxTextLength))
   assert.match(pageBody, new RegExp('const VISUAL_MAX_OCCURRENCE_SCAN = ' + LOCAL_VISUAL_BRIDGE_LIMITS.maxOccurrenceScan))
+  assert.match(pageBody, new RegExp('const SYNC_MAX_SELECTOR_LENGTH = ' + LOCAL_PREVIEW_SYNC_LIMITS.maxSelectorLength))
+  assert.match(pageBody, new RegExp('const SYNC_MAX_ROUTE_LENGTH = ' + LOCAL_PREVIEW_SYNC_LIMITS.maxRouteLength))
+  assert.match(pageBody, new RegExp('const SYNC_MAX_EVENT_ID_LENGTH = ' + LOCAL_PREVIEW_SYNC_LIMITS.maxEventIdLength))
+  assert.match(pageBody, new RegExp('const SYNC_MAX_VALUE_LENGTH = ' + LOCAL_PREVIEW_SYNC_LIMITS.maxValueLength))
+  assert.match(pageBody, new RegExp('const SYNC_MAX_SELECTED_INDICES = ' + LOCAL_PREVIEW_SYNC_LIMITS.maxSelectedIndices))
+  assert.match(pageBody, new RegExp('const SYNC_MAX_REMEMBERED_EVENTS = ' + LOCAL_PREVIEW_SYNC_LIMITS.maxRememberedEvents))
+  assert.match(pageBody, new RegExp('const SYNC_MAX_INTERACTIONS_PER_SECOND = ' + LOCAL_PREVIEW_SYNC_LIMITS.maxInteractionsPerSecond))
+  assert.match(pageBody, new RegExp('const SYNC_SCROLL_THROTTLE_MS = ' + LOCAL_PREVIEW_SYNC_LIMITS.scrollThrottleMs))
   const bridgeSource = pageBody.match(/<script data-responsiver-bridge>([\s\S]*?)<\/script>/)?.[1]
   assert.ok(bridgeSource)
   assert.doesNotThrow(() => new Function(bridgeSource))
@@ -166,6 +204,29 @@ test('le runner sert uniquement localhost, injecte le bridge et gère les média
   assert.match(await (await fetch(`${server.origin}/.responsiver/responsiver.generated.css`)).text(), /green/)
   assert.equal((await fetch(`${server.origin}/.responsiver/private.css`)).status, 404)
   assert.equal((await fetch(`${server.origin}/.responsiver/`)).status, 404)
+})
+
+test('la politique de synchronisation refuse les données et actions sensibles', () => {
+  assert.equal(previewSyncInteractionKind({ tag: 'input', type: 'password', explicitSafe: true }), 'blocked')
+  assert.equal(previewSyncInteractionKind({ tag: 'input', type: 'file', explicitSafe: true }), 'blocked')
+  assert.equal(previewSyncInteractionKind({ tag: 'input', type: 'email', explicitSafe: true }), 'blocked')
+  assert.equal(previewSyncInteractionKind({ tag: 'input', type: 'text', semanticText: 'Jeton API', explicitSafe: true }), 'blocked')
+  assert.equal(previewSyncInteractionKind({ tag: 'button', type: 'button', semanticText: 'Supprimer le projet', toggleSemantic: true }), 'blocked')
+  assert.equal(previewSyncInteractionKind({ tag: 'button', type: 'submit', semanticText: 'Continuer', explicitSafe: true }), 'blocked')
+  assert.equal(previewSyncInteractionKind({ tag: 'a', semanticText: 'Navigation externe', toggleSemantic: true, explicitSafe: true }), 'blocked')
+  assert.equal(previewSyncInteractionKind({ tag: 'input', type: 'text', semanticText: 'Recherche', explicitSafe: false }), 'blocked')
+})
+
+test('la politique de synchronisation autorise seulement les interactions réversibles et explicites', () => {
+  assert.equal(previewSyncInteractionKind({ tag: 'summary', semanticText: 'Détails' }), 'activate')
+  assert.equal(previewSyncInteractionKind({ tag: 'button', type: 'button', semanticText: 'Ouvrir le menu', toggleSemantic: true, formBound: true }), 'activate')
+  assert.equal(previewSyncInteractionKind({ tag: 'input', type: 'checkbox', semanticText: 'Afficher les repères' }), 'checked')
+  assert.equal(previewSyncInteractionKind({ tag: 'input', type: 'checkbox', semanticText: 'Option', formBound: true }), 'blocked')
+  assert.equal(previewSyncInteractionKind({ tag: 'input', type: 'checkbox', semanticText: 'Option', formBound: true, explicitSafe: true }), 'checked')
+  assert.equal(previewSyncInteractionKind({ tag: 'select', semanticText: 'Disposition' }), 'selection')
+  assert.equal(previewSyncInteractionKind({ tag: 'input', type: 'range', semanticText: 'Zoom' }), 'value')
+  assert.equal(previewSyncInteractionKind({ tag: 'input', type: 'search', semanticText: 'Recherche', explicitSafe: true }), 'value')
+  assert.equal(previewSyncInteractionKind({ tag: 'input', semanticText: 'Recherche', explicitSafe: true }), 'value')
 })
 
 test('un serveur staged privilégie ses fichiers virtuels', async (context) => {

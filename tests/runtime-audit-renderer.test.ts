@@ -2,9 +2,45 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import type { RuntimeAudit, RuntimeAuditFinding } from '../src/shared/contracts.ts'
-import { consolidatedRuntimeIssues, sanitizeRuntimeAudit } from '../src/renderer/src/App.tsx'
+import { consolidatedRuntimeIssues, sanitizePreviewSyncEvent, sanitizeRuntimeAudit } from '../src/renderer/src/App.tsx'
 
 const device = { id: 'test', family: 'smartphone' as const, name: 'Test mobile', width: 390, height: 844 }
+
+test('borne les messages de synchronisation avant de les relayer aux autres écrans', () => {
+  assert.deepEqual(sanitizePreviewSyncEvent({
+    channel: 'responsiver-preview',
+    protocol: 1,
+    type: 'sync-scroll',
+    eventId: 'doc-a-1',
+    documentId: 'doc-a',
+    route: '/index.html',
+    anchor: { selector: '#collection', occurrence: 0, offset: 42.25 },
+    progress: { x: 0, y: .625 }
+  }), {
+    protocol: 1,
+    type: 'sync-scroll',
+    eventId: 'doc-a-1',
+    documentId: 'doc-a',
+    route: '/index.html',
+    anchor: { selector: '#collection', occurrence: 0, offset: 42.25 },
+    progress: { x: 0, y: .625 }
+  })
+
+  assert.equal(sanitizePreviewSyncEvent({ protocol: 2, type: 'sync-scroll' }), null)
+  assert.equal(sanitizePreviewSyncEvent({ protocol: 1, type: 'sync-scroll', eventId: 'x', documentId: 'y', route: '/', progress: { x: 0, y: 2 } }), null)
+  assert.equal(sanitizePreviewSyncEvent({ protocol: 1, type: 'sync-interaction', eventId: 'x', documentId: 'y', route: '/', target: { selector: '#secret\u0000', occurrence: 0 }, action: 'value', value: 'x' }), null)
+  assert.equal(sanitizePreviewSyncEvent({ protocol: 1, type: 'sync-interaction', eventId: 'x', documentId: 'y', route: '/', target: { selector: '#search', occurrence: 0 }, action: 'value', value: 'x'.repeat(513) }), null)
+  assert.deepEqual(sanitizePreviewSyncEvent({ protocol: 1, type: 'sync-interaction', eventId: 'x', documentId: 'y', route: '/', target: { selector: '#search', occurrence: 0 }, action: 'value', value: '' }), {
+    protocol: 1,
+    type: 'sync-interaction',
+    eventId: 'x',
+    documentId: 'y',
+    route: '/',
+    target: { selector: '#search', occurrence: 0 },
+    action: 'value',
+    value: ''
+  })
+})
 
 test('refuse un faux message legacy ou incomplet sans lever d’erreur', () => {
   assert.equal(sanitizeRuntimeAudit({ overflowCount: 1 }, device), null)
