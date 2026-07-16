@@ -41,14 +41,15 @@ const steps: TourStep[] = [
   },
   {
     id: 'laboratory',
-    chapter: 'Diagnostiquer',
+    chapter: 'Tester les écrans',
     eyebrow: 'Le Laboratoire',
-    title: 'Repérez ce qui casse vraiment, écran par écran.',
-    summary: 'Naviguez dans le vrai site, changez d’appareil ou redimensionnez librement la preview. Les constats visuels restent séparés des remarques de code.',
+    title: 'Un écran précis, ou une planche complète.',
+    summary: 'Appareil sert à examiner une vue en détail. Studio affiche de un à cinq écrans en même temps, pour un projet local, une URL ou un localhost, sans remplacer la vérification automatique.',
     points: [
-      { title: 'Plusieurs pages', detail: 'Testez la navigation et les états réels du projet.' },
-      { title: 'Ciblage direct', detail: 'Un constat vous ramène à l’élément concerné.' },
-      { title: 'Avant / après', detail: 'Voyez le résultat avant de préparer le correctif.' }
+      { title: 'Appareil', detail: 'Redimensionnez, zoomez, inspectez et comparez un viewport précis.' },
+      { title: 'Studio 1–5', detail: 'Chargez une suite ou composez votre sélection dans un catalogue de plus de 60 formats.' },
+      { title: 'Pilote & liaisons', detail: 'Le pilote partage route et défilement ; chaque écran peut rester lié ou suivre son propre parcours.' },
+      { title: 'Selon la source', detail: 'Le local ajoute interactions sûres, maquette et capture. Sur URL ou localhost, clics et formulaires restent isolés.' }
     ]
   },
   {
@@ -67,11 +68,12 @@ const steps: TourStep[] = [
     id: 'review',
     chapter: 'Contrôler',
     eyebrow: 'Correction Express & révision',
-    title: 'Vérifiez les vues utiles avant de toucher au projet.',
-    summary: 'Une correction traçable passe par la matrice Mobile, Tablette et Bureau. Les cas plus libres restent dans la révision détaillée.',
+    title: 'Le Studio observe. La Matrice certifie.',
+    summary: 'Le Studio accélère l’exploration interactive. La Matrice rejoue séparément les routes, tailles et états canoniques avant une écriture vérifiée.',
     points: [
+      { title: 'Studio interactif', detail: 'Naviguez, défilez et comparez rapidement les écrans de votre choix.' },
+      { title: 'Matrice reproductible', detail: 'Repérez les vues améliorées, stables ou en régression sur un scénario fermé.' },
       { title: 'Corriger et vérifier', detail: 'Comparez source et candidat sans écrire les fichiers.' },
-      { title: 'Matrice lisible', detail: 'Repérez les vues améliorées, stables ou en régression.' },
       { title: 'Retour possible', detail: 'La dernière application reste annulable.' }
     ]
   },
@@ -139,11 +141,11 @@ function SourcesScene(): ReactElement {
 
 function LaboratoryScene(): ReactElement {
   return <div className="tour-scene tour-scene--laboratory" aria-hidden="true">
-    <div className="tour-lab-toolbar"><span className="is-active">Mobile</span><span>Tablette</span><span>Bureau</span><code>393 × 852</code></div>
+    <div className="tour-lab-toolbar"><span>Appareil</span><span className="is-active">Studio · 3/5</span><span>Grille</span><code>63+ formats</code></div>
     <div className="tour-lab-stage">
       <div className="tour-device"><header><i /><i /></header><main><span /><span /><span /></main><span className="tour-demo-action">Action</span></div>
       <div className="tour-finding-pin">01</div>
-      <div className="tour-finding-card"><span>VISUEL · MOBILE</span><b>Navigation trop dense</b><small>Ciblée dans le rendu</small><i>Avant / après →</i></div>
+      <div className="tour-finding-card"><span>ÉCRAN PILOTE</span><b>Navigation liée</b><small>Local · URL · localhost</small><i>Isoler une vue →</i></div>
     </div>
   </div>
 }

@@ -2,7 +2,7 @@
 
 Responsiver est un laboratoire desktop open source pour inspecter la responsivité d’un projet local, d’un localhost ou d’un site public, puis préparer et valider des corrections sans service cloud imposé.
 
-La version 0.7 ajoute une matrice reproductible routes × tailles × états, une Correction Express vérifiée avant toute écriture et un traçage borné de la cascade CSS jusqu’au fichier local et à l’emplacement estimé de la déclaration. Elle conserve l’audit d’URL Chromium, l’Atelier visuel, Monaco, l’assistant IA local facultatif et le compagnon Chrome de la version précédente.
+La version 0.8 réunit désormais deux niveaux complémentaires dans le Laboratoire : **Appareil** pour travailler une vue en détail et **Studio** pour observer simultanément de un à cinq écrans, sur un projet local comme sur une URL ou un localhost. Elle conserve la Matrice reproductible routes × tailles × états, la Correction Express vérifiée avant toute écriture, le traçage de la cascade CSS, l’audit d’URL Chromium, l’Atelier visuel, Monaco, l’assistant IA local facultatif et le compagnon Chrome.
 
 ## Trois sources, trois niveaux d’accès
 
@@ -18,7 +18,7 @@ Responsiver ne prétend pas retrouver le code auteur d’un site public à parti
 
 ### Prise en main guidée
 
-- Visite en six pages au premier lancement : source, Laboratoire, constats, Atelier/Code, révision et application.
+- Visite en six pages au premier lancement : sources, Appareil/Studio, Atelier/Code, distinction Studio/Matrice, révision et application.
 - Illustrations intégrées, progression cliquable, navigation Précédent/Continuer et commandes clavier gauche/droite.
 - Option **Ne plus afficher au démarrage** persistée uniquement dans le stockage local de l’application.
 - Relance permanente depuis le bouton `?` du menu, y compris lorsque l’affichage automatique a été désactivé.
@@ -35,13 +35,25 @@ Responsiver ne prétend pas retrouver le code auteur d’un site public à parti
 - Navigation multi-page, ancres, historique et interactions locales via un runner lié à `127.0.0.1`.
 - Audit runtime de la page active sur quatre profils canoniques (smartphone, tablette portrait, tablette paysage et ordinateur) : overflow réel, clipping, texte tronqué, navigation déséquilibrée, collisions, densité, typographie disproportionnée, groupes tactiles ambigus, éléments fixes, images et contraste simple. Les carrousels, liens correctement espacés et répétitions multi-viewport sont filtrés ou regroupés.
 
+### Appareil et Studio multi-écrans
+
+- Le mode **Appareil** conserve la preview de précision : un viewport, dimensions connues ou personnalisées, rotation, redimensionnement par les bords, zoom, plein écran, inspecteur et Avant/Après.
+- Le mode **Studio** affiche de un à cinq écrans dans une même surface. Les dispositions **Alignés**, **Grille** et **Focus** permettent respectivement de balayer une ligne, d’exploiter la largeur ou de privilégier un écran.
+- Bibliothèque locale de plus de 60 profils : téléphones, tablettes, pliables, portables et bureaux. La recherche, les favoris, les formats personnalisés et les suites personnelles restent sur la machine.
+- Quatre suites prêtes à l’emploi couvrent les essentiels, le mobile, le multi-plateforme et les postes de travail. Une sélection de un à cinq formats peut être enregistrée comme suite.
+- Un écran **pilote** conduit la synchronisation. Chaque autre écran peut rester lié ou être isolé avec sa propre route.
+- La navigation et le défilement sont activables séparément. Le scroll privilégie un repère sémantique visible dans le conteneur dominant, puis utilise sa progression en repli — page entière ou zone `overflow` d’une SPA — afin de rester pertinent sur des hauteurs différentes.
+- Sur le runner local, la synchronisation d’interactions est désactivée par défaut et limitée aux commandes explicitement sûres : toggles, résumés, sélections et quelques champs non sensibles. Liens, soumissions, mots de passe, fichiers, coordonnées, actions destructives et éléments ambigus ne sont jamais rejoués.
+- Une image locale peut être superposée comme maquette avec une opacité réglable. **Capturer** enregistre en PNG la planche locale actuellement visible après confirmation du chemin ; l’image de référence et la capture ne sont pas téléversées.
+- Sur une URL publique ou un localhost, Responsiver crée jusqu’à cinq vues Chromium natives isolées — une principale et quatre supplémentaires — avec navigation et défilement synchronisables depuis le pilote. Les clics et formulaires restent propres à chaque écran ; la maquette et la capture groupée sont indisponibles afin de ne pas masquer ou mélanger ces vues natives.
+
 ### Appareils et validation
 
 - Familles smartphone, tablette et ordinateur séparées des dimensions personnalisées.
 - Modèles connus, rotation, saisie précise et redimensionnement direct par les bords ou les angles.
 - Zoom de travail de 10 à 200 % par commandes, `Ctrl` + molette ou pincement, sans changer le viewport CSS ni les media queries testées.
 - Plein écran sans perdre la route, la taille, le focus ou la version observée.
-- Comparaison de plusieurs appareils distincte de la comparaison **Version actuelle / Correctif temporaire**.
+- Planche Studio distincte de la comparaison **Version actuelle / Correctif temporaire** et de la Matrice anti-régression.
 - Ouverture d’un constat sur sa route et son sélecteur lorsque celui-ci est disponible.
 - Deux catégories explicites : **Rendu & responsive** pour les défauts mesurés, **Code & structure** pour les diagnostics statiques, de build ou de réseau.
 - Cinq priorités visuelles affichées d’abord ; les autres restent accessibles sans saturer l’espace de travail.
@@ -58,6 +70,8 @@ Responsiver ne prétend pas retrouver le code auteur d’un site public à parti
 - La page **Matrice** croise automatiquement les routes retenues, les formats 393 × 852, 768 × 1024 et 1440 × 900, puis les états initial et navigation ouverte lorsqu’elle existe. Un worker Chromium isolé est réutilisé pendant un passage, mais son stockage est purgé avant chaque cellule ; un clic restaure la route, le format et l’état reproductible dans le Laboratoire.
 - L’inspecteur sépare **Calculés** et **Origine**. Pour un runner local, il affiche la règle calculée comme prioritaire dans la cascade collectée, les règles écrasées ou inactives, `!important`, spécificité, media queries et fichier avec une ligne estimée ; un clic ouvre Monaco à cet emplacement.
 - Les feuilles cross-origin ou générées restent signalées comme partielles ou en lecture seule. La certification anti-régression est volontairement limitée aux projets locaux durables ; URL, localhost et sorties compilées restent auditables sans promesse d’écriture automatique.
+
+Le **Studio** et la **Matrice** n’ont pas le même rôle. Le Studio est un espace interactif pour explorer librement une ou plusieurs vues, choisir un pilote et reproduire rapidement un geste. La Matrice repart de scénarios bornés et isolés pour comparer la source et le candidat de façon reproductible. Une planche qui paraît correcte n’accorde donc jamais à elle seule une autorisation d’écriture Express.
 
 ### Atelier visuel et inspecteur intégré
 
@@ -82,6 +96,7 @@ Une URL publique peut être inspectée dans le Laboratoire, mais l’Atelier res
 - Navigation arrière, avant, rechargement et saisie d’adresse dans une session éphémère.
 - Émulation Chromium des dimensions, du DPR, du tactile et du mode mobile.
 - Audit automatique de cinq largeurs : 360, 390, 768, 1024 et 1440 CSS px.
+- Le Studio distant affiche jusqu’à cinq `WebContentsView` interactives et isolées. Les vues liées suivent la navigation et le défilement du pilote ; une vue isolée garde sa route et sa position. Clics, champs et formulaires ne sont pas dupliqués entre les sessions.
 - Chaque nouvelle route réellement visitée est auditée après son chargement ; les constats restent cumulés route par route sans exploration autonome des liens.
 - Détection objective des débordements, contenus masqués, textes tronqués, navigations illisibles ou mal réparties, chevauchements, densité incohérente, typographie disproportionnée, groupes tactiles ambigus, éléments fixes obstructifs, images absentes ou déformées, contrastes faibles et erreurs JavaScript.
 - Un même défaut DOM mesuré à plusieurs tailles est regroupé avec ses viewports et sa preuve la plus sévère ; les familles bruyantes sont plafonnées.
@@ -178,6 +193,7 @@ npm run test:e2e
 npm run test:e2e:onboarding
 npm run test:e2e:visual
 npm run test:e2e:matrix
+npm run test:e2e:studio
 npm run test:e2e:remote
 npm run test:e2e:localhost-link
 npm run build

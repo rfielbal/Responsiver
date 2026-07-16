@@ -1,10 +1,11 @@
-# Architecture de Responsiver 0.7
+# Architecture de Responsiver 0.8
 
 ```text
 Renderer React de confiance
   ├── projets / URL / laboratoire / révision / export
   ├── preview locale en iframe cross-origin
-  ├── emplacement visuel du WebContentsView distant
+  ├── Studio de 1 à 5 vues + catalogue d’appareils
+  ├── iframes locales ou emplacements des WebContentsView distantes
   ├── éditeur Monaco + diff + décision d’application
   └── assistant local facultatif
                 │
@@ -14,10 +15,10 @@ Electron main — ActiveProjectSession
   ├── LocalProjectSession
   │     ├── analyse HTML/CSS route-scopée
   │     ├── runners version actuelle / correctif temporaire / version corrigée / workspace
-│     ├── politique de constats visuel / code
-│     └── transformeur déterministe + application/undo atomiques
-  ├── RemoteBrowserSession
-  │     ├── WebContentsView sandboxé et partition éphémère
+  │     ├── politique de constats visuel / code
+  │     └── transformeur déterministe + application/undo atomiques
+  ├── RemoteBrowserSession × 1–5
+  │     ├── WebContentsView sandboxées et partitions éphémères séparées
   │     ├── politique URL + DNS anti-SSRF
   │     └── audit visuel multi-viewport
   ├── WorkspaceEditor
@@ -39,7 +40,7 @@ Le processus principal possède une seule `ActiveProjectSession`. Son contrat di
 - `remote-url` : URL publique HTTPS ou localhost sans sources, toujours en lecture seule ;
 - `linked-localhost` : localhost associé explicitement à un dossier local éditable.
 
-Changer de source ferme les serveurs de preview, le `WebContentsView`, l’espace de changements et la version corrigée préparée dans la session précédente. Les buffers Monaco, captures et messages de l’assistant ne sont pas persistés.
+Changer de source ferme les serveurs de preview, toutes les `WebContentsView`, l’espace de changements et la version corrigée préparée dans la session précédente. Les buffers Monaco, captures et messages de l’assistant ne sont pas persistés.
 
 Un verrou Electron d’instance unique évite deux consommateurs concurrents pour le compagnon Chrome. La seconde instance réactive la fenêtre existante et déclenche une nouvelle lecture de la file.
 
@@ -49,7 +50,7 @@ Le guide initial appartient entièrement au renderer de confiance. Il présente 
 
 La seule persistance est la clé versionnée `responsiver.onboarding.v1.hidden` dans le `localStorage` de l’application. Elle contient un booléen, pas l’avancement, le projet actif ou une donnée d’usage. La décocher réactive l’ouverture automatique ; le bouton `?` du rail reste disponible quelle que soit cette préférence.
 
-Une `WebContentsView` distante est native et pourrait recouvrir un overlay React. Sa visibilité dépend donc de l’absence de guide global et de guide contextuel, dans le Laboratoire comme dans Atelier et Code.
+Une `WebContentsView` distante est native et pourrait recouvrir un overlay React. La visibilité de chacune des vues dépend donc de l’absence de guide global et de guide contextuel, dans le Laboratoire comme dans Atelier et Code.
 
 ## Pipeline des projets locaux
 
@@ -82,9 +83,32 @@ L’iframe possède une origine loopback différente du renderer. Elle ne peut p
 
 Les dimensions restent exprimées en CSS px même si l’atelier applique une échelle visuelle. Les poignées de redimensionnement produisent un viewport personnalisé ; le plein écran conserve l’origine, la route et la version de preview.
 
+## Appareil, Studio et catalogue local
+
+Le Laboratoire sépare deux surfaces qui partagent le même runner sans partager le même objectif :
+
+- **Appareil** rend un seul viewport, redimensionnable et inspectable, adapté à l’analyse précise, au ciblage d’un constat et à l’Avant/Après ;
+- **Studio** instancie de une à cinq vues pour explorer plusieurs formats en parallèle dans les dispositions Alignés, Grille ou Focus : iframes sur un runner local, `WebContentsView` séparées sur une URL ou un localhost.
+
+Le catalogue éditorial contient plus de 60 profils intégrés répartis entre téléphones, tablettes, pliables, portables et bureaux. Il reste distinct des trois profils canoniques de la Matrice afin qu’une modification du catalogue ne change jamais silencieusement une preuve anti-régression. Les formats personnalisés et suites personnelles sont validés, bornés puis sérialisés dans le `localStorage` du renderer. Une valeur persistée invalide retombe sur un état sain ; elle ne déclenche ni réseau ni lecture du projet.
+
+Chaque planche possède un écran pilote et un ensemble de vues liées. Sur un runner local, naviguer depuis une vue liée met à jour la route commune ; dans le Studio distant, c’est le pilote qui propage sa route. Une vue isolée conserve toujours son propre parcours. Le pilote reste la seule source du scroll et des interactions synchronisés afin d’éviter les boucles et les courses entre cinq pages actives. Les commandes sont séparées :
+
+- navigation, fondée sur le chemin normalisé en local ou l’URL autorisée à distance ;
+- scroll, décrit par un repère sémantique visible et une progression horizontale/verticale du conteneur dominant — document ou zone interne `overflow` ;
+- interaction, désactivée par défaut et limitée à un protocole fermé.
+
+Dans le runner local, les messages de scroll et d’interaction portent version, identifiant de document et identifiant d’événement. Le renderer les assainit avant diffusion ; chaque iframe refuse les doublons, les commandes d’un autre chemin et les localisateurs ambigus. Le rejeu d’interaction exclut les liens, formulaires soumis, fichiers, mots de passe, coordonnées, contenus éditables et libellés sensibles ou destructifs. Il accepte seulement des toggles bornés, `summary`, sélections et quelques contrôles non sensibles ; les champs texte exigent un opt-in `data-responsiver-sync-safe`. Une soumission déclenchée pendant un rejeu est bloquée en capture.
+
+Dans le Studio distant, chaque écran possède au contraire sa propre `RemoteBrowserSession`, son stockage éphémère et sa politique réseau. Le processus principal conserve une vue historique puis crée à la demande jusqu’à quatre vues secondaires, soit cinq renderers Chromium au total. Le renderer propage l’URL du pilote aux seules vues liées. Toutes les 160 ms au plus, il peut lire l’état borné du conteneur de scroll dominant — document ou zone interne — puis l’appliquer aux vues liées : progression horizontale/verticale, type et rang d’un repère structurel, sans texte, sélecteur, URL ou contenu DOM. Les clics, champs et formulaires ne sont jamais rejoués entre vues distantes.
+
+Sur un runner local, la maquette superposée utilise une URL objet éphémère et `pointer-events: none` ; elle n’entre ni dans le projet ni dans une requête réseau. La capture de planche appelle un IPC limité à la frame principale. Le processus principal borne la région aux dimensions visibles de la fenêtre, capture uniquement cette région avec Electron, affiche un dialogue de sauvegarde puis écrit un PNG privé. Il ne s’agit pas d’une capture pleine page de chaque site. Ces deux commandes sont désactivées dans le Studio distant, car une image React ne peut pas recouvrir des vues natives sans leur retirer l’interaction et une capture groupée fiable devrait composer plusieurs surfaces Chromium.
+
+Le Studio distant conserve l’inspecteur sur l’écran pilote et libère explicitement une vue secondaire lorsqu’elle quitte la planche. L’audit multi-viewport reste un workflow séparé du mur interactif et s’exécute depuis le pilote ; il continue d’agréger ses constats par route et largeur.
+
 ## URL publique et localhost
 
-Une URL n’est pas placée dans une iframe. Le processus principal crée un `WebContentsView` avec :
+Une URL n’est pas placée dans une iframe. Le processus principal crée une `WebContentsView` principale puis, lorsque le Studio le demande, jusqu’à quatre vues supplémentaires. Chaque vue utilise :
 
 - `nodeIntegration: false`, `contextIsolation: true`, sandbox et `webSecurity` ;
 - partition aléatoire sans préfixe `persist:` ;
@@ -96,7 +120,7 @@ Le mode public exige HTTPS. Avant le chargement, tous les résultats DNS sont co
 
 Le mode localhost accepte uniquement `localhost`, ses sous-domaines et les adresses de boucle locale. Il n’autorise pas le LAN. Associer un dossier n’accorde aucun accès réseau supplémentaire : cela active seulement le `WorkspaceEditor` sur cette racine. Les manifests `package.json` et `composer.json` sont lus sans exécution afin d’identifier la stack affichée ; cette détection ne transforme pas automatiquement les templates de framework.
 
-L’inspection distante réutilise le Chrome DevTools Protocol déjà attaché à la session. `Overlay.setInspectMode` dessine la cible dans le vrai `WebContentsView`, puis le processus principal résout une photographie bornée de l’élément. Aucune fenêtre DevTools n’est ouverte. Le mode public ne permet aucune mutation ; seul un localhost associé accepte une feuille CSS temporaire limitée à 64 Kio.
+L’inspection distante réutilise le Chrome DevTools Protocol déjà attaché à chaque session. Dans le Studio, elle cible uniquement la vue pilote. `Overlay.setInspectMode` dessine la cible dans la vraie `WebContentsView`, puis le processus principal résout une photographie bornée de l’élément. Aucune fenêtre DevTools n’est ouverte. Le mode public ne permet aucune mutation ; seul un localhost associé accepte une feuille CSS temporaire limitée à 64 Kio.
 
 Les liens quittant le périmètre de navigation approuvé sont bloqués. Les sous-ressources HTTP(S) sont elles aussi limitées à la portée réseau du mode choisi. Le site reste du JavaScript non fiable exécuté par Chromium ; la session n’est pas une machine virtuelle anti-malware.
 
@@ -236,7 +260,7 @@ Le host répond `validated: true`, `delivery: queued`, `desktopAcknowledged: fal
 
 L’historique JSON stocke seulement chemins, entrée, compteurs et dates. Les sources, overlays Monaco, conversations, captures et constats distants ne sont pas persistés par Responsiver.
 
-Fermer une session locale arrête ses serveurs et nettoie son stockage navigateur. Fermer une session distante détache le debugger, retire le CSS injecté, efface son stockage et ferme le `WebContentsView`.
+Fermer une session locale arrête ses serveurs et nettoie son stockage navigateur. Fermer une session distante détache les debuggers, retire le CSS injecté, efface chaque stockage et ferme toutes ses `WebContentsView`.
 
 Les rapports et exports ne sont créés qu’après choix explicite d’une destination. Pour une URL, le rapport agrège les routes visitées, leurs constats et le mode réseau réel ; il ne prétend pas être « hors ligne ». Une source ne peut être modifiée que par **Appliquer au fichier** dans Code, **Appliquer le plan maintenant** ou **Appliquer au projet** après comparaison, ou **Appliquer aux fichiers** après des opérations explicites dans l’Atelier. Ces chemins contrôlent version, hashes et confinement avant écriture.
 
@@ -244,4 +268,4 @@ Les rapports et exports ne sont créés qu’après choix explicite d’une dest
 
 Responsiver ne lance aucune commande issue d’un projet. Il ne démarre pas PHP, Symfony, MySQL, Docker Compose, un build frontend ou des migrations.
 
-Un projet dynamique fonctionne lorsque l’utilisateur démarre lui-même son environnement puis ouvre le localhost. Responsiver agit alors comme un navigateur d’audit. L’association facultative du dossier source active l’éditeur, sans donner accès à la base. L’orchestration Docker automatique reste hors du périmètre de la version 0.7.
+Un projet dynamique fonctionne lorsque l’utilisateur démarre lui-même son environnement puis ouvre le localhost. Responsiver agit alors comme un navigateur d’audit. L’association facultative du dossier source active l’éditeur, sans donner accès à la base. L’orchestration Docker automatique reste hors du périmètre de la version 0.8.
