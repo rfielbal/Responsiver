@@ -243,7 +243,11 @@ try {
   await page.locator('.stage-canvas iframe').first().waitFor({ state: 'visible' })
   assert.equal(await page.getByRole('tab', { name: /Rendu & responsive/ }).getAttribute('aria-selected'), 'true')
   assert.equal(await page.getByRole('tab', { name: /Code & structure/ }).isVisible(), true)
-  assert.equal(await page.locator('.change-plan-bar').isVisible(), true)
+    assert.equal(
+      await page.locator('.change-plan-bar').count(),
+      0,
+      'Le plan de changements vide ne doit pas occuper l’espace de travail.',
+    )
   const sourceFrame = page.frameLocator('.stage-canvas iframe').first()
   const sourceOrigin = new URL(await page.locator('.stage-canvas iframe').first().getAttribute('src')).origin
   console.log('E2E · démo ouverte dans le runner local')

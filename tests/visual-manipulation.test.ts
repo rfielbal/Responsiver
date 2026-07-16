@@ -6,10 +6,12 @@ import { compileVisualEditCss } from '../src/shared/visual-editor'
 import {
   mergeVisualGestureOperations,
   rebaseVisualGestureChangesAfterRejection,
+  resolveVisualGestureScope,
   rollbackVisualGestureOperations,
   sanitizeVisualGestureCommit,
   visualGestureOperationChanges,
-  visualGestureOperations
+  visualGestureOperations,
+  visualScopeIncludesWidth
 } from '../src/shared/visual-manipulation'
 
 function target(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -100,6 +102,34 @@ test('refuse les cibles ambiguës et les propriétés étrangères à la straté
   assert.equal(sanitizeVisualGestureCommit(gesture({ mutations: [{ target: target({ occurrences: 2 }), property: 'translate', before: 'none', after: '10px 0px' }] })), null)
   assert.equal(sanitizeVisualGestureCommit(gesture({ mutations: [{ target: target(), property: 'background-image', before: 'none', after: 'none' }] })), null)
   assert.equal(sanitizeVisualGestureCommit(gesture({ strategy: 'responsive-size' })), null)
+})
+
+test('la portée du Composer suit le viewport sans étendre un geste bureau aux petits écrans', () => {
+  const mobile = { kind: 'mobile' } as const
+  const tablet = resolveVisualGestureScope(mobile, 820)
+  assert.deepEqual(tablet, { kind: 'tablet' })
+  assert.equal(visualScopeIncludesWidth(tablet, 820), true)
+
+  const desktop = resolveVisualGestureScope(tablet, 1_440)
+  assert.deepEqual(desktop, { kind: 'custom', minWidth: 1_025, maxWidth: null })
+  assert.equal(visualScopeIncludesWidth(desktop, 1_440), true)
+  assert.equal(visualScopeIncludesWidth(desktop, 1_024), false)
+
+  const all = { kind: 'all' } as const
+  assert.equal(resolveVisualGestureScope(all, 393), all)
+  const compatibleCustom = { kind: 'custom', minWidth: 1_200, maxWidth: 1_600 } as const
+  assert.equal(resolveVisualGestureScope(compatibleCustom, 1_440), compatibleCustom)
+})
+
+test('un déplacement inline peut embarquer le fallback inline-block', () => {
+  const result = sanitizeVisualGestureCommit(gesture({
+    mutations: [
+      { target: target({ tag: 'a' }), property: 'display', before: 'inline', after: 'inline-block' },
+      { target: target({ tag: 'a' }), property: 'translate', before: 'none', after: '12px 0px' }
+    ]
+  }))
+  assert.ok(result)
+  assert.deepEqual(result.mutations.map((mutation) => mutation.property), ['display', 'translate'])
 })
 
 test('retire une ancienne surcharge lorsqu’un geste revient exactement à la valeur source', () => {

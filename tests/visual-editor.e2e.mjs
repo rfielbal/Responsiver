@@ -23,6 +23,15 @@ try {
   await page.getByLabel('Chemin local').fill(projectRoot)
   await page.locator('.path-bar').getByRole('button', { name: 'Ouvrir' }).click()
   await page.locator('.stage-canvas iframe').first().waitFor({ state: 'visible' })
+  await page.getByRole('button', { name: 'Atelier visuel', exact: true }).click()
+  await page.locator('.visual-workspace.is-awaiting-selection').waitFor({ state: 'visible' })
+  assert.equal(await page.locator('.visual-properties').count(), 0, 'Le panneau Propriétés ne doit pas réduire le canvas avant une sélection.')
+  assert.equal(await page.getByRole('button', { name: 'Inspecter', exact: true }).count(), 1, 'Inspecter ne doit apparaître qu’une fois dans l’Atelier.')
+  assert.equal(await page.locator('.visual-scope-popover > summary').isVisible(), true)
+  const emptyTrayBox = await page.locator('.visual-change-tray.is-empty').boundingBox()
+  assert.ok(emptyTrayBox && emptyTrayBox.height <= 52, `La barre vide doit rester compacte (${emptyTrayBox?.height ?? 'absente'} px).`)
+  await page.getByRole('button', { name: 'Laboratoire', exact: true }).click()
+  await page.locator('.stage-canvas iframe').first().waitFor({ state: 'visible' })
   await page.evaluate(() => {
     Object.assign(window, { __responsiverVisualMessages: [] })
     window.addEventListener('message', (event) => {
@@ -137,6 +146,10 @@ try {
   // désormais requis pour demander explicitement une réorganisation du flux.
   await heroCopy.scrollIntoViewIfNeeded()
   const moveBox = await heroCopy.boundingBox()
+  const moveStageBefore = {
+    outer: await page.locator('.visual-canvas .preview-stage').evaluate((element) => ({ left: element.scrollLeft, top: element.scrollTop })),
+    inner: await heroCopy.evaluate(() => ({ x: scrollX, y: scrollY }))
+  }
   assert.ok(moveBox)
   const moveStart = { x: moveBox.x + moveBox.width / 2, y: moveBox.y + moveBox.height / 2 }
   await page.mouse.move(moveStart.x, moveStart.y)
@@ -155,9 +168,14 @@ try {
   assert.notEqual(translated, 'none')
   await page.waitForTimeout(420)
   const settledMoveBox = await heroCopy.boundingBox()
+  const moveStageAfter = {
+    outer: await page.locator('.visual-canvas .preview-stage').evaluate((element) => ({ left: element.scrollLeft, top: element.scrollTop })),
+    inner: await heroCopy.evaluate(() => ({ x: scrollX, y: scrollY }))
+  }
+  const moveComputed = await heroCopy.evaluate((element) => ({ translate: getComputedStyle(element).translate, rect: element.getBoundingClientRect().toJSON() }))
   assert.ok(settledMoveBox)
-  assert.ok(settledMoveBox.x > moveBox.x + 2, JSON.stringify({ moveBox, settledMoveBox }))
-  assert.ok(settledMoveBox.y > moveBox.y + 2, JSON.stringify({ moveBox, settledMoveBox }))
+  assert.ok(settledMoveBox.x > moveBox.x + 2, JSON.stringify({ moveBox, settledMoveBox, moveStageBefore, moveStageAfter, moveComputed }))
+  assert.ok(settledMoveBox.y > moveBox.y + 2, JSON.stringify({ moveBox, settledMoveBox, moveStageBefore, moveStageAfter, moveComputed }))
   assert.equal(await page.locator('.visual-change-count').textContent(), '1')
   const composerNotices = await page.locator('.toast').allTextContents()
   assert.ok(!composerNotices.some((message) => /bloque encore|geste (?:a été )?annulé/i.test(message)), JSON.stringify(composerNotices))
@@ -195,6 +213,55 @@ try {
   })
   assert.ok(Math.abs(rapidNudgeSettled.left - rapidNudgeAfter.left) < .5, JSON.stringify({ rapidNudgeAfter, rapidNudgeSettled }))
   assert.ok(Math.abs(rapidNudgeSettled.top - rapidNudgeAfter.top) < .5, JSON.stringify({ rapidNudgeAfter, rapidNudgeSettled }))
+
+  const verifyComposerViewport = async ({ familyLabel, expectedScope, expectedWidth, minimumWidth = null }) => {
+    const countBefore = Number(await page.locator('.visual-change-count').textContent())
+    await page.getByRole('group', { name: 'Catégorie d’appareil' }).getByRole('button', { name: familyLabel }).click()
+    await page.waitForFunction((scope) => {
+      const select = document.querySelector('[aria-label="Tailles concernées"]')
+      return select?.value === scope
+    }, expectedScope)
+    await visualFrame.locator('html').evaluate(async (_element, width) => {
+      for (let index = 0; index < 60; index += 1) {
+        if (innerWidth === width) return
+        await new Promise((resolve) => requestAnimationFrame(resolve))
+      }
+      throw new Error(`Viewport attendu ${width}px, reçu ${innerWidth}px`)
+    }, expectedWidth)
+    if (minimumWidth !== null) assert.equal(await page.getByLabel('Largeur minimale concernée').inputValue(), String(minimumWidth))
+    await visualFrame.locator('[data-responsiver-composer-active]').waitFor({ state: 'attached' })
+    const before = await heroCopy.evaluate((element) => element.getBoundingClientRect().left)
+    await heroCopy.evaluate(() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', shiftKey: true, bubbles: true })))
+    await page.waitForFunction((count) => Number(document.querySelector('.visual-change-count')?.textContent) > count, countBefore)
+    const after = await heroCopy.evaluate(async (element, left) => {
+      for (let index = 0; index < 40; index += 1) {
+        const current = element.getBoundingClientRect().left
+        if (current > left + 5) return current
+        await new Promise((resolve) => requestAnimationFrame(resolve))
+      }
+      return element.getBoundingClientRect().left
+    }, before)
+    assert.ok(after > before + 5, JSON.stringify({ familyLabel, before, after }))
+    await page.waitForTimeout(420)
+    const notices = await page.locator('.toast').allTextContents()
+    assert.ok(!notices.some((message) => /règle prioritaire|n’a pas suivi le geste|placement libre défini/i.test(message)), JSON.stringify(notices))
+  }
+
+  await verifyComposerViewport({ familyLabel: 'Tablette', expectedScope: 'tablet', expectedWidth: 768 })
+  await verifyComposerViewport({ familyLabel: 'Ordinateur', expectedScope: 'custom', expectedWidth: 1440, minimumWidth: 1025 })
+  await page.getByRole('group', { name: 'Catégorie d’appareil' }).getByRole('button', { name: 'Smartphone' }).click()
+  await page.getByLabel('Modèle').selectOption('iphone-15')
+  await page.waitForFunction(() => document.querySelector('[aria-label="Tailles concernées"]')?.value === 'mobile')
+  await visualFrame.locator('html').evaluate(async () => {
+    for (let index = 0; index < 60; index += 1) {
+      if (innerWidth === 393) return
+      await new Promise((resolve) => requestAnimationFrame(resolve))
+    }
+    throw new Error(`Viewport attendu 393px, reçu ${innerWidth}px`)
+  })
+  await page.getByRole('button', { name: /Afficher à 100 %/ }).click()
+  await revealInCanvas(heroCopy)
+  await heroCopy.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
 
   const widthBefore = await heroCopy.evaluate((element) => element.getBoundingClientRect().width)
   const eastHandle = visualFrame.locator('[data-responsiver-composer-handle="e"]')
