@@ -1,6 +1,15 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { intersectRemoteClipBounds } from '../src/renderer/src/RemotePreview.tsx'
+import { intersectRemoteClipBounds, remoteAuditRouteKey } from '../src/renderer/src/RemotePreview.tsx'
+
+test('les ancres ordinaires partagent un audit sans confondre les routes HashRouter', () => {
+  assert.equal(remoteAuditRouteKey('/catalogue?tri=recent#produit-42'), '/catalogue?tri=recent')
+  assert.equal(remoteAuditRouteKey('/catalogue#'), '/catalogue')
+  assert.equal(remoteAuditRouteKey('/#/tableau-de-bord?onglet=mobile'), '/#/tableau-de-bord?onglet=mobile')
+  assert.equal(remoteAuditRouteKey('/app#!/projets/actif'), '/app#!/projets/actif')
+  assert.equal(remoteAuditRouteKey('https://exemple.test/page?mode=qa#section'), '/page?mode=qa')
+  assert.equal(remoteAuditRouteKey(''), '/')
+})
 
 test('la découpe distante cumule la fenêtre et les conteneurs qui masquent le débordement', () => {
   assert.deepEqual(intersectRemoteClipBounds(

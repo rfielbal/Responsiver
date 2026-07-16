@@ -35,7 +35,7 @@ const server = createServer((request, response) => {
   }
   if (request.url === '/scroll') {
     response.setHeader('content-type', 'text/html; charset=utf-8')
-    response.end(`<!doctype html><html><head><meta name="viewport" content="width=device-width"><title>Défilement synchronisé</title><style>html,body{margin:0}section{height:900px;padding:20px;box-sizing:border-box}section:nth-child(even){background:#eee}</style></head><body><main><section>Un</section><section>Deux</section><section>Trois</section><section>Quatre</section></main></body></html>`)
+    response.end(`<!doctype html><html><head><meta name="viewport" content="width=device-width"><title>Défilement synchronisé</title><style>html,body{margin:0}section{height:900px;padding:20px;box-sizing:border-box}section:nth-child(even){background:#eee}.secondary-scroll{position:fixed;z-index:2;right:0;top:0;width:60vw;height:60vh;overflow:auto;pointer-events:none;opacity:.08}.secondary-scroll div{height:1800px}</style></head><body><main><section>Un</section><section>Deux</section><section>Trois</section><section>Quatre</section></main><div class="secondary-scroll"><div>Panneau secondaire scrollable</div></div></body></html>`)
     return
   }
   if (request.url === '/inner-scroll') {

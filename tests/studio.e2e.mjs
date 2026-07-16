@@ -55,13 +55,14 @@ try {
   const wall = page.locator('.studio-wall')
   await wall.waitFor({ state: 'visible' })
   assert.equal(await page.locator('.studio-screen').count(), 3)
-  const stageWidthWithPanel = (await page.locator('.stage-column').boundingBox())?.width ?? 0
-  await page.getByRole('button', { name: 'Masquer le panneau de constats' }).click()
+  await page.getByRole('button', { name: 'Afficher le panneau de constats' }).waitFor({ state: 'visible' })
   assert.equal(await page.locator('.lab-grid > .inspector').count(), 0)
   const stageWidthWithoutPanel = (await page.locator('.stage-column').boundingBox())?.width ?? 0
-  assert.ok(stageWidthWithoutPanel > stageWidthWithPanel)
   await page.getByRole('button', { name: 'Afficher le panneau de constats' }).click()
   await page.locator('.lab-grid > .inspector').waitFor({ state: 'visible' })
+  const stageWidthWithPanel = (await page.locator('.stage-column').boundingBox())?.width ?? 0
+  assert.ok(stageWidthWithoutPanel > stageWidthWithPanel)
+  await page.getByRole('button', { name: 'Masquer le panneau de constats' }).click()
 
   await page.getByLabel('Suite', { exact: true }).selectOption('suite-mobile')
   await page.waitForFunction(() => document.querySelectorAll('.studio-screen').length === 5)
@@ -70,13 +71,16 @@ try {
 
   await page.getByRole('button', { name: 'Grille', exact: true }).click()
   assert.match(await wall.getAttribute('class') ?? '', /studio-wall--grid/)
-  const focusButton = page.locator('.studio-screen').nth(2).getByRole('button', { name: /Afficher .* en focus/ })
+  const focusCard = page.locator('.studio-screen').nth(2)
+  await focusCard.hover()
+  const focusButton = focusCard.getByRole('button', { name: /Afficher .* en focus/ })
   await focusButton.click()
   assert.match(await wall.getAttribute('class') ?? '', /studio-wall--focus/)
   assert.equal(await page.locator('.studio-screen.is-focused').count(), 1)
 
   const isolatedCard = page.locator('.studio-screen').last()
   const isolatedName = await isolatedCard.locator('.studio-screen__identity strong').textContent()
+  await isolatedCard.hover()
   await isolatedCard.getByRole('button', { name: new RegExp(`Isoler ${isolatedName}`) }).click()
   await isolatedCard.waitFor({ state: 'visible' })
   assert.match(await isolatedCard.getAttribute('class') ?? '', /is-isolated/)
@@ -164,6 +168,20 @@ try {
       for (let attempt = 0; attempt < 60 && scrollY > 20; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 50))
       if (scrollY > 20) throw new Error(`Retour synchronisé en haut absent : ${scrollY}px.`)
     })
+  }
+
+  const documentIdentities = []
+  for (let index = 0; index < linkedCount; index += 1) {
+    documentIdentities.push(await linkedFrames.nth(index).contentFrame().locator('html').evaluate(() => {
+      window.__responsiverDocumentIdentity ||= `${Date.now()}-${Math.random()}`
+      return window.__responsiverDocumentIdentity
+    }))
+  }
+  await pilotFrame.locator('#bottom').evaluate((element) => { location.hash = element.id })
+  await page.waitForTimeout(700)
+  for (let index = 0; index < linkedCount; index += 1) {
+    const identity = await linkedFrames.nth(index).contentFrame().locator('html').evaluate(() => window.__responsiverDocumentIdentity)
+    assert.equal(identity, documentIdentities[index], `L’ancre ne doit pas remonter la vue liée ${index + 1}.`)
   }
 
   await page.getByLabel('Ouvrir la bibliothèque d’appareils').click()
