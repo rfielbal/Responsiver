@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactElement, type WheelEvent } from 'react'
-import type { RemoteAuditResult, RemotePageState } from '../../shared/contracts'
+import type { RemoteAuditResult, RemotePageState, RemoteViewBounds, RemoteViewport } from '../../shared/contracts'
 import PreviewZoomControls from './PreviewZoomControls'
 import { clampPreviewScale, stepPreviewScale, wheelPreviewScale } from './preview-zoom'
 
@@ -9,12 +9,17 @@ interface RemoteDevice {
   height: number
   family: 'smartphone' | 'tablet' | 'computer'
   name: string
+  dpr?: number
+  mobile?: boolean
+  touch?: boolean
 }
 
 type ResizeEdge = 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w' | 'nw'
 
 interface RemotePreviewProps {
   projectId: string
+  /** Identité stable d'une vue Studio. Absente = preview distante historique. */
+  viewId?: string
   device: RemoteDevice
   visible: boolean
   allowUpscale?: boolean
@@ -34,11 +39,84 @@ const sweepViewports = [
   { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false, touch: false }
 ]
 
-export default function RemotePreview({ projectId, device, visible, allowUpscale = false, embedded = false, automaticAudit = true, onResize, onAudit, onState, onNotice }: RemotePreviewProps): ReactElement {
+export interface RemoteClipRectangle {
+  left: number
+  top: number
+  right: number
+  bottom: number
+}
+
+export interface RemoteClipConstraint {
+  rectangle: RemoteClipRectangle
+  horizontal: boolean
+  vertical: boolean
+}
+
+const CLIPPING_OVERFLOWS = new Set(['auto', 'clip', 'hidden', 'overlay', 'scroll'])
+const BOUNDS_RETRY_DELAYS = [70, 180] as const
+
+export function intersectRemoteClipBounds(base: RemoteClipRectangle, constraints: readonly RemoteClipConstraint[]): RemoteClipRectangle | null {
+  let left = base.left
+  let top = base.top
+  let right = base.right
+  let bottom = base.bottom
+  if (![left, top, right, bottom].every(Number.isFinite) || right <= left || bottom <= top) return null
+  for (const constraint of constraints) {
+    const rectangle = constraint.rectangle
+    if (![rectangle.left, rectangle.top, rectangle.right, rectangle.bottom].every(Number.isFinite)) return null
+    if (constraint.horizontal) {
+      left = Math.max(left, rectangle.left)
+      right = Math.min(right, rectangle.right)
+    }
+    if (constraint.vertical) {
+      top = Math.max(top, rectangle.top)
+      bottom = Math.min(bottom, rectangle.bottom)
+    }
+    if (right <= left || bottom <= top) return null
+  }
+  return { left, top, right, bottom }
+}
+
+function domRectangle(value: DOMRect): RemoteClipRectangle {
+  return { left: value.left, top: value.top, right: value.right, bottom: value.bottom }
+}
+
+function clippedStageRectangle(element: HTMLElement): RemoteClipRectangle | null {
+  const constraints: RemoteClipConstraint[] = [{
+    rectangle: { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight },
+    horizontal: true,
+    vertical: true
+  }]
+  let ancestor = element.parentElement
+  while (ancestor) {
+    const style = window.getComputedStyle(ancestor)
+    const horizontal = CLIPPING_OVERFLOWS.has(style.overflowX)
+    const vertical = CLIPPING_OVERFLOWS.has(style.overflowY)
+    if (horizontal || vertical) constraints.push({ rectangle: domRectangle(ancestor.getBoundingClientRect()), horizontal, vertical })
+    ancestor = ancestor.parentElement
+  }
+  return intersectRemoteClipBounds(domRectangle(element.getBoundingClientRect()), constraints)
+}
+
+function remoteViewport(device: RemoteDevice): RemoteViewport {
+  return {
+    width: device.width,
+    height: device.height,
+    deviceScaleFactor: device.dpr ?? 1,
+    mobile: device.mobile ?? device.family !== 'computer',
+    touch: device.touch ?? device.family !== 'computer'
+  }
+}
+
+export default function RemotePreview({ projectId, viewId, device, visible, allowUpscale = false, embedded = false, automaticAudit, onResize, onAudit, onState, onNotice }: RemotePreviewProps): ReactElement {
   const stage = useRef<HTMLDivElement>(null)
   const frame = useRef<HTMLDivElement>(null)
   const host = useRef<HTMLDivElement>(null)
   const boundsFrame = useRef<number | null>(null)
+  const boundsRetryTimer = useRef<number | null>(null)
+  const boundsRequestSequence = useRef(0)
+  const unmounted = useRef(false)
+  const viewportRef = useRef<RemoteViewport>(remoteViewport(device))
   const resizeCleanup = useRef<(() => void) | null>(null)
   const auditedRoutes = useRef(new Set<string>())
   const [scale, setScale] = useState(0.7)
@@ -49,6 +127,35 @@ export default function RemotePreview({ projectId, device, visible, allowUpscale
   const [address, setAddress] = useState('')
   const [auditing, setAuditing] = useState(false)
   scaleRef.current = scale
+  viewportRef.current = remoteViewport(device)
+
+  const queueRemoteBounds = (request: RemoteViewBounds): void => {
+    const sequence = ++boundsRequestSequence.current
+    if (boundsRetryTimer.current !== null) window.clearTimeout(boundsRetryTimer.current)
+    boundsRetryTimer.current = null
+    const dispatch = (attempt: number): void => {
+      void window.responsiver.setRemoteBounds(request).catch(() => {
+        if (unmounted.current || sequence !== boundsRequestSequence.current || attempt >= BOUNDS_RETRY_DELAYS.length) return
+        boundsRetryTimer.current = window.setTimeout(() => {
+          boundsRetryTimer.current = null
+          if (!unmounted.current && sequence === boundsRequestSequence.current) dispatch(attempt + 1)
+        }, BOUNDS_RETRY_DELAYS[attempt])
+      })
+    }
+    dispatch(0)
+  }
+
+  const hiddenBounds = (): RemoteViewBounds => ({
+    projectId,
+    viewId,
+    x: 0,
+    y: 0,
+    width: 1,
+    height: 1,
+    scale: 1,
+    visible: false,
+    viewport: viewportRef.current
+  })
 
   const publishBounds = (): void => {
     if (boundsFrame.current !== null) return
@@ -58,23 +165,37 @@ export default function RemotePreview({ projectId, device, visible, allowUpscale
       const clip = stage.current
       if (!element || !clip) return
       const rect = element.getBoundingClientRect()
-      const clipRect = clip.getBoundingClientRect()
-      void window.responsiver.setRemoteBounds({
+      const clipRect = clippedStageRectangle(clip)
+      const paintedRect = clipRect ? intersectRemoteClipBounds(domRectangle(rect), [{ rectangle: clipRect, horizontal: true, vertical: true }]) : null
+      if (!visible || !clipRect || !paintedRect) {
+        queueRemoteBounds(hiddenBounds())
+        return
+      }
+      const clipLeft = Math.ceil(clipRect.left)
+      const clipTop = Math.ceil(clipRect.top)
+      const clipRight = Math.floor(clipRect.right)
+      const clipBottom = Math.floor(clipRect.bottom)
+      if (clipRight <= clipLeft || clipBottom <= clipTop) {
+        queueRemoteBounds(hiddenBounds())
+        return
+      }
+      queueRemoteBounds({
         projectId,
+        viewId,
         x: Math.round(rect.left),
         y: Math.round(rect.top),
         width: Math.max(1, Math.round(rect.width)),
         height: Math.max(1, Math.round(rect.height)),
         clip: {
-          x: Math.round(clipRect.left),
-          y: Math.round(clipRect.top),
-          width: Math.max(1, Math.round(clipRect.width)),
-          height: Math.max(1, Math.round(clipRect.height))
+          x: clipLeft,
+          y: clipTop,
+          width: clipRight - clipLeft,
+          height: clipBottom - clipTop
         },
         scale: scaleRef.current,
-        visible,
-        viewport: { width: device.width, height: device.height, deviceScaleFactor: 1, mobile: device.family !== 'computer', touch: device.family !== 'computer' }
-      }).catch(() => undefined)
+        visible: true,
+        viewport: viewportRef.current
+      })
     })
   }
 
@@ -94,11 +215,19 @@ export default function RemotePreview({ projectId, device, visible, allowUpscale
 
   useEffect(() => {
     if (!visible) {
-      void window.responsiver.setRemoteBounds({ projectId, x: 0, y: 0, width: 1, height: 1, scale: 1, visible: false, viewport: { width: device.width, height: device.height } }).catch(() => undefined)
+      queueRemoteBounds(hiddenBounds())
       return
     }
     const observer = new ResizeObserver(publishBounds)
-    if (host.current) observer.observe(host.current)
+    const observed = new Set<Element>()
+    let observedElement: HTMLElement | null = host.current
+    while (observedElement) {
+      if (!observed.has(observedElement)) {
+        observed.add(observedElement)
+        observer.observe(observedElement)
+      }
+      observedElement = observedElement.parentElement
+    }
     window.addEventListener('resize', publishBounds)
     window.addEventListener('scroll', publishBounds, true)
     publishBounds()
@@ -109,12 +238,31 @@ export default function RemotePreview({ projectId, device, visible, allowUpscale
       if (boundsFrame.current !== null) window.cancelAnimationFrame(boundsFrame.current)
       boundsFrame.current = null
     }
-  }, [device.family, device.height, device.width, projectId, scale, visible])
+  }, [device.dpr, device.family, device.height, device.mobile, device.touch, device.width, projectId, scale, viewId, visible])
 
-  useEffect(() => () => {
-    if (boundsFrame.current !== null) window.cancelAnimationFrame(boundsFrame.current)
-    void window.responsiver.setRemoteBounds({ projectId, x: 0, y: 0, width: 1, height: 1, scale: 1, visible: false, viewport: { width: device.width, height: device.height } }).catch(() => undefined)
-  }, [projectId])
+  useEffect(() => {
+    unmounted.current = false
+    return () => {
+      unmounted.current = true
+      boundsRequestSequence.current += 1
+      if (boundsRetryTimer.current !== null) window.clearTimeout(boundsRetryTimer.current)
+      boundsRetryTimer.current = null
+      if (boundsFrame.current !== null) window.cancelAnimationFrame(boundsFrame.current)
+      boundsFrame.current = null
+      void window.responsiver.setRemoteBounds({
+        projectId,
+        viewId,
+        x: 0,
+        y: 0,
+        width: 1,
+        height: 1,
+        scale: 1,
+        visible: false,
+        viewport: viewportRef.current
+      }).catch(() => undefined)
+      if (viewId) void window.responsiver.releaseRemoteView({ projectId, viewId }).catch(() => undefined)
+    }
+  }, [projectId, viewId])
 
   const stageCenter = (): { x: number; y: number } | undefined => {
     const element = stage.current
@@ -155,24 +303,25 @@ export default function RemotePreview({ projectId, device, visible, allowUpscale
 
   useEffect(() => {
     const off = window.responsiver.onRemoteState((next) => {
+      if ((next.viewId ?? undefined) !== viewId) return
       setState(next)
       setAddress(next.url)
       onState(next)
     })
-    void window.responsiver.getRemoteState().then((next) => {
+    void window.responsiver.getRemoteState(viewId ? { projectId, viewId } : undefined).then((next) => {
       setState(next)
       setAddress(next.url)
       onState(next)
     }).catch(() => undefined)
     return off
-  }, [projectId])
+  }, [projectId, viewId])
 
   useEffect(() => window.responsiver.onRemoteZoomGesture((gesture) => {
-    if (!visible || gesture.projectId !== projectId) return
+    if (!visible || gesture.projectId !== projectId || (gesture.viewId ?? undefined) !== viewId) return
     const rectangle = host.current?.getBoundingClientRect()
     const anchor = rectangle ? { x: rectangle.left + gesture.x, y: rectangle.top + gesture.y } : stageCenter()
     applyManualZoom(wheelPreviewScale(scaleRef.current, gesture.deltaY), anchor)
-  }), [device.family, device.height, device.width, projectId, visible])
+  }), [device.family, device.height, device.width, projectId, viewId, visible])
 
   const audit = async (automatic = false): Promise<void> => {
     if (auditing) return
@@ -181,7 +330,7 @@ export default function RemotePreview({ projectId, device, visible, allowUpscale
     if (automatic) auditedRoutes.current.add(routeKey)
     setAuditing(true)
     try {
-      const result = await window.responsiver.auditRemote(sweepViewports)
+      const result = await window.responsiver.auditRemote(sweepViewports, viewId ? { projectId, viewId } : undefined)
       auditedRoutes.current.add(result.path)
       onAudit(result)
       onNotice(result.truncated
@@ -201,14 +350,15 @@ export default function RemotePreview({ projectId, device, visible, allowUpscale
   }, [projectId])
 
   useEffect(() => {
-    if (!automaticAudit || !visible || state?.loading || !state?.path || auditedRoutes.current.has(state.path)) return
+    const shouldAuditAutomatically = automaticAudit ?? !viewId
+    if (!shouldAuditAutomatically || !visible || state?.loading || !state?.path || auditedRoutes.current.has(state.path)) return
     const timer = window.setTimeout(() => { void audit(true) }, 850)
     return () => window.clearTimeout(timer)
-  }, [automaticAudit, projectId, state?.loading, state?.path, visible])
+  }, [automaticAudit, projectId, state?.loading, state?.path, viewId, visible])
 
   const navigate = async (action: 'back' | 'forward' | 'reload' | 'url', value?: string): Promise<void> => {
     try {
-      const next = await window.responsiver.navigateRemote(action, value)
+      const next = await window.responsiver.navigateRemote(action, value, viewId ? { projectId, viewId } : undefined)
       setState(next)
       setAddress(next.url)
       onState(next)

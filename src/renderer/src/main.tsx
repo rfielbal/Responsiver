@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import App from './App'
 import { browserDemoProject } from './browser-demo'
 import './styles.css'
+import './studio-controls.css'
 
 if (!window.responsiver) {
   window.responsiver = {
@@ -19,8 +20,11 @@ if (!window.responsiver) {
     openRemoteUrl: async () => { throw new Error('Le mode URL est disponible uniquement dans Electron.') },
     associateRemoteRoot: async () => { throw new Error('L’association de sources localhost est disponible uniquement dans Electron.') },
     setRemoteBounds: async () => undefined,
+    releaseRemoteView: async () => undefined,
     navigateRemote: async () => { throw new Error('La navigation distante est disponible uniquement dans Electron.') },
     getRemoteState: async () => { throw new Error('La navigation distante est disponible uniquement dans Electron.') },
+    readRemoteScroll: async () => { throw new Error('La synchronisation distante est disponible uniquement dans Electron.') },
+    applyRemoteScroll: async () => { throw new Error('La synchronisation distante est disponible uniquement dans Electron.') },
     auditRemote: async () => { throw new Error('L’audit URL est disponible uniquement dans Electron.') },
     focusRemoteFinding: async () => ({ found: false, selector: null, path: '/' }),
     startRemoteInspector: async () => { throw new Error('L’inspecteur distant est disponible uniquement dans Electron.') },
@@ -31,6 +35,7 @@ if (!window.responsiver) {
     onRemoteInspectorShortcut: () => () => undefined,
     onRemoteInspectorCanceled: () => () => undefined,
     onRemoteInspectorReady: () => () => undefined,
+    onRemoteEscape: () => () => undefined,
     onRemoteZoomGesture: () => () => undefined,
     onRemoteState: () => () => undefined,
     onRemoteBlockedNavigation: () => () => undefined,
@@ -61,6 +66,7 @@ if (!window.responsiver) {
     exportChangedFiles: async () => null,
     exportProjectCopy: async () => null,
     exportReport: async () => 'Rapport de démonstration disponible uniquement dans Electron.',
+    captureInterfaceRegion: async () => { throw new Error('La capture du Studio est disponible uniquement dans Electron.') },
     copyText: async (text) => navigator.clipboard.writeText(text),
     getPathForFile: () => ''
   }

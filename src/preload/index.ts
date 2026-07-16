@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron'
-import type { ExportResult, LocalAiRequest, LocalAiResponse, LocalAiStatus, MatrixRunProgress, MatrixRunRequest, MatrixRunResult, ProjectPreparationProgress, ProjectSnapshot, RecentProjectSummary, RemoteAuditResult, RemoteFocusResult, RemoteInspectorRequest, RemoteInspectorSelection, RemoteInspectorState, RemoteOpenRequest, RemotePageState, RemoteSourceAssociationRequest, RemoteViewBounds, RemoteViewport, RemoteVisualStyleRequest, RemoteVisualStyleResult, RemoteZoomGesture, StagingApplyResult, StagingRequest, StagingSnapshot, StagingUndoResult, StagingVerificationRequest, StagingVerificationResult, WorkspaceApplyResult, WorkspaceDiff, WorkspaceFileSnapshot, WorkspaceFileSummary, WorkspaceSnapshot } from '../shared/contracts'
+import type { ExportResult, InterfaceCaptureRegion, LocalAiRequest, LocalAiResponse, LocalAiStatus, MatrixRunProgress, MatrixRunRequest, MatrixRunResult, ProjectPreparationProgress, ProjectSnapshot, RecentProjectSummary, RemoteAuditResult, RemoteFocusResult, RemoteInspectorRequest, RemoteInspectorSelection, RemoteInspectorState, RemoteOpenRequest, RemotePageState, RemoteScrollApplyRequest, RemoteScrollSnapshot, RemoteSourceAssociationRequest, RemoteViewBounds, RemoteViewReleaseRequest, RemoteViewport, RemoteVisualStyleRequest, RemoteVisualStyleResult, RemoteZoomGesture, StagingApplyResult, StagingRequest, StagingSnapshot, StagingUndoResult, StagingVerificationRequest, StagingVerificationResult, WorkspaceApplyResult, WorkspaceDiff, WorkspaceFileSnapshot, WorkspaceFileSummary, WorkspaceSnapshot } from '../shared/contracts'
 
 function reportRuleIds(projectOrRuleIds?: ProjectSnapshot | string[], acceptedRuleIds?: string[]): string[] {
   return Array.isArray(projectOrRuleIds) ? projectOrRuleIds : acceptedRuleIds ?? []
@@ -24,10 +24,13 @@ if (process.isMainFrame) {
     openRemoteUrl: (request: RemoteOpenRequest): Promise<ProjectSnapshot> => ipcRenderer.invoke('remote:open', request),
     associateRemoteRoot: (request: RemoteSourceAssociationRequest): Promise<ProjectSnapshot> => ipcRenderer.invoke('remote:associate-root', request),
     setRemoteBounds: (bounds: RemoteViewBounds): Promise<void> => ipcRenderer.invoke('remote:set-bounds', bounds),
-    navigateRemote: (action: 'back' | 'forward' | 'reload' | 'url', value?: string): Promise<RemotePageState> => ipcRenderer.invoke('remote:navigate', action, value),
-    getRemoteState: (): Promise<RemotePageState> => ipcRenderer.invoke('remote:state'),
-    auditRemote: (viewports: RemoteViewport[]): Promise<RemoteAuditResult> => ipcRenderer.invoke('remote:audit', viewports),
-    focusRemoteFinding: (selector: string): Promise<RemoteFocusResult> => ipcRenderer.invoke('remote:focus', selector),
+    releaseRemoteView: (request: RemoteViewReleaseRequest): Promise<void> => ipcRenderer.invoke('remote:release-view', request),
+    navigateRemote: (action: 'back' | 'forward' | 'reload' | 'url', value?: string, request?: RemoteInspectorRequest): Promise<RemotePageState> => ipcRenderer.invoke('remote:navigate', action, value, request),
+    getRemoteState: (request?: RemoteInspectorRequest): Promise<RemotePageState> => ipcRenderer.invoke('remote:state', request),
+    readRemoteScroll: (request: RemoteInspectorRequest): Promise<RemoteScrollSnapshot> => ipcRenderer.invoke('remote:scroll-read', request),
+    applyRemoteScroll: (request: RemoteScrollApplyRequest): Promise<RemoteScrollSnapshot> => ipcRenderer.invoke('remote:scroll-apply', request),
+    auditRemote: (viewports: RemoteViewport[], request?: RemoteInspectorRequest): Promise<RemoteAuditResult> => ipcRenderer.invoke('remote:audit', viewports, request),
+    focusRemoteFinding: (selector: string, request?: RemoteInspectorRequest): Promise<RemoteFocusResult> => ipcRenderer.invoke('remote:focus', selector, request),
     startRemoteInspector: (request: RemoteInspectorRequest): Promise<RemoteInspectorState> => ipcRenderer.invoke('remote:inspector-start', request),
     stopRemoteInspector: (request: RemoteInspectorRequest): Promise<RemoteInspectorState> => ipcRenderer.invoke('remote:inspector-stop', request),
     previewRemoteVisualStyle: (request: RemoteVisualStyleRequest): Promise<RemoteVisualStyleResult> => ipcRenderer.invoke('remote:visual-style-preview', request),
@@ -37,20 +40,25 @@ if (process.isMainFrame) {
       ipcRenderer.on('remote:inspector-selection', handler)
       return () => ipcRenderer.removeListener('remote:inspector-selection', handler)
     },
-    onRemoteInspectorShortcut: (listener: (projectId: string) => void): (() => void) => {
-      const handler = (_event: IpcRendererEvent, projectId: string): void => listener(projectId)
+    onRemoteInspectorShortcut: (listener: (projectId: string, viewId?: string) => void): (() => void) => {
+      const handler = (_event: IpcRendererEvent, projectId: string, viewId?: string): void => listener(projectId, viewId)
       ipcRenderer.on('remote:inspector-shortcut', handler)
       return () => ipcRenderer.removeListener('remote:inspector-shortcut', handler)
     },
-    onRemoteInspectorCanceled: (listener: (projectId: string) => void): (() => void) => {
-      const handler = (_event: IpcRendererEvent, projectId: string): void => listener(projectId)
+    onRemoteInspectorCanceled: (listener: (projectId: string, viewId?: string) => void): (() => void) => {
+      const handler = (_event: IpcRendererEvent, projectId: string, viewId?: string): void => listener(projectId, viewId)
       ipcRenderer.on('remote:inspector-canceled', handler)
       return () => ipcRenderer.removeListener('remote:inspector-canceled', handler)
     },
-    onRemoteInspectorReady: (listener: (projectId: string) => void): (() => void) => {
-      const handler = (_event: IpcRendererEvent, projectId: string): void => listener(projectId)
+    onRemoteInspectorReady: (listener: (projectId: string, viewId?: string) => void): (() => void) => {
+      const handler = (_event: IpcRendererEvent, projectId: string, viewId?: string): void => listener(projectId, viewId)
       ipcRenderer.on('remote:inspector-ready', handler)
       return () => ipcRenderer.removeListener('remote:inspector-ready', handler)
+    },
+    onRemoteEscape: (listener: (projectId: string, viewId?: string) => void): (() => void) => {
+      const handler = (_event: IpcRendererEvent, projectId: string, viewId?: string): void => listener(projectId, viewId)
+      ipcRenderer.on('remote:escape', handler)
+      return () => ipcRenderer.removeListener('remote:escape', handler)
     },
     onRemoteZoomGesture: (listener: (gesture: RemoteZoomGesture) => void): (() => void) => {
       const handler = (_event: IpcRendererEvent, gesture: RemoteZoomGesture): void => listener(gesture)
@@ -62,8 +70,8 @@ if (process.isMainFrame) {
       ipcRenderer.on('remote:state', handler)
       return () => ipcRenderer.removeListener('remote:state', handler)
     },
-    onRemoteBlockedNavigation: (listener: (payload: { url: string; detail: string }) => void): (() => void) => {
-      const handler = (_event: IpcRendererEvent, payload: { url: string; detail: string }): void => listener(payload)
+    onRemoteBlockedNavigation: (listener: (payload: { url: string; detail: string; viewId?: string }) => void): (() => void) => {
+      const handler = (_event: IpcRendererEvent, payload: { url: string; detail: string; viewId?: string }): void => listener(payload)
       ipcRenderer.on('remote:blocked-navigation', handler)
       return () => ipcRenderer.removeListener('remote:blocked-navigation', handler)
     },
@@ -111,6 +119,8 @@ if (process.isMainFrame) {
     exportProjectCopy: (): Promise<ExportResult | null> => ipcRenderer.invoke('staging:export-copy'),
     exportReport: (projectOrRuleIds?: ProjectSnapshot | string[], acceptedRuleIds?: string[]): Promise<string | null> =>
       ipcRenderer.invoke('project:export-report', reportRuleIds(projectOrRuleIds, acceptedRuleIds)),
+    captureInterfaceRegion: (region: InterfaceCaptureRegion, suggestedName?: string): Promise<string | null> =>
+      ipcRenderer.invoke('interface:capture-region', { region, suggestedName }),
     copyText: (text: string): Promise<void> => ipcRenderer.invoke('clipboard:write', text),
     getPathForFile: (file: File): string => webUtils.getPathForFile(file)
   })

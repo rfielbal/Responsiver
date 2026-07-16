@@ -2,6 +2,7 @@
 
 import type {
   ExportResult,
+  InterfaceCaptureRegion,
   LocalAiRequest,
   LocalAiResponse,
   LocalAiStatus,
@@ -19,8 +20,11 @@ import type {
   RemoteInspectorState,
   RemoteOpenRequest,
   RemotePageState,
+  RemoteScrollApplyRequest,
+  RemoteScrollSnapshot,
   RemoteSourceAssociationRequest,
   RemoteViewBounds,
+  RemoteViewReleaseRequest,
   RemoteViewport,
   RemoteVisualStyleRequest,
   RemoteVisualStyleResult,
@@ -56,21 +60,25 @@ declare global {
     openRemoteUrl: (request: RemoteOpenRequest) => Promise<ProjectSnapshot>
     associateRemoteRoot: (request: RemoteSourceAssociationRequest) => Promise<ProjectSnapshot>
     setRemoteBounds: (bounds: RemoteViewBounds) => Promise<void>
-    navigateRemote: (action: 'back' | 'forward' | 'reload' | 'url', value?: string) => Promise<RemotePageState>
-    getRemoteState: () => Promise<RemotePageState>
-    auditRemote: (viewports: RemoteViewport[]) => Promise<RemoteAuditResult>
-    focusRemoteFinding: (selector: string) => Promise<RemoteFocusResult>
+    releaseRemoteView: (request: RemoteViewReleaseRequest) => Promise<void>
+    navigateRemote: (action: 'back' | 'forward' | 'reload' | 'url', value?: string, request?: RemoteInspectorRequest) => Promise<RemotePageState>
+    getRemoteState: (request?: RemoteInspectorRequest) => Promise<RemotePageState>
+    readRemoteScroll: (request: RemoteInspectorRequest) => Promise<RemoteScrollSnapshot>
+    applyRemoteScroll: (request: RemoteScrollApplyRequest) => Promise<RemoteScrollSnapshot>
+    auditRemote: (viewports: RemoteViewport[], request?: RemoteInspectorRequest) => Promise<RemoteAuditResult>
+    focusRemoteFinding: (selector: string, request?: RemoteInspectorRequest) => Promise<RemoteFocusResult>
     startRemoteInspector: (request: RemoteInspectorRequest) => Promise<RemoteInspectorState>
     stopRemoteInspector: (request: RemoteInspectorRequest) => Promise<RemoteInspectorState>
     previewRemoteVisualStyle: (request: RemoteVisualStyleRequest) => Promise<RemoteVisualStyleResult>
     clearRemoteVisualStyle: (request: RemoteInspectorRequest) => Promise<RemoteVisualStyleResult>
     onRemoteInspectorSelection: (listener: (selection: RemoteInspectorSelection) => void) => () => void
-    onRemoteInspectorShortcut: (listener: (projectId: string) => void) => () => void
-    onRemoteInspectorCanceled: (listener: (projectId: string) => void) => () => void
-    onRemoteInspectorReady: (listener: (projectId: string) => void) => () => void
+    onRemoteInspectorShortcut: (listener: (projectId: string, viewId?: string) => void) => () => void
+    onRemoteInspectorCanceled: (listener: (projectId: string, viewId?: string) => void) => () => void
+    onRemoteInspectorReady: (listener: (projectId: string, viewId?: string) => void) => () => void
+    onRemoteEscape: (listener: (projectId: string, viewId?: string) => void) => () => void
     onRemoteZoomGesture: (listener: (gesture: RemoteZoomGesture) => void) => () => void
     onRemoteState: (listener: (state: RemotePageState) => void) => () => void
-    onRemoteBlockedNavigation: (listener: (payload: { url: string; detail: string }) => void) => () => void
+    onRemoteBlockedNavigation: (listener: (payload: { url: string; detail: string; viewId?: string }) => void) => () => void
     onExtensionOpenProject: (listener: (payload: { project: ProjectSnapshot; viewport: RemoteViewport }) => void) => () => void
     listWorkspaceFiles: (projectId: string) => Promise<WorkspaceFileSummary[]>
     readWorkspaceFile: (projectId: string, path: string) => Promise<WorkspaceFileSnapshot>
@@ -98,6 +106,7 @@ declare global {
     exportChangedFiles: () => Promise<ExportResult | null>
     exportProjectCopy: () => Promise<ExportResult | null>
     exportReport: (projectOrRuleIds?: ProjectSnapshot | string[], acceptedRuleIds?: string[]) => Promise<string | null>
+    captureInterfaceRegion: (region: InterfaceCaptureRegion, suggestedName?: string) => Promise<string | null>
     copyText: (text: string) => Promise<void>
     getPathForFile: (file: File) => string
   }

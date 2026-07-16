@@ -12,6 +12,7 @@ import type {
   RemoteInspectorState,
   RemoteOpenRequest,
   RemotePageState,
+  RemoteScrollSnapshot,
   RemoteViewBounds,
   RemoteViewport,
   RemoteVisualStyleResult
@@ -46,6 +47,68 @@ const maxAuditNodesPerViewport = 5_000
 const maxAuditFindingsPerViewport = 60
 const maxAuditFindingsTotal = 20
 const defaultViewport: RemoteViewport = { width: 393, height: 852, deviceScaleFactor: 1, mobile: true, touch: true }
+
+/** Une session distante conserve au plus cinq renderers Chromium simultanés. */
+export const MAX_REMOTE_BROWSER_VIEWS = 5
+
+export const REMOTE_SCROLL_LIMITS = Object.freeze({
+  maxLandmarks: 2_000,
+  maxAnchorIndex: 2_000,
+  maxScrollableNodes: 2_000,
+  maxContainerIndex: 2_000,
+  maxViewportOffset: 4
+})
+
+/**
+ * Valide l'identité renderer d'une vue secondaire. L'absence désigne toujours
+ * la vue principale historique afin de préserver l'API mono-vue.
+ */
+export function normalizeRemoteViewId(value: unknown): string | null {
+  if (value === undefined || value === null) return null
+  if (typeof value !== 'string' || !/^[a-z\d](?:[a-z\d._-]{0,63})$/i.test(value)) {
+    throw new Error('L’identifiant de la vue distante est invalide.')
+  }
+  return value
+}
+
+const remoteScrollAnchorKinds = new Set<RemoteScrollSnapshot['anchor'] extends infer Anchor
+  ? Anchor extends { kind: infer Kind } ? Kind : never
+  : never>(['header', 'navigation', 'main', 'section', 'aside', 'footer'])
+
+function boundedScrollNumber(value: unknown, minimum: number, maximum: number): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null
+  return Math.round(Math.min(maximum, Math.max(minimum, value)) * 1_000_000) / 1_000_000
+}
+
+/** Revalide toute valeur issue du document distant avant son passage en IPC. */
+export function sanitizeRemoteScrollSnapshot(value: unknown): RemoteScrollSnapshot | null {
+  if (!value || typeof value !== 'object') return null
+  const candidate = value as Record<string, unknown>
+  if (candidate.version !== 1) return null
+  const xProgress = boundedScrollNumber(candidate.xProgress, 0, 1)
+  const yProgress = boundedScrollNumber(candidate.yProgress, 0, 1)
+  if (xProgress === null || yProgress === null) return null
+  let container: RemoteScrollSnapshot['container']
+  if (candidate.container !== undefined && candidate.container !== null) {
+    if (!candidate.container || typeof candidate.container !== 'object') return null
+    const rawContainer = candidate.container as Record<string, unknown>
+    if (rawContainer.kind !== 'scrollable' || typeof rawContainer.index !== 'number' || !Number.isSafeInteger(rawContainer.index) ||
+      rawContainer.index < 0 || rawContainer.index >= REMOTE_SCROLL_LIMITS.maxContainerIndex) return null
+    container = { kind: 'scrollable', index: rawContainer.index }
+  }
+  let anchor: RemoteScrollSnapshot['anchor'] = null
+  if (candidate.anchor !== null && candidate.anchor !== undefined) {
+    if (!candidate.anchor || typeof candidate.anchor !== 'object') return null
+    const rawAnchor = candidate.anchor as Record<string, unknown>
+    const kind = rawAnchor.kind
+    const index = rawAnchor.index
+    const viewportOffset = boundedScrollNumber(rawAnchor.viewportOffset, -REMOTE_SCROLL_LIMITS.maxViewportOffset, REMOTE_SCROLL_LIMITS.maxViewportOffset)
+    if (typeof kind !== 'string' || !remoteScrollAnchorKinds.has(kind as NonNullable<RemoteScrollSnapshot['anchor']>['kind']) ||
+      typeof index !== 'number' || !Number.isSafeInteger(index) || index < 0 || index >= REMOTE_SCROLL_LIMITS.maxAnchorIndex || viewportOffset === null) return null
+    anchor = { kind: kind as NonNullable<RemoteScrollSnapshot['anchor']>['kind'], index, viewportOffset }
+  }
+  return { version: 1, xProgress, yProgress, ...(container ? { container } : {}), anchor }
+}
 
 export const REMOTE_INSPECTOR_LIMITS = Object.freeze({
   maxCssBytes: 64 * 1024,
@@ -139,6 +202,90 @@ const remoteInspectorPayloadFunction = `function () {
   };
 }`
 
+const remoteScrollSnapshotFunction = `function (preferredContainer) {
+  const root = document.scrollingElement || document.documentElement;
+  const clamp = (value, minimum, maximum) => Math.min(maximum, Math.max(minimum, Number.isFinite(value) ? value : minimum));
+  const overflowAllowsScroll = (value) => /^(?:auto|scroll|overlay)$/.test(String(value || '').toLowerCase());
+  const scrollables = [];
+  const nodes = [];
+  const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_ELEMENT);
+  while (nodes.length < ${REMOTE_SCROLL_LIMITS.maxScrollableNodes} && walker.nextNode()) nodes.push(walker.currentNode);
+  for (const element of nodes) {
+    const style = getComputedStyle(element);
+    const allowsX = overflowAllowsScroll(style.overflowX);
+    const allowsY = overflowAllowsScroll(style.overflowY);
+    if (!allowsX && !allowsY) continue;
+    const maxX = Math.max(0, element.scrollWidth - element.clientWidth);
+    const maxY = Math.max(0, element.scrollHeight - element.clientHeight);
+    const rectangle = element.getBoundingClientRect();
+    const visibleWidth = Math.max(0, Math.min(window.innerWidth, rectangle.right) - Math.max(0, rectangle.left));
+    const visibleHeight = Math.max(0, Math.min(window.innerHeight, rectangle.bottom) - Math.max(0, rectangle.top));
+    scrollables.push({ element, index: scrollables.length, maxX, maxY, rectangle, visibleArea: visibleWidth * visibleHeight });
+  }
+  const rootMaxX = Math.max(0, root.scrollWidth - window.innerWidth);
+  const rootMaxY = Math.max(0, root.scrollHeight - window.innerHeight);
+  const viewportArea = Math.max(1, window.innerWidth * window.innerHeight);
+  const minimumRatio = rootMaxX > 1 || rootMaxY > 1 ? .5 : .18;
+  const scoreFor = (candidate) => candidate.visibleArea * (candidate.maxY > 1 ? 2 : 1);
+  const isEligible = (candidate) => Boolean(candidate)
+    && (candidate.maxX > 1 || candidate.maxY > 1)
+    && candidate.visibleArea / viewportArea >= minimumRatio;
+  let dominant = null;
+  for (const candidate of scrollables) {
+    if (!isEligible(candidate)) continue;
+    const score = scoreFor(candidate);
+    if (!dominant || score > dominant.score) dominant = { ...candidate, score };
+  }
+  let selected = null;
+  if (preferredContainer !== null && preferredContainer && preferredContainer.kind === 'scrollable' && Number.isSafeInteger(preferredContainer.index)) {
+    const preferred = scrollables[preferredContainer.index] || null;
+    if (isEligible(preferred)) {
+      const score = scoreFor(preferred);
+      if (!dominant || score >= dominant.score * .75) selected = { ...preferred, score };
+    }
+  }
+  if (!selected && preferredContainer !== null) selected = dominant;
+  const scroller = selected ? selected.element : root;
+  const viewportWidth = Math.max(1, selected ? scroller.clientWidth : window.innerWidth);
+  const viewportHeight = Math.max(1, selected ? scroller.clientHeight : window.innerHeight);
+  const originTop = selected ? selected.rectangle.top : 0;
+  const maxX = Math.max(0, scroller.scrollWidth - viewportWidth);
+  const maxY = Math.max(0, scroller.scrollHeight - viewportHeight);
+  const kindFor = (element) => {
+    const role = String(element.getAttribute('role') || '').toLowerCase();
+    if (role === 'banner') return 'header';
+    if (role === 'navigation') return 'navigation';
+    if (role === 'main') return 'main';
+    if (role === 'region') return 'section';
+    if (role === 'complementary') return 'aside';
+    if (role === 'contentinfo') return 'footer';
+    const tag = element.tagName.toLowerCase();
+    return tag === 'nav' ? 'navigation' : ['header', 'main', 'section', 'aside', 'footer'].includes(tag) ? tag : null;
+  };
+  const selector = 'header,nav,main,section,aside,footer,[role="banner"],[role="navigation"],[role="main"],[role="region"],[role="complementary"],[role="contentinfo"]';
+  const landmarks = nodes.filter((element) => element.matches(selector)).slice(0, ${REMOTE_SCROLL_LIMITS.maxLandmarks});
+  const counts = { header: 0, navigation: 0, main: 0, section: 0, aside: 0, footer: 0 };
+  let best = null;
+  for (const element of landmarks) {
+    if (selected && !selected.element.contains(element)) continue;
+    const kind = kindFor(element);
+    if (!kind) continue;
+    const index = counts[kind]++;
+    const rectangle = element.getBoundingClientRect();
+    const relativeTop = rectangle.top - originTop;
+    if (!Number.isFinite(relativeTop) || Math.abs(relativeTop) > viewportHeight * 2) continue;
+    const score = Math.abs(relativeTop);
+    if (!best || score < best.score) best = { kind, index, viewportOffset: relativeTop / viewportHeight, score };
+  }
+  return {
+    version: 1,
+    xProgress: maxX > 0 ? clamp(scroller.scrollLeft / maxX, 0, 1) : 0,
+    yProgress: maxY > 0 ? clamp(scroller.scrollTop / maxY, 0, 1) : 0,
+    ...(selected ? { container: { kind: 'scrollable', index: selected.index } } : {}),
+    anchor: best ? { kind: best.kind, index: best.index, viewportOffset: best.viewportOffset } : null
+  };
+}`
+
 function cleanInspectorText(value: unknown, maximum: number): string {
   return typeof value === 'string'
     ? value.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, maximum)
@@ -206,6 +353,8 @@ export interface RemoteSessionCallbacks {
   onInspectorShortcut?: () => void
   onInspectorCanceled?: () => void
   onInspectorReady?: () => void
+  /** Échap est réservé à la sortie des surfaces plein écran de Responsiver. */
+  onEscape?: () => void
   onZoomGesture?: (gesture: { deltaY: number; x: number; y: number }) => void
 }
 
@@ -596,6 +745,11 @@ export class RemoteBrowserSession {
     contents.on('before-input-event', (event, input) => {
       if (input.type !== 'keyDown') return
       const key = input.key.toLowerCase()
+      if (key === 'escape') {
+        event.preventDefault()
+        this.callbacks.onEscape?.()
+        return
+      }
       const shortcut = input.key === 'F12' || ((input.meta || input.control) && input.alt && key === 'i') || ((input.meta || input.control) && input.shift && key === 'c')
       if (!shortcut) return
       event.preventDefault()
@@ -994,6 +1148,82 @@ export class RemoteBrowserSession {
 
   getState(): RemotePageState {
     return this.state()
+  }
+
+  async getScrollSnapshot(): Promise<RemoteScrollSnapshot> {
+    if (this.closed) throw new Error('La session distante est fermée.')
+    if (this.auditRunning) throw new Error('Le défilement synchronisé est suspendu pendant l’audit multi-viewport.')
+    const raw = await withTimeout(
+      this.view.webContents.executeJavaScript(`(${remoteScrollSnapshotFunction})()`),
+      scriptTimeoutMs,
+      'La lecture du défilement distant a dépassé le délai autorisé.'
+    )
+    const snapshot = sanitizeRemoteScrollSnapshot(raw)
+    if (!snapshot) throw new Error('La page a renvoyé un état de défilement invalide.')
+    return snapshot
+  }
+
+  async applyScrollSnapshot(value: unknown): Promise<RemoteScrollSnapshot> {
+    if (this.closed) throw new Error('La session distante est fermée.')
+    if (this.auditRunning) throw new Error('Le défilement synchronisé est suspendu pendant l’audit multi-viewport.')
+    const snapshot = sanitizeRemoteScrollSnapshot(value)
+    if (!snapshot) throw new Error('L’état de défilement à appliquer est invalide.')
+    const raw = await withTimeout(this.view.webContents.executeJavaScript(`(() => {
+      const snapshot = ${JSON.stringify(snapshot)};
+      const readSnapshot = ${remoteScrollSnapshotFunction};
+      const root = document.scrollingElement || document.documentElement;
+      const overflowAllowsScroll = (value) => /^(?:auto|scroll|overlay)$/.test(String(value || '').toLowerCase());
+      const scrollables = [];
+      const nodes = [];
+      const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_ELEMENT);
+      while (nodes.length < ${REMOTE_SCROLL_LIMITS.maxScrollableNodes} && walker.nextNode()) nodes.push(walker.currentNode);
+      for (const element of nodes) {
+        const style = getComputedStyle(element);
+        if (!overflowAllowsScroll(style.overflowX) && !overflowAllowsScroll(style.overflowY)) continue;
+        scrollables.push(element);
+      }
+      const resolvedContainer = readSnapshot(snapshot.container || undefined).container || null;
+      const scroller = resolvedContainer ? scrollables[resolvedContainer.index] : root;
+      if (!scroller) return readSnapshot();
+      const kindFor = (element) => {
+        const role = String(element.getAttribute('role') || '').toLowerCase();
+        if (role === 'banner') return 'header';
+        if (role === 'navigation') return 'navigation';
+        if (role === 'main') return 'main';
+        if (role === 'region') return 'section';
+        if (role === 'complementary') return 'aside';
+        if (role === 'contentinfo') return 'footer';
+        const tag = element.tagName.toLowerCase();
+        return tag === 'nav' ? 'navigation' : ['header', 'main', 'section', 'aside', 'footer'].includes(tag) ? tag : null;
+      };
+      const internal = scroller !== root;
+      const viewportWidth = Math.max(1, internal ? scroller.clientWidth : window.innerWidth);
+      const viewportHeight = Math.max(1, internal ? scroller.clientHeight : window.innerHeight);
+      const originTop = internal ? scroller.getBoundingClientRect().top : 0;
+      const maxX = Math.max(0, scroller.scrollWidth - viewportWidth);
+      const maxY = Math.max(0, scroller.scrollHeight - viewportHeight);
+      let targetY = snapshot.yProgress * maxY;
+      if (snapshot.anchor) {
+        const selector = 'header,nav,main,section,aside,footer,[role="banner"],[role="navigation"],[role="main"],[role="region"],[role="complementary"],[role="contentinfo"]';
+        const landmarks = nodes.filter((element) => element.matches(selector)).slice(0, ${REMOTE_SCROLL_LIMITS.maxLandmarks});
+        let index = 0;
+        for (const element of landmarks) {
+          if (internal && !scroller.contains(element)) continue;
+          if (kindFor(element) !== snapshot.anchor.kind) continue;
+          if (index++ !== snapshot.anchor.index) continue;
+          const rectangle = element.getBoundingClientRect();
+          const relativeTop = rectangle.top - originTop;
+          if (Number.isFinite(relativeTop)) targetY = scroller.scrollTop + relativeTop - snapshot.anchor.viewportOffset * viewportHeight;
+          break;
+        }
+      }
+      scroller.scrollLeft = Math.min(maxX, Math.max(0, snapshot.xProgress * maxX));
+      scroller.scrollTop = Math.min(maxY, Math.max(0, targetY));
+      return new Promise((resolve) => requestAnimationFrame(() => resolve(readSnapshot(resolvedContainer))));
+    })()`), scriptTimeoutMs, 'L’application du défilement distant a dépassé le délai autorisé.')
+    const applied = sanitizeRemoteScrollSnapshot(raw)
+    if (!applied) throw new Error('La page a renvoyé un état de défilement invalide après application.')
+    return applied
   }
 
   get linkedRoot(): string | null {

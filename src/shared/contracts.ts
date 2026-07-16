@@ -155,6 +155,8 @@ export interface RemoteViewport {
 export interface RemoteViewBounds {
   /** Identifiant anti-course de la session distante affichée. */
   projectId: string
+  /** Vue native ciblée. Absente = vue principale historique. */
+  viewId?: string
   x: number
   y: number
   width: number
@@ -168,6 +170,8 @@ export interface RemoteViewBounds {
 
 export interface RemoteZoomGesture {
   projectId: string
+  /** Vue native ayant reçu le geste. Absente = vue principale historique. */
+  viewId?: string
   deltaY: number
   /** Coordonnées physiques du pointeur dans la WebContentsView. */
   x: number
@@ -175,12 +179,44 @@ export interface RemoteZoomGesture {
 }
 
 export interface RemotePageState {
+  /** Vue native concernée. Absente = vue principale historique. */
+  viewId?: string
   url: string
   title: string
   path: string
   loading: boolean
   canGoBack: boolean
   canGoForward: boolean
+}
+
+export type RemoteScrollAnchorKind = 'header' | 'navigation' | 'main' | 'section' | 'aside' | 'footer'
+
+/**
+ * État de défilement volontairement dépourvu de texte, sélecteur, URL et
+ * contenu DOM. L'ancre ne décrit qu'un type de repère et son rang.
+ */
+export interface RemoteScrollSnapshot {
+  version: 1
+  xProgress: number
+  yProgress: number
+  /**
+   * Conteneur scrollable structurel, identifié uniquement par son rang borné
+   * dans le DOM. Absent = défilement du document historique.
+   */
+  container?: {
+    kind: 'scrollable'
+    index: number
+  }
+  anchor: {
+    kind: RemoteScrollAnchorKind
+    index: number
+    /** Position verticale du repère, exprimée en hauteur de viewport. */
+    viewportOffset: number
+  } | null
+}
+
+export interface RemoteScrollApplyRequest extends RemoteInspectorRequest {
+  snapshot: RemoteScrollSnapshot
 }
 
 export interface RemoteAuditResult {
@@ -300,6 +336,14 @@ export interface VisualGestureCommit {
 export interface RemoteInspectorRequest {
   /** Identifiant anti-course de la session distante affichée. */
   projectId: string
+  /** Vue native ciblée. Absente = vue principale historique. */
+  viewId?: string
+}
+
+/** Libère explicitement une vue secondaire sans fermer le projet distant. */
+export interface RemoteViewReleaseRequest {
+  projectId: string
+  viewId: string
 }
 
 export interface RemoteVisualStyleRequest extends RemoteInspectorRequest {
@@ -317,6 +361,8 @@ export interface RemoteInspectorState {
 
 export interface RemoteInspectorSelection extends VisualElementSnapshot {
   projectId: string
+  /** Vue native inspectée. Absente = vue principale historique. */
+  viewId?: string
   /** Faux pour une URL publique, un localhost non lié ou un Shadow DOM non ciblable en CSS. */
   editable: boolean
 }
@@ -686,4 +732,17 @@ export interface StagingVerificationResult {
 export interface ExportResult {
   path: string
   files: number
+}
+
+/** Rectangle CSS, relatif à la zone de contenu visible de la fenêtre. */
+export interface InterfaceCaptureRegion {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export interface InterfaceCaptureRequest {
+  region: InterfaceCaptureRegion
+  suggestedName?: string
 }

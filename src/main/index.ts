@@ -1,15 +1,15 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, session as electronSession, type IpcMainInvokeEvent } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, screen, session as electronSession, type IpcMainInvokeEvent } from 'electron'
 import { createHash, randomUUID } from 'node:crypto'
 import { cp, lstat, mkdir, readFile, readdir, realpath, stat, writeFile } from 'node:fs/promises'
 import { dirname, extname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import type { ExportResult, LocalAiRequest, LocalAiResponse, LocalAiStatus, MatrixRunProgress, MatrixRunRequest, MatrixRunResult, ProjectIssue, ProjectPreparationProgress, ProjectSnapshot, RecentProjectSummary, RegressionFinding, RegressionReport, RemoteAuditResult, RemoteFocusResult, RemoteInspectorRequest, RemoteInspectorSelection, RemoteInspectorState, RemoteOpenRequest, RemotePageState, RemoteSourceAssociationRequest, RemoteViewBounds, RemoteViewport, RemoteVisualStyleRequest, RemoteVisualStyleResult, RemoteZoomGesture, StagingApplyResult, StagingRequest, StagingSnapshot, StagingUndoResult, StagingVerificationRequest, StagingVerificationResult, WorkspaceApplyResult, WorkspaceDiff, WorkspaceFileSnapshot, WorkspaceFileSummary, WorkspaceSnapshot } from '../shared/contracts'
+import type { ExportResult, LocalAiRequest, LocalAiResponse, LocalAiStatus, MatrixRunProgress, MatrixRunRequest, MatrixRunResult, ProjectIssue, ProjectPreparationProgress, ProjectSnapshot, RecentProjectSummary, RegressionFinding, RegressionReport, RemoteAuditResult, RemoteFocusResult, RemoteInspectorRequest, RemoteInspectorSelection, RemoteInspectorState, RemoteOpenRequest, RemotePageState, RemoteScrollApplyRequest, RemoteScrollSnapshot, RemoteSourceAssociationRequest, RemoteViewBounds, RemoteViewReleaseRequest, RemoteViewport, RemoteVisualStyleRequest, RemoteVisualStyleResult, RemoteZoomGesture, StagingApplyResult, StagingRequest, StagingSnapshot, StagingUndoResult, StagingVerificationRequest, StagingVerificationResult, WorkspaceApplyResult, WorkspaceDiff, WorkspaceFileSnapshot, WorkspaceFileSummary, WorkspaceSnapshot } from '../shared/contracts'
 import { analyzeProject, createDemoProject } from './project-analyzer'
 import { startProjectServer, type ProjectServer } from './project-server'
 import { buildProjectStaging, type ProjectStaging } from './project-transformer'
 import { createRecentProjectsStore, type RecentProjectsStore } from './recent-projects'
 import { assertPrivateExportDirectory, reservePrivateExportDirectory } from './secure-export'
-import { REMOTE_INSPECTOR_LIMITS, RemoteBrowserSession } from './remote-session'
+import { MAX_REMOTE_BROWSER_VIEWS, REMOTE_INSPECTOR_LIMITS, RemoteBrowserSession, normalizeRemoteViewId } from './remote-session'
 import { createWorkspaceEditor, type WorkspaceEditor } from './workspace-editor'
 import { probeLocalAi, sendLocalAiRequest } from './local-ai'
 import { resolveExtensionInbox, startExtensionInboxWatcher, type ExtensionOpenUrlRequest } from './extension-inbox'
@@ -19,6 +19,7 @@ import { CANONICAL_MATRIX_DEVICES, canonicalMatrixDevice } from '../shared/devic
 import { compareMatrixSnapshots } from '../shared/regression-matrix'
 import { classifyProjectIssue, isExpressEligibleIssue } from '../shared/finding-policy'
 import { runProjectMatrix } from './matrix-runner'
+import { normalizeCaptureScaleFactor, normalizeInterfaceCaptureRequest } from './interface-capture'
 
 interface StagingVerification {
   token: string
@@ -41,6 +42,10 @@ interface ActiveProjectSession {
   staging: ProjectStaging | null
   stagingUndo: StagingSourceUndoSnapshot | null
   remoteBrowser: RemoteBrowserSession | null
+  /** Renderers additionnels du Studio. La vue principale reste remoteBrowser. */
+  remoteViews?: Map<string, RemoteBrowserSession>
+  remoteViewCreations?: Map<string, Promise<RemoteBrowserSession>>
+  remoteViewCloseTimers?: Map<string, ReturnType<typeof setTimeout>>
   workspace: WorkspaceEditor | null
   verification?: StagingVerification | null
   remoteRouteTruncation?: Map<string, boolean>
@@ -143,14 +148,34 @@ async function closePreviewServer(server: ProjectServer | null): Promise<void> {
   await clearPreviewStorage(server.origin)
 }
 
+function closeRemoteBrowserDetached(browser: RemoteBrowserSession): void {
+  void browser.close().catch(() => undefined)
+}
+
+function closeRemoteBrowserWhenReady(creation: Promise<RemoteBrowserSession>): void {
+  void creation.then((browser) => browser.close()).catch(() => undefined)
+}
+
 async function disposeSession(session: ActiveProjectSession | null): Promise<void> {
   if (!session) return
+  for (const timer of session.remoteViewCloseTimers?.values() ?? []) clearTimeout(timer)
+  session.remoteViewCloseTimers?.clear()
+  const secondary = new Set(session.remoteViews?.values() ?? [])
+  const pendingCreations = [...(session.remoteViewCreations?.values() ?? [])]
+  session.remoteViews?.clear()
+  session.remoteViewCreations?.clear()
+  // Une création Chromium peut cumuler plusieurs délais réseau et CDP. Elle ne
+  // doit jamais retenir le changement de projet : son propre garde de session
+  // la ferme à résolution, et ce filet garantit la fermeture même si son cycle
+  // d'installation évolue ultérieurement.
+  for (const creation of pendingCreations) closeRemoteBrowserWhenReady(creation)
   await Promise.all([
     closePreviewServer(session.sourceServer),
     closePreviewServer(session.proposalServer),
     closePreviewServer(session.stagedServer),
     closePreviewServer(session.workspaceServer),
-    session.remoteBrowser?.close()
+    session.remoteBrowser?.close(),
+    ...[...secondary].map((browser) => browser.close())
   ])
 }
 
@@ -278,9 +303,9 @@ async function openDemoProject(): Promise<ProjectSnapshot> {
   return project
 }
 
-function notifyRemoteState(state: RemotePageState): void {
+function notifyRemoteState(state: RemotePageState, viewId?: string): void {
   if (!mainWindow || mainWindow.isDestroyed()) return
-  mainWindow.webContents.send('remote:state', state)
+  mainWindow.webContents.send('remote:state', viewId ? { ...state, viewId } : state)
 }
 
 async function normalizeLinkedRoot(value: unknown): Promise<string | null> {
@@ -358,6 +383,12 @@ async function openRemoteProject(value: unknown): Promise<ProjectSnapshot> {
       if (!createdBrowser || session?.remoteBrowser !== createdBrowser) return
       mainWindow.webContents.send('remote:inspector-ready', session.project.id)
     },
+    onEscape: () => {
+      if (!mainWindow || mainWindow.isDestroyed()) return
+      const session = activeSession
+      if (!createdBrowser || session?.remoteBrowser !== createdBrowser) return
+      mainWindow.webContents.send('remote:escape', session.project.id)
+    },
     onZoomGesture: (gesture) => {
       if (!mainWindow || mainWindow.isDestroyed()) return
       const session = activeSession
@@ -395,6 +426,164 @@ function currentRemoteSession(): { session: ActiveProjectSession; browser: Remot
   return { session, browser: session.remoteBrowser }
 }
 
+function activeRemoteBrowsers(session: ActiveProjectSession): RemoteBrowserSession[] {
+  return session.remoteBrowser
+    ? [session.remoteBrowser, ...new Set(session.remoteViews?.values() ?? [])]
+    : []
+}
+
+function workspaceOverlayCss(session: ActiveProjectSession): string {
+  const overrides = session.workspace?.getOverrides()
+  if (!overrides) return ''
+  return [...overrides.entries()]
+    .filter(([path]) => path.toLowerCase().endsWith('.css'))
+    .map(([path, body]) => `/* ${path} — aperçu Responsiver */\n${body.toString('utf8')}`)
+    .join('\n\n')
+}
+
+function remoteSecondaryViewCount(session: ActiveProjectSession): number {
+  return new Set([
+    ...(session.remoteViews?.keys() ?? []),
+    ...(session.remoteViewCreations?.keys() ?? [])
+  ]).size
+}
+
+/**
+ * Libère immédiatement un slot déjà promis à la fermeture. Le délai de grâce
+ * reste utile à React StrictMode pour une même identité, mais ne doit pas
+ * empêcher une nouvelle suite d'appareils d'occuper les quatre slots distants.
+ */
+function evictScheduledRemoteView(session: ActiveProjectSession, requestedViewId: string): boolean {
+  for (const [viewId, timer] of session.remoteViewCloseTimers ?? []) {
+    if (viewId === requestedViewId) continue
+    clearTimeout(timer)
+    session.remoteViewCloseTimers?.delete(viewId)
+    const browser = session.remoteViews?.get(viewId)
+    const creation = session.remoteViewCreations?.get(viewId)
+    session.remoteViews?.delete(viewId)
+    session.remoteViewCreations?.delete(viewId)
+    if (browser) closeRemoteBrowserDetached(browser)
+    if (creation) closeRemoteBrowserWhenReady(creation)
+    return true
+  }
+  return false
+}
+
+async function ensureRemoteBrowserForView(session: ActiveProjectSession, viewId: string | null): Promise<RemoteBrowserSession> {
+  if (!session.remoteBrowser) throw new Error('Aucune session URL n’est active.')
+  if (!viewId) return session.remoteBrowser
+  const closeTimer = session.remoteViewCloseTimers?.get(viewId)
+  if (closeTimer) {
+    clearTimeout(closeTimer)
+    session.remoteViewCloseTimers?.delete(viewId)
+  }
+  const existing = session.remoteViews?.get(viewId)
+  if (existing) return existing
+  const pending = session.remoteViewCreations?.get(viewId)
+  if (pending) return pending
+  while (1 + remoteSecondaryViewCount(session) >= MAX_REMOTE_BROWSER_VIEWS && evictScheduledRemoteView(session, viewId)) {
+    // Plusieurs anciennes vues peuvent devoir céder leur slot à une suite
+    // entièrement différente ; la boucle reste bornée à quatre entrées.
+  }
+  if (1 + remoteSecondaryViewCount(session) >= MAX_REMOTE_BROWSER_VIEWS) {
+    throw new Error(`Responsiver limite le Studio distant à ${MAX_REMOTE_BROWSER_VIEWS} vues simultanées.`)
+  }
+  if (!mainWindow || mainWindow.isDestroyed()) throw new Error('La fenêtre Responsiver est indisponible.')
+
+  let createdBrowser: RemoteBrowserSession | null = null
+  let creation: Promise<RemoteBrowserSession>
+  creation = RemoteBrowserSession.create({
+    owner: mainWindow,
+    request: { url: session.remoteBrowser.getState().url, mode: session.remoteBrowser.mode },
+    linkedRoot: session.remoteBrowser.linkedRoot,
+    onState: (state) => {
+      if (activeSession === session && session.remoteViews?.get(viewId) === createdBrowser) notifyRemoteState(state, viewId)
+    },
+    onBlockedNavigation: (url, detail) => {
+      if (!mainWindow || mainWindow.isDestroyed() || activeSession !== session || session.remoteViews?.get(viewId) !== createdBrowser) return
+      mainWindow.webContents.send('remote:blocked-navigation', { url, detail, viewId })
+    },
+    onInspectorSelection: (selection) => {
+      if (!mainWindow || mainWindow.isDestroyed() || activeSession !== session || session.remoteViews?.get(viewId) !== createdBrowser) return
+      const payload: RemoteInspectorSelection = { ...selection, projectId: session.project.id, viewId }
+      mainWindow.webContents.send('remote:inspector-selection', payload)
+    },
+    onInspectorShortcut: () => {
+      if (!mainWindow || mainWindow.isDestroyed() || activeSession !== session || session.remoteViews?.get(viewId) !== createdBrowser) return
+      mainWindow.webContents.send('remote:inspector-shortcut', session.project.id, viewId)
+    },
+    onInspectorCanceled: () => {
+      if (!mainWindow || mainWindow.isDestroyed() || activeSession !== session || session.remoteViews?.get(viewId) !== createdBrowser) return
+      mainWindow.webContents.send('remote:inspector-canceled', session.project.id, viewId)
+    },
+    onInspectorReady: () => {
+      if (!mainWindow || mainWindow.isDestroyed() || activeSession !== session || session.remoteViews?.get(viewId) !== createdBrowser) return
+      mainWindow.webContents.send('remote:inspector-ready', session.project.id, viewId)
+    },
+    onEscape: () => {
+      if (!mainWindow || mainWindow.isDestroyed() || activeSession !== session || session.remoteViews?.get(viewId) !== createdBrowser) return
+      mainWindow.webContents.send('remote:escape', session.project.id, viewId)
+    },
+    onZoomGesture: (gesture) => {
+      if (!mainWindow || mainWindow.isDestroyed() || activeSession !== session || session.remoteViews?.get(viewId) !== createdBrowser) return
+      const payload: RemoteZoomGesture = { ...gesture, projectId: session.project.id, viewId }
+      mainWindow.webContents.send('remote:zoom-gesture', payload)
+    }
+  }).then(async (browser) => {
+    createdBrowser = browser
+    if (activeSession !== session || session.remoteViewCreations?.get(viewId) !== creation) {
+      await browser.close()
+      throw new Error('La création de la vue distante a été annulée.')
+    }
+    session.remoteViews ??= new Map()
+    session.remoteViews.set(viewId, browser)
+    const currentLinkedRoot = session.remoteBrowser?.linkedRoot
+    if (currentLinkedRoot && browser.mode === 'localhost' && browser.linkedRoot !== currentLinkedRoot) browser.associateLinkedRoot(currentLinkedRoot)
+    const css = workspaceOverlayCss(session)
+    if (css) await browser.setWorkspaceCss(css).catch(() => undefined)
+    return browser
+  })
+  session.remoteViewCreations ??= new Map()
+  session.remoteViewCreations.set(viewId, creation)
+  void creation.finally(() => {
+    if (session.remoteViewCreations?.get(viewId) === creation) session.remoteViewCreations.delete(viewId)
+  }).catch(() => undefined)
+  return creation
+}
+
+function remoteRequestViewId(value: unknown): string | null {
+  return normalizeRemoteViewId(value && typeof value === 'object' ? (value as { viewId?: unknown }).viewId : undefined)
+}
+
+async function releaseRemoteBrowserView(value: unknown): Promise<void> {
+  if (!value || typeof value !== 'object') throw new Error('La demande de fermeture de vue distante est invalide.')
+  const request = value as Partial<RemoteViewReleaseRequest>
+  if (typeof request.projectId !== 'string' || request.projectId.length === 0 || request.projectId.length > 300) {
+    throw new Error('La demande de fermeture de vue distante est invalide.')
+  }
+  const viewId = normalizeRemoteViewId(request.viewId)
+  if (!viewId) throw new Error('La vue principale ne peut pas être libérée séparément du projet.')
+  const session = currentSession()
+  assertExpectedProject(session, request.projectId)
+  const previous = session.remoteViewCloseTimers?.get(viewId)
+  if (previous) clearTimeout(previous)
+  session.remoteViewCloseTimers ??= new Map()
+  const timer = setTimeout(() => {
+    // Une nouvelle instance de RemotePreview peut avoir réclamé la même vue
+    // pendant le délai (notamment sous React StrictMode).
+    if (session.remoteViewCloseTimers?.get(viewId) !== timer) return
+    session.remoteViewCloseTimers.delete(viewId)
+    const browser = session.remoteViews?.get(viewId)
+    const creation = session.remoteViewCreations?.get(viewId)
+    session.remoteViews?.delete(viewId)
+    session.remoteViewCreations?.delete(viewId)
+    if (browser) closeRemoteBrowserDetached(browser)
+    if (creation) closeRemoteBrowserWhenReady(creation)
+  }, 400)
+  timer.unref()
+  session.remoteViewCloseTimers.set(viewId, timer)
+}
+
 function validRemoteInspectorRequest(value: unknown): value is RemoteInspectorRequest {
   if (!value || typeof value !== 'object') return false
   const request = value as Partial<RemoteInspectorRequest>
@@ -404,7 +593,7 @@ function validRemoteInspectorRequest(value: unknown): value is RemoteInspectorRe
 function validRemoteVisualStyleRequest(value: unknown): value is RemoteVisualStyleRequest {
   if (!validRemoteInspectorRequest(value)) return false
   const request = value as Partial<RemoteVisualStyleRequest>
-  if (!Object.keys(value as object).every((key) => key === 'projectId' || key === 'visualEdits' || key === 'route')) return false
+  if (!Object.keys(value as object).every((key) => key === 'projectId' || key === 'viewId' || key === 'visualEdits' || key === 'route')) return false
   if (!Array.isArray(request.visualEdits) || request.visualEdits.length > 500) return false
   if (typeof request.route !== 'string' || !request.route.startsWith('/') || request.route.length > 2_048 || request.route.includes('\0')) return false
   const compiled = compileVisualEditCss(request.visualEdits, request.route)
@@ -412,11 +601,11 @@ function validRemoteVisualStyleRequest(value: unknown): value is RemoteVisualSty
     Buffer.byteLength(compiled.css, 'utf8') <= REMOTE_INSPECTOR_LIMITS.maxCssBytes
 }
 
-function remoteSessionForRequest(value: unknown): { session: ActiveProjectSession; browser: RemoteBrowserSession } {
-  if (!validRemoteInspectorRequest(value)) throw new Error('La demande d’inspection distante est invalide.')
+async function ensureRemoteSessionForRequest(value: unknown): Promise<{ session: ActiveProjectSession; browser: RemoteBrowserSession }> {
+  if (!validRemoteInspectorRequest(value)) throw new Error('La demande de vue distante est invalide.')
   const current = currentRemoteSession()
   assertExpectedProject(current.session, value.projectId)
-  return current
+  return { session: current.session, browser: await ensureRemoteBrowserForView(current.session, remoteRequestViewId(value)) }
 }
 
 function validRemoteSourceAssociationRequest(value: unknown): value is RemoteSourceAssociationRequest {
@@ -440,10 +629,10 @@ async function associateRemoteSource(value: unknown): Promise<ProjectSnapshot> {
   }
   // L’association ne redémarre ni ne recharge le site. Elle remplace uniquement
   // l’autorité locale utilisée par l’éditeur et efface un éventuel overlay CSS.
-  await Promise.all([browser.setWorkspaceCss(''), browser.clearVisualStyle()])
+  await Promise.all(activeRemoteBrowsers(session).flatMap((activeBrowser) => [activeBrowser.setWorkspaceCss(''), activeBrowser.clearVisualStyle()]))
   if (activeSession !== session) throw new Error('La session a changé pendant l’association du dossier source.')
   const previousWorkspaceServer = session.workspaceServer
-  browser.associateLinkedRoot(root)
+  for (const activeBrowser of activeRemoteBrowsers(session)) activeBrowser.associateLinkedRoot(root)
   const sourceProfile = await enrichLinkedSourceProfile(browser.projectSnapshot(session.project.issues), root)
   if (activeSession !== session) throw new Error('La session a changé pendant l’analyse du dossier source.')
   session.root = root
@@ -463,7 +652,7 @@ async function associateRemoteSource(value: unknown): Promise<ProjectSnapshot> {
   return session.project
 }
 
-async function runRemoteAudit(value: unknown): Promise<RemoteAuditResult> {
+async function runRemoteAudit(value: unknown, request?: unknown): Promise<RemoteAuditResult> {
   if (!Array.isArray(value) || value.length > 8) throw new Error('La matrice de viewports est invalide.')
   const viewports: RemoteViewport[] = value.map((entry) => {
     if (!entry || typeof entry !== 'object') throw new Error('Un viewport est invalide.')
@@ -471,7 +660,7 @@ async function runRemoteAudit(value: unknown): Promise<RemoteAuditResult> {
     if (typeof viewport.width !== 'number' || typeof viewport.height !== 'number') throw new Error('Les dimensions du viewport sont invalides.')
     return viewport as RemoteViewport
   })
-  const { session, browser } = currentRemoteSession()
+  const { session, browser } = request === undefined ? currentRemoteSession() : await ensureRemoteSessionForRequest(request)
   const result = await browser.audit(viewports)
   if (activeSession !== session) throw new Error('La session a changé pendant l’audit distant.')
   const currentState = browser.getState()
@@ -521,7 +710,7 @@ async function refreshWorkspacePreview(session: ActiveProjectSession): Promise<s
       .filter(([path]) => path.toLowerCase().endsWith('.css'))
       .map(([path, body]) => `/* ${path} — aperçu Responsiver */\n${body.toString('utf8')}`)
       .join('\n\n')
-    await session.remoteBrowser.setWorkspaceCss(css)
+    await Promise.all(activeRemoteBrowsers(session).map((browser) => browser.setWorkspaceCss(css)))
     return null
   }
   const previous = session.workspaceServer
@@ -1163,6 +1352,34 @@ async function exportPatch(owner: BrowserWindow): Promise<string | null> {
   return result.filePath
 }
 
+async function captureInterfaceRegion(owner: BrowserWindow, value: unknown): Promise<string | null> {
+  const contentBounds = owner.getContentBounds()
+  const request = normalizeInterfaceCaptureRequest(value, {
+    width: contentBounds.width,
+    height: contentBounds.height
+  })
+  if (!request) throw new Error('La zone de capture demandée est invalide ou n’est pas visible.')
+
+  // capturePage attend des coordonnées DIP (les pixels CSS du renderer). La
+  // NativeImage conserve la représentation Retina ; le scaleFactor sert ici à
+  // sélectionner explicitement cette représentation lors de l’encodage PNG.
+  const image = await owner.webContents.capturePage(request.region)
+  if (image.isEmpty()) throw new Error('La zone visible n’a pas pu être capturée.')
+  const scaleFactor = normalizeCaptureScaleFactor(screen.getDisplayMatching(owner.getBounds()).scaleFactor)
+  const png = image.toPNG({ scaleFactor })
+  if (png.byteLength === 0) throw new Error('La capture PNG produite est vide.')
+
+  const result = await dialog.showSaveDialog(owner, {
+    title: 'Exporter la planche du Studio',
+    buttonLabel: 'Enregistrer la capture',
+    defaultPath: request.suggestedName,
+    filters: [{ name: 'Image PNG', extensions: ['png'] }]
+  })
+  if (result.canceled || !result.filePath) return null
+  await writeFile(result.filePath, png, { mode: 0o600 })
+  return result.filePath
+}
+
 async function exportChangedFiles(owner: BrowserWindow): Promise<ExportResult | null> {
   const session = currentSession()
   if (!session.staging) throw new Error('Préparez d’abord une version corrigée.')
@@ -1437,42 +1654,63 @@ function registerIpcHandlers(): void {
   ipcMain.handle('remote:set-bounds', async (event, bounds: unknown): Promise<void> => {
     requireTrustedWindow(event)
     if (!bounds || typeof bounds !== 'object') throw new Error('Les limites de la preview distante sont invalides.')
-    await remoteSessionForRequest(bounds).browser.setViewBounds(bounds as RemoteViewBounds)
+    await (await ensureRemoteSessionForRequest(bounds)).browser.setViewBounds(bounds as RemoteViewBounds)
   })
-  ipcMain.handle('remote:navigate', async (event, action: unknown, value: unknown): Promise<RemotePageState> => {
+  ipcMain.handle('remote:release-view', async (event, request: unknown): Promise<void> => {
+    requireTrustedWindow(event)
+    await releaseRemoteBrowserView(request)
+  })
+  ipcMain.handle('remote:navigate', async (event, action: unknown, value: unknown, request: unknown): Promise<RemotePageState> => {
     requireTrustedWindow(event)
     if (action !== 'back' && action !== 'forward' && action !== 'reload' && action !== 'url') throw new Error('L’action de navigation est invalide.')
     if (action === 'url' && (typeof value !== 'string' || value.length > 4_096)) throw new Error('L’URL de navigation est invalide.')
-    return currentRemoteSession().browser.navigate(action, typeof value === 'string' ? value : undefined)
+    const target = request === undefined ? currentRemoteSession() : await ensureRemoteSessionForRequest(request)
+    const state = await target.browser.navigate(action, typeof value === 'string' ? value : undefined)
+    const viewId = remoteRequestViewId(request)
+    return viewId ? { ...state, viewId } : state
   })
-  ipcMain.handle('remote:state', (event): RemotePageState => {
+  ipcMain.handle('remote:state', async (event, request: unknown): Promise<RemotePageState> => {
     requireTrustedWindow(event)
-    return currentRemoteSession().browser.getState()
+    const target = request === undefined ? currentRemoteSession() : await ensureRemoteSessionForRequest(request)
+    const state = target.browser.getState()
+    const viewId = remoteRequestViewId(request)
+    return viewId ? { ...state, viewId } : state
   })
-  ipcMain.handle('remote:audit', async (event, viewports: unknown): Promise<RemoteAuditResult> => {
+  ipcMain.handle('remote:scroll-read', async (event, request: unknown): Promise<RemoteScrollSnapshot> => {
     requireTrustedWindow(event)
-    return queueSessionOperation(() => queueWorkspaceOperation(() => runRemoteAudit(viewports)))
+    return (await ensureRemoteSessionForRequest(request)).browser.getScrollSnapshot()
   })
-  ipcMain.handle('remote:focus', async (event, selector: unknown): Promise<RemoteFocusResult> => {
+  ipcMain.handle('remote:scroll-apply', async (event, request: unknown): Promise<RemoteScrollSnapshot> => {
     requireTrustedWindow(event)
-    return currentRemoteSession().browser.focusSelector(selector)
+    if (!validRemoteInspectorRequest(request) || !('snapshot' in request)) throw new Error('La demande de synchronisation du défilement est invalide.')
+    const normalizedRequest = request as RemoteScrollApplyRequest
+    return (await ensureRemoteSessionForRequest(normalizedRequest)).browser.applyScrollSnapshot(normalizedRequest.snapshot)
+  })
+  ipcMain.handle('remote:audit', async (event, viewports: unknown, request: unknown): Promise<RemoteAuditResult> => {
+    requireTrustedWindow(event)
+    return queueSessionOperation(() => queueWorkspaceOperation(() => runRemoteAudit(viewports, request)))
+  })
+  ipcMain.handle('remote:focus', async (event, selector: unknown, request: unknown): Promise<RemoteFocusResult> => {
+    requireTrustedWindow(event)
+    const target = request === undefined ? currentRemoteSession() : await ensureRemoteSessionForRequest(request)
+    return target.browser.focusSelector(selector)
   })
   ipcMain.handle('remote:inspector-start', async (event, request: unknown): Promise<RemoteInspectorState> => {
     requireTrustedWindow(event)
-    return queueSessionOperation(() => remoteSessionForRequest(request).browser.startInspector())
+    return queueSessionOperation(async () => (await ensureRemoteSessionForRequest(request)).browser.startInspector())
   })
   ipcMain.handle('remote:inspector-stop', async (event, request: unknown): Promise<RemoteInspectorState> => {
     requireTrustedWindow(event)
-    return queueSessionOperation(() => remoteSessionForRequest(request).browser.stopInspector())
+    return queueSessionOperation(async () => (await ensureRemoteSessionForRequest(request)).browser.stopInspector())
   })
   ipcMain.handle('remote:visual-style-preview', async (event, request: unknown): Promise<RemoteVisualStyleResult> => {
     requireTrustedWindow(event)
     if (!validRemoteVisualStyleRequest(request)) throw new Error('La demande de prévisualisation visuelle est invalide.')
-    return queueSessionOperation(() => remoteSessionForRequest(request).browser.previewVisualStyle(request.visualEdits, request.route))
+    return queueSessionOperation(async () => (await ensureRemoteSessionForRequest(request)).browser.previewVisualStyle(request.visualEdits, request.route))
   })
   ipcMain.handle('remote:visual-style-clear', async (event, request: unknown): Promise<RemoteVisualStyleResult> => {
     requireTrustedWindow(event)
-    return queueSessionOperation(() => remoteSessionForRequest(request).browser.clearVisualStyle())
+    return queueSessionOperation(async () => (await ensureRemoteSessionForRequest(request)).browser.clearVisualStyle())
   })
   ipcMain.handle('workspace:list', async (event, projectId: unknown): Promise<WorkspaceFileSummary[]> => {
     requireTrustedWindow(event)
@@ -1516,7 +1754,9 @@ function registerIpcHandlers(): void {
       const result = await workspace.applyFile(path, expectedVersion as number | undefined)
       if (activeSession !== session) throw new Error('La session projet a changé pendant l’application du fichier.')
       await refreshWorkspacePreview(session)
-      if (session.remoteBrowser) session.remoteBrowser.navigate('reload').catch(() => undefined)
+      if (session.remoteBrowser) {
+        for (const browser of activeRemoteBrowsers(session)) browser.navigate('reload').catch(() => undefined)
+      }
       mainWindow?.webContents.send('workspace:applied', [result.path])
       return result
     })
@@ -1528,7 +1768,9 @@ function registerIpcHandlers(): void {
       const results = await workspace.applyAll()
       if (activeSession !== session) throw new Error('La session projet a changé pendant l’application des fichiers.')
       await refreshWorkspacePreview(session)
-      if (session.remoteBrowser) session.remoteBrowser.navigate('reload').catch(() => undefined)
+      if (session.remoteBrowser) {
+        for (const browser of activeRemoteBrowsers(session)) browser.navigate('reload').catch(() => undefined)
+      }
       mainWindow?.webContents.send('workspace:applied', results.map((result) => result.path))
       return results
     })
@@ -1582,6 +1824,10 @@ function registerIpcHandlers(): void {
   ipcMain.handle('staging:export-changed', (event): Promise<ExportResult | null> => exportChangedFiles(requireTrustedWindow(event)))
   ipcMain.handle('staging:export-copy', (event): Promise<ExportResult | null> => exportProjectCopy(requireTrustedWindow(event)))
   ipcMain.handle('project:export-report', (event, payload: unknown): Promise<string | null> => exportReport(requireTrustedWindow(event), payload))
+  ipcMain.handle('interface:capture-region', (event, request: unknown): Promise<string | null> => {
+    const owner = requireTrustedWindow(event)
+    return captureInterfaceRegion(owner, request)
+  })
   ipcMain.handle('clipboard:write', (event, value: unknown): void => {
     requireTrustedWindow(event)
     if (typeof value !== 'string' || value.length > maxClipboardLength) throw new Error('Le texte à copier est invalide ou trop volumineux.')

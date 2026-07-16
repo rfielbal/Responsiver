@@ -104,6 +104,58 @@ export const LOCAL_VISUAL_BRIDGE_LIMITS = Object.freeze({
   maxOccurrenceScan: 2_500
 })
 
+/** Bornes et cadence du protocole de synchronisation entre previews locales. */
+export const LOCAL_PREVIEW_SYNC_LIMITS = Object.freeze({
+  maxSelectorLength: 420,
+  maxRouteLength: 1_024,
+  maxEventIdLength: 96,
+  maxValueLength: 512,
+  maxSelectedIndices: 64,
+  maxOccurrenceScan: 2_500,
+  maxRememberedEvents: 256,
+  maxInteractionsPerSecond: 24,
+  scrollThrottleMs: 48,
+  inputThrottleMs: 64
+})
+
+const previewSyncSensitivePatternSource =
+  '(?:pass(?:word)?|mot[-_\\s]?de[-_\\s]?passe|secret|token|jeton|api[-_\\s]?(?:key|token)|cl[ée][-_\\s]?api|auth|otp|one[-_\\s]?time|pin|cvc|cvv|credit|card|carte|iban|bank|compte|account|login|email|e[-_\\s]?mail|phone|tel(?:ephone)?|address|adresse|postal|birth|naissance|ssn|social[-_\\s]?security|private|confidentiel)'
+const previewSyncDestructivePatternSource =
+  '(?:delete|destroy|remove|erase|wipe|drop|purge|supprim|effac|d[ée]trui|payer|payment|checkout|purchase|acheter|commande|order|logout|sign[-_\\s]?out|d[ée]connexion|unsubscribe|désabonn|confirm(?:er|ation)?|publish|publier|deploy|déployer)'
+
+export type PreviewSyncInteractionKind = 'activate' | 'checked' | 'selection' | 'value' | 'blocked'
+
+export interface PreviewSyncInteractionDescriptor {
+  tag: string
+  type?: string
+  semanticText?: string
+  autocomplete?: string
+  formBound?: boolean
+  toggleSemantic?: boolean
+  explicitSafe?: boolean
+}
+
+/**
+ * Politique pure, également reflétée dans le bridge injecté. Elle est exportée
+ * afin que les cas sensibles restent testables sans navigateur.
+ */
+export function previewSyncInteractionKind(descriptor: PreviewSyncInteractionDescriptor): PreviewSyncInteractionKind {
+  const tag = descriptor.tag.trim().toLowerCase()
+  const type = (descriptor.type || (tag === 'input' ? 'text' : '')).trim().toLowerCase()
+  const semanticText = `${descriptor.semanticText || ''} ${descriptor.autocomplete || ''}`
+  if (new RegExp(previewSyncSensitivePatternSource, 'i').test(semanticText)) return 'blocked'
+  if (new RegExp(previewSyncDestructivePatternSource, 'i').test(semanticText)) return 'blocked'
+  if (tag === 'a' || type === 'submit' || type === 'reset' || type === 'image' || type === 'file' || type === 'password' || type === 'hidden' || type === 'email' || type === 'tel') return 'blocked'
+  if (tag === 'summary') return 'activate'
+  if ((tag === 'button' || descriptor.toggleSemantic) && (descriptor.toggleSemantic || descriptor.explicitSafe) && (!descriptor.formBound || type === 'button' || descriptor.explicitSafe)) return 'activate'
+  if (tag === 'select') return !descriptor.formBound || descriptor.explicitSafe ? 'selection' : 'blocked'
+  if (tag !== 'input') return 'blocked'
+  if (type === 'checkbox' || type === 'radio') return !descriptor.formBound || descriptor.explicitSafe ? 'checked' : 'blocked'
+  if (['range', 'color', 'date', 'time', 'month', 'week', 'datetime-local'].includes(type)) return !descriptor.formBound || descriptor.explicitSafe ? 'value' : 'blocked'
+  if (['text', 'search', 'url', 'number'].includes(type)) return descriptor.explicitSafe ? 'value' : 'blocked'
+  return 'blocked'
+}
+
 const managedStylesheetPath = '.responsiver/responsiver.generated.css'
 
 const bridge = `<style data-responsiver-bridge-style>
@@ -134,6 +186,19 @@ const bridge = `<style data-responsiver-bridge-style>
   const VISUAL_MAX_CLASS_LENGTH = ${LOCAL_VISUAL_BRIDGE_LIMITS.maxClassLength};
   const VISUAL_MAX_STYLE_VALUE_LENGTH = ${LOCAL_VISUAL_BRIDGE_LIMITS.maxStyleValueLength};
   const VISUAL_MAX_OCCURRENCE_SCAN = ${LOCAL_VISUAL_BRIDGE_LIMITS.maxOccurrenceScan};
+  const SYNC_MAX_SELECTOR_LENGTH = ${LOCAL_PREVIEW_SYNC_LIMITS.maxSelectorLength};
+  const SYNC_MAX_ROUTE_LENGTH = ${LOCAL_PREVIEW_SYNC_LIMITS.maxRouteLength};
+  const SYNC_MAX_EVENT_ID_LENGTH = ${LOCAL_PREVIEW_SYNC_LIMITS.maxEventIdLength};
+  const SYNC_MAX_VALUE_LENGTH = ${LOCAL_PREVIEW_SYNC_LIMITS.maxValueLength};
+  const SYNC_MAX_SELECTED_INDICES = ${LOCAL_PREVIEW_SYNC_LIMITS.maxSelectedIndices};
+  const SYNC_MAX_OCCURRENCE_SCAN = ${LOCAL_PREVIEW_SYNC_LIMITS.maxOccurrenceScan};
+  const SYNC_MAX_REMEMBERED_EVENTS = ${LOCAL_PREVIEW_SYNC_LIMITS.maxRememberedEvents};
+  const SYNC_MAX_INTERACTIONS_PER_SECOND = ${LOCAL_PREVIEW_SYNC_LIMITS.maxInteractionsPerSecond};
+  const SYNC_SCROLL_THROTTLE_MS = ${LOCAL_PREVIEW_SYNC_LIMITS.scrollThrottleMs};
+  const SYNC_INPUT_THROTTLE_MS = ${LOCAL_PREVIEW_SYNC_LIMITS.inputThrottleMs};
+  const SYNC_SCROLL_CONTAINER_PREFIX = '@responsiver-scroll:';
+  const SYNC_SENSITIVE_PATTERN = new RegExp(${JSON.stringify(previewSyncSensitivePatternSource)}, 'i');
+  const SYNC_DESTRUCTIVE_PATTERN = new RegExp(${JSON.stringify(previewSyncDestructivePatternSource)}, 'i');
   let originalThemeState = null;
   let mutationObserver = null;
   const nativeApply = Reflect.apply;
@@ -2396,6 +2461,269 @@ const bridge = `<style data-responsiver-bridge-style>
     if (payload) { message('inspector-selected', payload); void inspectorCascade(target, payload.selector); }
   }, true);
   addEventListener('scroll', scheduleInspectorHighlights, true);
+  let syncSequence = 0;
+  let syncScrollFrame = 0;
+  let syncLastScrollSentAt = -SYNC_SCROLL_THROTTLE_MS;
+  let syncApplyScrollUntil = 0;
+  let syncInteractionReplayDepth = 0;
+  let syncInteractionWindowStart = 0;
+  let syncInteractionCount = 0;
+  let syncPendingScroller = null;
+  const syncInputSentAt = new WeakMap();
+  const syncRememberedEvents = new Set();
+  const syncRoute = () => (location.pathname + location.search + location.hash).slice(0, SYNC_MAX_ROUTE_LENGTH);
+  const syncRound = (value) => {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return 0;
+    return Math.round(Math.max(-10000000, Math.min(10000000, numeric)) * 100) / 100;
+  };
+  const syncProgress = (value) => Math.round(Math.max(0, Math.min(1, Number(value) || 0)) * 100000) / 100000;
+  const syncEventId = () => {
+    syncSequence = (syncSequence + 1) % 1000000000;
+    return (documentId + '-' + syncSequence.toString(36) + '-' + Math.round(performance.now()).toString(36)).slice(0, SYNC_MAX_EVENT_ID_LENGTH);
+  };
+  const syncLocatorFor = (element) => {
+    if (!(element instanceof Element) || element.getRootNode() !== document || isInspectorInternal(element)) return null;
+    const selector = selectorFor(element).slice(0, SYNC_MAX_SELECTOR_LENGTH);
+    if (!selector || SYNC_SENSITIVE_PATTERN.test(selector)) return null;
+    let matches;
+    try { matches = document.querySelectorAll(selector); } catch { return null; }
+    if (!matches.length || matches.length > SYNC_MAX_OCCURRENCE_SCAN) return null;
+    const occurrence = [...matches].indexOf(element);
+    if (occurrence < 0) return null;
+    return { selector, occurrence };
+  };
+  const syncResolveLocator = (value) => {
+    if (!value || typeof value.selector !== 'string' || !value.selector || value.selector.length > SYNC_MAX_SELECTOR_LENGTH || SYNC_SENSITIVE_PATTERN.test(value.selector)) return null;
+    if (!Number.isSafeInteger(value.occurrence) || value.occurrence < 0 || value.occurrence >= SYNC_MAX_OCCURRENCE_SCAN) return null;
+    try {
+      const matches = document.querySelectorAll(value.selector);
+      if (matches.length > SYNC_MAX_OCCURRENCE_SCAN) return null;
+      return matches[value.occurrence] || null;
+    } catch { return null; }
+  };
+  const syncContainerLocatorFor = (element) => {
+    const target = syncLocatorFor(element);
+    if (!target || target.selector.length + SYNC_SCROLL_CONTAINER_PREFIX.length > SYNC_MAX_SELECTOR_LENGTH) return null;
+    return { ...target, selector: SYNC_SCROLL_CONTAINER_PREFIX + target.selector, offset: 0 };
+  };
+  const syncResolveContainer = (value) => {
+    if (!value || typeof value.selector !== 'string' || !value.selector.startsWith(SYNC_SCROLL_CONTAINER_PREFIX)) return null;
+    return syncResolveLocator({ ...value, selector: value.selector.slice(SYNC_SCROLL_CONTAINER_PREFIX.length) });
+  };
+  const syncSemanticText = (element) => [
+    element.id,
+    element.className,
+    element.getAttribute('name'),
+    element.getAttribute('aria-label'),
+    element.getAttribute('title'),
+    element.getAttribute('placeholder'),
+    element.getAttribute('autocomplete'),
+    element.getAttribute('data-action'),
+    element.getAttribute('data-testid'),
+    element.textContent
+  ].map((value) => typeof value === 'string' ? value : '').join(' ').replace(/\\s+/g, ' ').slice(0, 1200);
+  const syncInteractionKind = (element) => {
+    if (!(element instanceof Element) || element.getRootNode() !== document || isInspectorInternal(element) || element.closest('[contenteditable], [data-responsiver-sensitive]')) return 'blocked';
+    const tag = element.tagName.toLowerCase();
+    const type = element instanceof HTMLInputElement ? element.type.toLowerCase() : (element.getAttribute('type') || '').toLowerCase();
+    const semantic = syncSemanticText(element);
+    const explicitSafe = element.hasAttribute('data-responsiver-sync-safe') && element.getAttribute('data-responsiver-sync-safe') !== 'false';
+    const toggleSemantic = element.hasAttribute('aria-expanded') || element.hasAttribute('aria-pressed') || element.hasAttribute('aria-controls');
+    const formBound = Boolean(element.closest('form'));
+    if (SYNC_SENSITIVE_PATTERN.test(semantic) || SYNC_DESTRUCTIVE_PATTERN.test(semantic)) return 'blocked';
+    if (tag === 'a' || ['submit', 'reset', 'image', 'file', 'password', 'hidden', 'email', 'tel'].includes(type)) return 'blocked';
+    if (tag === 'summary') return 'activate';
+    if ((tag === 'button' || toggleSemantic) && (toggleSemantic || explicitSafe) && (!formBound || type === 'button' || explicitSafe)) return 'activate';
+    if (tag === 'select') return !formBound || explicitSafe ? 'selection' : 'blocked';
+    if (tag !== 'input') return 'blocked';
+    if (type === 'checkbox' || type === 'radio') return !formBound || explicitSafe ? 'checked' : 'blocked';
+    if (['range', 'color', 'date', 'time', 'month', 'week', 'datetime-local'].includes(type)) return !formBound || explicitSafe ? 'value' : 'blocked';
+    if (['text', 'search', 'url', 'number'].includes(type)) return explicitSafe ? 'value' : 'blocked';
+    return 'blocked';
+  };
+  const syncMaySendInteraction = () => {
+    const now = performance.now();
+    if (now - syncInteractionWindowStart >= 1000) {
+      syncInteractionWindowStart = now;
+      syncInteractionCount = 0;
+    }
+    if (syncInteractionCount >= SYNC_MAX_INTERACTIONS_PER_SECOND) return false;
+    syncInteractionCount += 1;
+    return true;
+  };
+  const syncSendInteraction = (element, action, payload = {}) => {
+    if (parent !== top || syncInteractionReplayDepth || !syncMaySendInteraction()) return;
+    const target = syncLocatorFor(element);
+    if (!target) return;
+    message('sync-interaction', { protocol: 1, eventId: syncEventId(), documentId, route: syncRoute(), target, action, ...payload });
+  };
+  const syncAnchor = () => {
+    const referenceY = Math.max(1, Math.min(Math.max(1, innerHeight - 1), innerHeight * .25));
+    const referenceX = Math.max(1, Math.min(Math.max(1, innerWidth - 1), innerWidth * .5));
+    const hit = document.elementsFromPoint(referenceX, referenceY).find((element) => !isInspectorInternal(element));
+    if (!(hit instanceof Element)) return null;
+    const candidates = [];
+    let current = hit;
+    while (current instanceof Element && current !== document.documentElement) {
+      if (current.id || current.hasAttribute('data-testid') || /^(?:main|section|article|nav|header|footer|h[1-6]|li|figure)$/.test(current.tagName.toLowerCase())) candidates.push(current);
+      current = current.parentElement;
+    }
+    for (const candidate of candidates) {
+      const target = syncLocatorFor(candidate);
+      if (!target) continue;
+      const rectangle = candidate.getBoundingClientRect();
+      if (rectangle.width <= 0 || rectangle.height <= 0) continue;
+      return { ...target, offset: syncRound(rectangle.top) };
+    }
+    return null;
+  };
+  const syncSendScroll = () => {
+    syncScrollFrame = 0;
+    if (parent !== top || performance.now() < syncApplyScrollUntil) return;
+    const root = document.scrollingElement || document.documentElement;
+    const scroller = syncPendingScroller instanceof HTMLElement && syncPendingScroller.isConnected ? syncPendingScroller : root;
+    syncPendingScroller = null;
+    const internal = scroller !== root;
+    const container = internal ? syncContainerLocatorFor(scroller) : null;
+    if (internal && !container) return;
+    const viewportWidth = Math.max(1, internal ? scroller.clientWidth : innerWidth);
+    const viewportHeight = Math.max(1, internal ? scroller.clientHeight : innerHeight);
+    const maximumX = Math.max(0, scroller.scrollWidth - viewportWidth);
+    const maximumY = Math.max(0, scroller.scrollHeight - viewportHeight);
+    syncLastScrollSentAt = performance.now();
+    message('sync-scroll', {
+      protocol: 1,
+      eventId: syncEventId(),
+      documentId,
+      route: syncRoute(),
+      anchor: container || syncAnchor(),
+      progress: { x: syncProgress(scroller.scrollLeft / Math.max(1, maximumX)), y: syncProgress(scroller.scrollTop / Math.max(1, maximumY)) }
+    });
+  };
+  const syncScheduleScroll = (event) => {
+    const target = event.target;
+    const root = document.scrollingElement || document.documentElement;
+    const scroller = target === document || target === document.documentElement || target === document.body || target === window
+      ? root
+      : target instanceof HTMLElement && target.getRootNode() === document && !isInspectorInternal(target) ? target : null;
+    if (!scroller || performance.now() < syncApplyScrollUntil) return;
+    syncPendingScroller = scroller;
+    if (syncScrollFrame) return;
+    const delay = Math.max(0, SYNC_SCROLL_THROTTLE_MS - (performance.now() - syncLastScrollSentAt));
+    if (delay > 0) {
+      syncScrollFrame = requestAnimationFrame(() => setTimeout(syncSendScroll, delay));
+      return;
+    }
+    syncScrollFrame = requestAnimationFrame(syncSendScroll);
+  };
+  const syncRememberCommand = (data, expectedType) => {
+    if (!data || data.protocol !== 1 || data.type !== expectedType || typeof data.eventId !== 'string' || !data.eventId || data.eventId.length > SYNC_MAX_EVENT_ID_LENGTH || !/^[a-z0-9_.:-]+$/i.test(data.eventId)) return false;
+    if (typeof data.sourceDocumentId !== 'string' || !data.sourceDocumentId || data.sourceDocumentId.length > SYNC_MAX_EVENT_ID_LENGTH || data.sourceDocumentId === documentId) return false;
+    if (typeof data.route !== 'string' || !data.route || data.route.length > SYNC_MAX_ROUTE_LENGTH || data.route !== syncRoute()) return false;
+    if (syncRememberedEvents.has(data.eventId)) return false;
+    syncRememberedEvents.add(data.eventId);
+    while (syncRememberedEvents.size > SYNC_MAX_REMEMBERED_EVENTS) syncRememberedEvents.delete(syncRememberedEvents.values().next().value);
+    return true;
+  };
+  const syncApplyScroll = (data) => {
+    if (!syncRememberCommand(data, 'sync-apply-scroll')) return;
+    const progress = data.progress;
+    if (!progress || !Number.isFinite(Number(progress.x)) || !Number.isFinite(Number(progress.y))) return;
+    const root = document.scrollingElement || document.documentElement;
+    const encodedContainer = Boolean(data.anchor && typeof data.anchor.selector === 'string' && data.anchor.selector.startsWith(SYNC_SCROLL_CONTAINER_PREFIX));
+    const container = encodedContainer ? syncResolveContainer(data.anchor) : null;
+    if (encodedContainer && !(container instanceof HTMLElement)) return;
+    const scroller = container instanceof HTMLElement ? container : root;
+    const internal = scroller !== root;
+    const viewportWidth = Math.max(1, internal ? scroller.clientWidth : innerWidth);
+    const viewportHeight = Math.max(1, internal ? scroller.clientHeight : innerHeight);
+    const maximumX = Math.max(0, scroller.scrollWidth - viewportWidth);
+    const maximumY = Math.max(0, scroller.scrollHeight - viewportHeight);
+    let left = syncProgress(progress.x) * maximumX;
+    let top = syncProgress(progress.y) * maximumY;
+    const anchor = encodedContainer ? null : syncResolveLocator(data.anchor);
+    if (anchor && Number.isFinite(Number(data.anchor.offset)) && Math.abs(Number(data.anchor.offset)) <= 100000) {
+      const rectangle = anchor.getBoundingClientRect();
+      top = scrollY + rectangle.top - Number(data.anchor.offset);
+    }
+    syncApplyScrollUntil = performance.now() + 240;
+    scroller.scrollTo({ left: syncRound(left), top: syncRound(top), behavior: 'auto' });
+    message('sync-apply-result', { protocol: 1, eventId: data.eventId, documentId, kind: 'scroll', applied: true });
+  };
+  const syncDispatchControlEvents = (element) => {
+    element.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    element.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+  };
+  const syncApplyInteraction = (data) => {
+    if (!syncRememberCommand(data, 'sync-apply-interaction')) return;
+    const target = syncResolveLocator(data.target);
+    if (!(target instanceof HTMLElement)) return;
+    const kind = syncInteractionKind(target);
+    if (kind === 'blocked' || data.action !== kind) return;
+    syncInteractionReplayDepth += 1;
+    let applied = false;
+    try {
+      if (kind === 'activate') {
+        target.click();
+        applied = true;
+      } else if (kind === 'checked' && target instanceof HTMLInputElement && typeof data.checked === 'boolean') {
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked')?.set;
+        if (setter) nativeApply(setter, target, [data.checked]); else target.checked = data.checked;
+        syncDispatchControlEvents(target);
+        applied = true;
+      } else if (kind === 'selection' && target instanceof HTMLSelectElement && Array.isArray(data.selectedIndices) && data.selectedIndices.length <= SYNC_MAX_SELECTED_INDICES) {
+        const selected = new Set(data.selectedIndices.filter((index) => Number.isSafeInteger(index) && index >= 0 && index < target.options.length));
+        if (selected.size === data.selectedIndices.length) {
+          [...target.options].forEach((option, index) => { option.selected = selected.has(index); });
+          syncDispatchControlEvents(target);
+          applied = true;
+        }
+      } else if (kind === 'value' && target instanceof HTMLInputElement && typeof data.value === 'string' && data.value.length <= SYNC_MAX_VALUE_LENGTH) {
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        if (setter) nativeApply(setter, target, [data.value]); else target.value = data.value;
+        syncDispatchControlEvents(target);
+        applied = true;
+      }
+    } finally {
+      syncInteractionReplayDepth -= 1;
+    }
+    message('sync-apply-result', { protocol: 1, eventId: data.eventId, documentId, kind: 'interaction', applied });
+  };
+  addEventListener('scroll', syncScheduleScroll, { capture: true, passive: true });
+  document.addEventListener('submit', (event) => {
+    if (!syncInteractionReplayDepth) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }, true);
+  document.addEventListener('click', (event) => {
+    if (!event.isTrusted || syncInteractionReplayDepth || designActive || inspectorActive) return;
+    const raw = event.target instanceof Element ? event.target : null;
+    const target = raw?.closest('button, summary, [role="button"]');
+    if (!target || syncInteractionKind(target) !== 'activate') return;
+    syncSendInteraction(target, 'activate');
+  }, true);
+  document.addEventListener('input', (event) => {
+    if (!event.isTrusted || syncInteractionReplayDepth || designActive || inspectorActive || !(event.target instanceof HTMLInputElement)) return;
+    const target = event.target;
+    if (syncInteractionKind(target) !== 'value') return;
+    const now = performance.now();
+    const lastSentAt = syncInputSentAt.get(target);
+    if (lastSentAt !== undefined && now - lastSentAt < SYNC_INPUT_THROTTLE_MS) return;
+    syncInputSentAt.set(target, now);
+    const value = String(target.value).slice(0, SYNC_MAX_VALUE_LENGTH);
+    syncSendInteraction(target, 'value', { value });
+  }, true);
+  document.addEventListener('change', (event) => {
+    if (!event.isTrusted || syncInteractionReplayDepth || designActive || inspectorActive || !(event.target instanceof Element)) return;
+    const target = event.target;
+    const kind = syncInteractionKind(target);
+    if (kind === 'checked' && target instanceof HTMLInputElement) syncSendInteraction(target, 'checked', { checked: target.checked });
+    if (kind === 'selection' && target instanceof HTMLSelectElement) {
+      const selectedIndices = [...target.options].map((option, index) => option.selected ? index : -1).filter((index) => index >= 0).slice(0, SYNC_MAX_SELECTED_INDICES);
+      syncSendInteraction(target, 'selection', { selectedIndices });
+    }
+  }, true);
   const applyMatrixScenario = async (requestedState) => {
     const stateName = requestedState === 'navigation-open' || requestedState === 'keyboard-focus' ? requestedState : 'initial';
     if (stateName === 'initial') {
@@ -2441,6 +2769,8 @@ const bridge = `<style data-responsiver-bridge-style>
       }
       return;
     }
+    if (data.type === 'sync-apply-scroll') { syncApplyScroll(data); return; }
+    if (data.type === 'sync-apply-interaction') { syncApplyInteraction(data); return; }
     if (data.type === 'navigate' && typeof data.path === 'string') go(data.path);
 	    if (data.type === 'state-request') state(data.requestId);
     if (data.type === 'back') history.back();

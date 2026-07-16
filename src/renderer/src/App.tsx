@@ -3,6 +3,17 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, type Form
 import type { CascadeTrace, MatrixObservation, MatrixRunProgress, MatrixRunResult, MatrixStateId, ProjectPreparationProgress, RecentProjectSummary, RemoteAuditResult, RemoteInspectorSelection, RemotePageState, RemoteViewport, RuntimeAudit, StagingVerificationResult, VisualElementSnapshot, VisualGestureCommit } from '../../shared/contracts'
 import { classifyProjectIssue, consolidateProjectIssues, deterministicVisualTarget, isExpressEligibleIssue, type FindingGroup, type FindingPolicy } from '../../shared/finding-policy'
 import { frameworkSupportFor } from '../../shared/framework-support'
+import {
+  DEVICE_CATALOG_STORAGE_KEY,
+  MAX_ACTIVE_DEVICES,
+  allDeviceProfiles,
+  createDefaultDeviceCatalogState,
+  findDeviceProfile,
+  parseDeviceCatalogState,
+  serializeDeviceCatalogState,
+  type DeviceCatalogState,
+  type DeviceProfile
+} from '../../shared/device-catalog'
 import { authorizeVisualEditor, compileVisualEditCss, createVisualEditOperation, visualEditOperationKey, type VisualEditOperation, type VisualEditProperty, type VisualEditScope } from '../../shared/visual-editor'
 import {
   mergeVisualGestureOperations,
@@ -14,9 +25,11 @@ import {
   type VisualGestureOperationChange
 } from '../../shared/visual-manipulation'
 import LocalAssistant from './LocalAssistant'
+import Icon, { type IconName } from './Icon'
 import OnboardingTour from './OnboardingTour'
 import PreviewZoomControls from './PreviewZoomControls'
 import RemotePreview from './RemotePreview'
+import StudioControls, { type StudioLayout, type StudioOverlayState } from './StudioControls'
 import { isOnboardingHidden, persistOnboardingHidden } from './onboarding'
 import { clampPreviewScale, stepPreviewScale, wheelPreviewScale } from './preview-zoom'
 
@@ -26,7 +39,7 @@ const MatrixView = React.lazy(() => import('./MatrixView'))
 type Destination = 'projects' | 'lab' | 'matrix' | 'visual' | 'code' | 'review' | 'export'
 type InspectorTab = 'findings' | 'fixes' | 'theme' | 'conversation'
 type DeviceFamily = 'smartphone' | 'tablet' | 'computer'
-type LabMode = 'device' | 'compare'
+type LabMode = 'device' | 'studio'
 type PreviewMode = 'source' | 'proposal' | 'before-after' | 'staging'
 type RuntimeTheme = 'dark' | 'light' | 'unknown'
 type ThemeTarget = 'dark' | 'light'
@@ -49,6 +62,53 @@ interface Device {
   name: string
   width: number
   height: number
+  dpr?: number
+  mobile?: boolean
+  touch?: boolean
+}
+
+type PreviewSyncKind = 'scroll' | 'interaction'
+
+interface StudioSyncSettings {
+  navigation: boolean
+  scroll: boolean
+  interactions: boolean
+}
+
+interface PreviewSyncBase {
+  protocol: 1
+  eventId: string
+  documentId: string
+  route: string
+}
+
+interface PreviewSyncScrollEvent extends PreviewSyncBase {
+  type: 'sync-scroll'
+  anchor: { selector: string; occurrence: number; offset: number } | null
+  progress: { x: number; y: number }
+}
+
+interface PreviewSyncInteractionEvent extends PreviewSyncBase {
+  type: 'sync-interaction'
+  target: { selector: string; occurrence: number }
+  action: 'activate' | 'checked' | 'selection' | 'value'
+  checked?: boolean
+  selectedIndices?: number[]
+  value?: string
+}
+
+type PreviewSyncEvent = PreviewSyncScrollEvent | PreviewSyncInteractionEvent
+
+interface PreviewSyncCommand {
+  sequence: number
+  sourceViewId: string
+  kind: PreviewSyncKind
+  event: PreviewSyncEvent
+}
+
+interface DesignOverlay {
+  url: string
+  opacity: number
 }
 
 interface RouteInfo {
@@ -174,7 +234,7 @@ interface ConversationMessage {
   text: string
 }
 
-const families: Array<{ id: DeviceFamily; label: string; icon: string }> = [
+const families: Array<{ id: DeviceFamily; label: string; icon: IconName }> = [
   { id: 'smartphone', label: 'Smartphone', icon: 'phone' },
   { id: 'tablet', label: 'Tablette', icon: 'tablet' },
   { id: 'computer', label: 'Ordinateur', icon: 'laptop' }
@@ -193,7 +253,6 @@ const devices: Device[] = [
   { id: 'desktop-wide', family: 'computer', name: 'Bureau large', width: 2560, height: 1440 }
 ]
 
-const compareDevices = [devices[1], devices[4], devices[7]]
 const auditDevices: Device[] = [
   devices[1],
   devices[4],
@@ -201,7 +260,123 @@ const auditDevices: Device[] = [
   devices[7]
 ]
 
-const destinations: Array<{ id: Destination; label: string; icon: string }> = [
+function deviceFamilyForProfile(profile: DeviceProfile): DeviceFamily {
+  if (profile.category === 'phone' || profile.category === 'foldable') return 'smartphone'
+  if (profile.category === 'tablet') return 'tablet'
+  return 'computer'
+}
+
+function studioDevice(profile: DeviceProfile, rotated = false): Device {
+  return {
+    id: profile.id,
+    family: deviceFamilyForProfile(profile),
+    name: profile.name,
+    width: rotated ? profile.height : profile.width,
+    height: rotated ? profile.width : profile.height,
+    dpr: profile.dpr,
+    mobile: profile.mobile,
+    touch: profile.touch
+  }
+}
+
+function boundedSyncText(value: unknown, maximum: number, pattern?: RegExp, allowEmpty = false): string | null {
+  if (typeof value !== 'string' || (!allowEmpty && !value) || value.length > maximum || /[\u0000-\u001f\u007f]/.test(value)) return null
+  return pattern && !pattern.test(value) ? null : value
+}
+
+function boundedSyncProgress(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1) return null
+  return Math.round(value * 100000) / 100000
+}
+
+export function sanitizePreviewSyncEvent(value: unknown): PreviewSyncEvent | null {
+  if (!value || typeof value !== 'object') return null
+  const candidate = value as Record<string, unknown>
+  if (candidate.protocol !== 1 || candidate.type !== 'sync-scroll' && candidate.type !== 'sync-interaction') return null
+  const eventId = boundedSyncText(candidate.eventId, 96, /^[a-z0-9_.:-]+$/i)
+  const documentId = boundedSyncText(candidate.documentId, 96, /^[a-z0-9_.:-]+$/i)
+  const route = boundedSyncText(candidate.route, 1024)
+  if (!eventId || !documentId || !route) return null
+  if (candidate.type === 'sync-scroll') {
+    const progressValue = candidate.progress && typeof candidate.progress === 'object' ? candidate.progress as Record<string, unknown> : null
+    const x = boundedSyncProgress(progressValue?.x)
+    const y = boundedSyncProgress(progressValue?.y)
+    if (x === null || y === null) return null
+    let anchor: PreviewSyncScrollEvent['anchor'] = null
+    if (candidate.anchor && typeof candidate.anchor === 'object') {
+      const rawAnchor = candidate.anchor as Record<string, unknown>
+      const selector = boundedSyncText(rawAnchor.selector, 420)
+      const occurrence = typeof rawAnchor.occurrence === 'number' && Number.isSafeInteger(rawAnchor.occurrence) && rawAnchor.occurrence >= 0 && rawAnchor.occurrence < 2500 ? rawAnchor.occurrence : null
+      const offset = typeof rawAnchor.offset === 'number' && Number.isFinite(rawAnchor.offset) && Math.abs(rawAnchor.offset) <= 100000 ? rawAnchor.offset : null
+      if (!selector || occurrence === null || offset === null) return null
+      anchor = { selector, occurrence, offset }
+    }
+    return { protocol: 1, type: 'sync-scroll', eventId, documentId, route, anchor, progress: { x, y } }
+  }
+  const rawTarget = candidate.target && typeof candidate.target === 'object' ? candidate.target as Record<string, unknown> : null
+  const selector = boundedSyncText(rawTarget?.selector, 420)
+  const occurrence = typeof rawTarget?.occurrence === 'number' && Number.isSafeInteger(rawTarget.occurrence) && rawTarget.occurrence >= 0 && rawTarget.occurrence < 2500 ? rawTarget.occurrence : null
+  const action = candidate.action
+  if (!selector || occurrence === null || !['activate', 'checked', 'selection', 'value'].includes(String(action))) return null
+  const event: PreviewSyncInteractionEvent = { protocol: 1, type: 'sync-interaction', eventId, documentId, route, target: { selector, occurrence }, action: action as PreviewSyncInteractionEvent['action'] }
+  if (event.action === 'checked') {
+    if (typeof candidate.checked !== 'boolean') return null
+    event.checked = candidate.checked
+  }
+  if (event.action === 'selection') {
+    if (!Array.isArray(candidate.selectedIndices) || candidate.selectedIndices.length > 64 || !candidate.selectedIndices.every((index) => Number.isSafeInteger(index) && index >= 0 && index < 2500)) return null
+    event.selectedIndices = candidate.selectedIndices as number[]
+  }
+  if (event.action === 'value') {
+    const inputValue = boundedSyncText(candidate.value, 512, undefined, true)
+    if (inputValue === null) return null
+    event.value = inputValue
+  }
+  return event
+}
+
+function storedDeviceCatalogState(): DeviceCatalogState {
+  try {
+    const serialized = window.localStorage.getItem(DEVICE_CATALOG_STORAGE_KEY)
+    return serialized ? parseDeviceCatalogState(serialized).state : createDefaultDeviceCatalogState()
+  } catch {
+    return createDefaultDeviceCatalogState()
+  }
+}
+
+function initialStudioDeviceIds(catalog: DeviceCatalogState): string[] {
+  const available = new Set(allDeviceProfiles(catalog).map((profile) => profile.id))
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem('responsiver.studio.v1') ?? '{}') as { deviceIds?: unknown }
+    if (Array.isArray(parsed.deviceIds)) {
+      const identifiers = [...new Set(parsed.deviceIds.filter((id): id is string => typeof id === 'string' && available.has(id)))].slice(0, MAX_ACTIVE_DEVICES)
+      if (identifiers.length) return identifiers
+    }
+  } catch { /* préférences réparées avec la suite active */ }
+  const suite = catalog.suites.find((candidate) => candidate.id === catalog.activeSuiteId) ?? catalog.suites[0]
+  return suite ? [...suite.deviceIds].slice(0, MAX_ACTIVE_DEVICES) : ['apple-iphone-15']
+}
+
+function storedStudioPreferences(): { layout: StudioLayout; sync: StudioSyncSettings } {
+  const fallback = { layout: 'aligned' as StudioLayout, sync: { navigation: true, scroll: true, interactions: false } }
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem('responsiver.studio.v1') ?? '{}') as { layout?: unknown; sync?: unknown }
+    const layout = parsed.layout === 'aligned' || parsed.layout === 'grid' || parsed.layout === 'focus' ? parsed.layout : fallback.layout
+    const rawSync = parsed.sync && typeof parsed.sync === 'object' ? parsed.sync as Record<string, unknown> : null
+    return {
+      layout,
+      sync: {
+        navigation: typeof rawSync?.navigation === 'boolean' ? rawSync.navigation : fallback.sync.navigation,
+        scroll: typeof rawSync?.scroll === 'boolean' ? rawSync.scroll : fallback.sync.scroll,
+        interactions: typeof rawSync?.interactions === 'boolean' ? rawSync.interactions : fallback.sync.interactions
+      }
+    }
+  } catch {
+    return fallback
+  }
+}
+
+const destinations: Array<{ id: Destination; label: string; icon: IconName }> = [
   { id: 'projects', label: 'Projets', icon: 'projects' },
   { id: 'lab', label: 'Laboratoire', icon: 'ruler' },
   { id: 'matrix', label: 'Matrice', icon: 'matrix' },
@@ -211,56 +386,12 @@ const destinations: Array<{ id: Destination; label: string; icon: string }> = [
   { id: 'export', label: 'Exporter', icon: 'export' }
 ]
 
-const inspectorTabs: Array<{ id: InspectorTab; label: string; icon: string }> = [
+const inspectorTabs: Array<{ id: InspectorTab; label: string; icon: IconName }> = [
   { id: 'findings', label: 'Constats', icon: 'finding' },
   { id: 'fixes', label: 'Correctifs', icon: 'changes' },
   { id: 'theme', label: 'Thème', icon: 'theme' },
   { id: 'conversation', label: 'Assistant', icon: 'chat' }
 ]
-
-function Icon({ name, size = 18 }: { name: string; size?: number }): ReactElement {
-  const props = { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.75, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const, 'aria-hidden': true }
-  const paths: Record<string, ReactElement> = {
-    projects: <><path d="M4 6.5h6l1.6 2H20v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2Z" /><path d="M2 11h20" /></>,
-    ruler: <><rect x="3" y="5" width="18" height="14" rx="2" /><path d="M7 5v4M11 5v2M15 5v4M19 5v2" /></>,
-    matrix: <><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M3 9h18M3 15h18M9 3v18M15 3v18" /></>,
-    changes: <><path d="M7 4v13M4 7l3-3 3 3" /><path d="M17 20V7m-3 10 3 3 3-3" /></>,
-    export: <><path d="M12 3v12m-4-4 4 4 4-4" /><path d="M4 18v2h16v-2" /></>,
-    folder: <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />,
-    file: <><path d="M6 2h8l4 4v16H6Z" /><path d="M14 2v5h5" /></>,
-    code: <><path d="m8 9-4 3 4 3M16 9l4 3-4 3" /><path d="m14 5-4 14" /></>,
-    phone: <><rect x="7" y="2" width="10" height="20" rx="2" /><path d="M10 5h4" /></>,
-    tablet: <rect x="5" y="2" width="14" height="20" rx="2" />,
-    laptop: <><rect x="4" y="4" width="16" height="12" rx="1.5" /><path d="M2 20h20" /></>,
-    finding: <><circle cx="12" cy="12" r="8" /><path d="M12 8v5m0 3h.01" /></>,
-    theme: <><path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9Z" /></>,
-    chat: <path d="M4 4h16v12H9l-5 4Z" />,
-    shield: <path d="M12 3 5 6v5c0 4.4 2.9 8.4 7 10 4.1-1.6 7-5.6 7-10V6l-7-3Z" />,
-    back: <><path d="m15 18-6-6 6-6" /><path d="M9 12h11" /></>,
-    forward: <><path d="m9 18 6-6-6-6" /><path d="M15 12H4" /></>,
-    refresh: <><path d="M20 11a8 8 0 0 0-14.8-4L3 10" /><path d="M3 4v6h6" /><path d="M4 13a8 8 0 0 0 14.8 4L21 14" /><path d="M21 20v-6h-6" /></>,
-    swap: <><path d="M4 8h14" /><path d="m15 5 3 3-3 3" /><path d="M20 16H6" /><path d="m9 13-3 3 3 3" /></>,
-    panelCollapse: <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16M16 9l-3 3 3 3" /></>,
-    panelExpand: <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16M13 9l3 3-3 3" /></>,
-    close: <><path d="m6 6 12 12M18 6 6 18" /></>,
-    check: <path d="m5 12 4 4L19 6" />,
-    copy: <><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1" /></>,
-    arrow: <><path d="M5 12h14" /><path d="m13 6 6 6-6 6" /></>,
-    plus: <><path d="M12 5v14M5 12h14" /></>,
-    compare: <><rect x="3" y="4" width="7" height="16" rx="1" /><rect x="14" y="4" width="7" height="16" rx="1" /></>,
-    external: <><path d="M14 4h6v6M20 4l-9 9" /><path d="M19 14v5H5V5h5" /></>,
-    fullscreen: <><path d="M8 3H3v5M16 3h5v5M21 16v5h-5M3 16v5h5" /></>,
-    fullscreenExit: <><path d="M3 8h5V3M21 8h-5V3M16 21v-5h5M8 21v-5H3" /></>,
-    info: <><circle cx="12" cy="12" r="9" /><path d="M12 11v5M12 8h.01" /></>,
-    help: <><circle cx="12" cy="12" r="9" /><path d="M9.8 9a2.35 2.35 0 1 1 3.4 2.1c-.8.42-1.2.92-1.2 1.9M12 16.5h.01" /></>,
-    cursor: <><path d="m5 3 14 8-6 2-3 6Z" /><path d="m13 13 5 5" /></>,
-    compose: <><rect x="7" y="7" width="10" height="10" rx="1" /><path d="M12 2v5m0-5-2 2m2-2 2 2M12 22v-5m0 5-2-2m2 2 2-2M2 12h5m-5 0 2-2m-2 2 2 2M22 12h-5m5 0-2-2m2 2-2 2" /></>,
-    undo: <><path d="M9 7 4 12l5 5" /><path d="M4 12h9a6 6 0 0 1 6 6" /></>,
-    redo: <><path d="m15 7 5 5-5 5" /><path d="M20 12h-9a6 6 0 0 0-6 6" /></>,
-    play: <path d="m8 5 11 7-11 7Z" />
-  }
-  return <svg {...props}>{paths[name] ?? paths.info}</svg>
-}
 
 function Mark(): ReactElement {
   return <span className="brand-mark" aria-hidden="true"><i /><i /><i /></span>
@@ -779,12 +910,13 @@ function previewOwnsMessageSource(frame: HTMLIFrameElement | null, source: Messa
   return false
 }
 
-function PreviewFrame({ project, origin, device, path, compact = false, label, focusSelector, themeOverride, scenarioState = null, resizable = false, allowUpscale = false, zoomable = false, inspectorEnabled = false, composerEnabled = false, visualCss = '', onResize, onPathChange, onThemeChange, onExternal, onAudit, onRenderStatus, onEscape, onInspectElement, onCascadeTrace, onInspectorReady, onInspectorStop, onInspectorShortcut, onComposerGesture, onComposerVerified, onComposerRejected, onComposerNotice }: {
+function PreviewFrame({ project, origin, device, path, compact = false, studio = false, label, focusSelector, themeOverride, scenarioState = null, resizable = false, allowUpscale = false, zoomable = false, inspectorEnabled = false, composerEnabled = false, visualCss = '', syncCommand = null, designOverlay = null, onResize, onPathChange, onThemeChange, onExternal, onAudit, onRenderStatus, onEscape, onInspectElement, onCascadeTrace, onInspectorReady, onInspectorStop, onInspectorShortcut, onSyncEvent, onComposerGesture, onComposerVerified, onComposerRejected, onComposerNotice }: {
   project: ProjectSnapshot & ProjectExtra
   origin: string | null
   device: Device
   path: string
   compact?: boolean
+  studio?: boolean
   label?: string
   focusSelector?: string | null
   themeOverride?: ThemeTarget | null
@@ -795,6 +927,8 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
   inspectorEnabled?: boolean
   composerEnabled?: boolean
   visualCss?: string
+  syncCommand?: PreviewSyncCommand | null
+  designOverlay?: DesignOverlay | null
   onResize?: (width: number, height: number) => void
   onPathChange?: (path: string) => void
   onThemeChange?: (theme: RuntimeTheme) => void
@@ -807,6 +941,7 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
   onInspectorReady?: () => void
   onInspectorStop?: () => void
   onInspectorShortcut?: () => void
+  onSyncEvent?: (event: PreviewSyncEvent) => void
   onComposerGesture?: (gesture: VisualGestureCommit) => void
   onComposerVerified?: (gestureId: string) => void
   onComposerRejected?: (gestureId: string, reason: string) => void
@@ -855,6 +990,7 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
   const previousOriginRef = useRef(origin)
   const previousProjectIdRef = useRef(project.id)
   const reportedPathRef = useRef(path)
+  const appliedSyncSequenceRef = useRef(0)
   focusSelectorRef.current = focusSelector
   themeOverrideRef.current = themeOverride
   scenarioStateRef.current = scenarioState
@@ -1009,6 +1145,10 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
       const data = event.data as { channel?: string; type?: string; reason?: string; path?: string; documentId?: string; requestId?: string; gestureIds?: unknown; background?: string; detected?: RuntimeTheme; theme?: { detected?: RuntimeTheme }; url?: string; status?: 'ready' | 'empty'; state?: 'visible' | 'empty'; settled?: boolean; stable?: boolean; failureCount?: number; errorCount?: number; errors?: Array<{ detail?: unknown }>; deltaY?: number; deltaMode?: number; clientX?: number; clientY?: number; applied?: boolean } & Partial<RuntimeAudit>
       if (data.channel !== 'responsiver-preview') return
       if (!directFrameMessage && !['preview-zoom', 'inspector-hover', 'inspector-selected', 'inspector-started', 'inspector-stopped', 'inspector-shortcut'].includes(data.type ?? '')) return
+      if (directFrameMessage && (data.type === 'sync-scroll' || data.type === 'sync-interaction')) {
+        const syncEvent = sanitizePreviewSyncEvent(event.data)
+        if (syncEvent) onSyncEvent?.(syncEvent)
+      }
       if (data.type === 'state') {
         if (data.path) {
           const pendingPath = pendingPathRef.current
@@ -1091,9 +1231,19 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
     }
     window.addEventListener('message', listener)
     return () => window.removeEventListener('message', listener)
-  }, [device, onAudit, onCascadeTrace, onEscape, onExternal, onInspectElement, onInspectorReady, onInspectorShortcut, onInspectorStop, onPathChange, onRenderStatus, onThemeChange, origin, zoomable])
+  }, [device, onAudit, onCascadeTrace, onEscape, onExternal, onInspectElement, onInspectorReady, onInspectorShortcut, onInspectorStop, onPathChange, onRenderStatus, onSyncEvent, onThemeChange, origin, zoomable])
 
   const post = (type: string, payload: Record<string, unknown> = {}): void => frameRef.current?.contentWindow?.postMessage({ channel: 'responsiver-preview', type, ...payload }, origin ?? '*')
+
+  useEffect(() => {
+    if (!syncCommand || syncCommand.sequence <= appliedSyncSequenceRef.current) return
+    appliedSyncSequenceRef.current = syncCommand.sequence
+    const event = syncCommand.event
+    const payload = event.type === 'sync-scroll'
+      ? { protocol: 1, eventId: event.eventId, sourceDocumentId: event.documentId, route: event.route, anchor: event.anchor, progress: event.progress }
+      : { protocol: 1, eventId: event.eventId, sourceDocumentId: event.documentId, route: event.route, target: event.target, action: event.action, checked: event.checked, selectedIndices: event.selectedIndices, value: event.value }
+    frameRef.current?.contentWindow?.postMessage({ channel: 'responsiver-preview', type: syncCommand.kind === 'scroll' ? 'sync-apply-scroll' : 'sync-apply-interaction', ...payload }, origin ?? '*')
+  }, [origin, syncCommand])
 
   function scheduleVisualStylePreview(delay = 80): void {
     if (visualStyleTimerRef.current) window.clearTimeout(visualStyleTimerRef.current)
@@ -1324,8 +1474,8 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
     return <div className={overlay ? 'preview-diagnostic preview-diagnostic--overlay' : 'preview-diagnostic'} role="status"><span className="preview-diagnostic__index">R—00</span><div className="preview-diagnostic__icon"><Icon name="finding" size={20} /></div><span className="overline">Diagnostic du rendu</span><strong>{readinessBlocked ? project.previewReadiness.summary : 'La page s’est chargée, mais aucun contenu visible n’a été produit.'}</strong><p>{readinessBlocked ? project.previewReadiness.diagnostics[0]?.detail ?? 'La page sélectionnée ne produit aucun contenu exploitable.' : runtimeRender?.failureCount ? `${runtimeRender.failureCount} erreur${runtimeRender.failureCount > 1 ? 's' : ''} de script ou de ressource ont été observées pendant le chargement.${runtimeRender.firstFailure ? ` ${runtimeRender.firstFailure}` : ''}` : 'Le point de montage est resté vide après le chargement. Vérifiez le bundle local et les dépendances nécessaires.'}</p>{origin && <button className="button button--secondary" type="button" onClick={() => setShowBlockedSource(true)}>Afficher la source brute</button>}<small>{origin ? 'Le runner continue en arrière-plan et requalifiera automatiquement un montage tardif.' : 'Le runner reste arrêté tant qu’aucune entrée exploitable n’est disponible.'}</small></div>
   }
 
-  return <section className={`${compact ? 'preview preview--compact' : 'preview'}${isResizing ? ' is-resizing' : ''}`} aria-label={label ?? `Aperçu ${device.name}`}>
-    {!compact && <div className="browser-bar">
+  return <section className={`${compact ? 'preview preview--compact' : 'preview'}${studio ? ' preview--studio' : ''}${isResizing ? ' is-resizing' : ''}`} aria-label={label ?? `Aperçu ${device.name}`}>
+    {(!compact || studio) && <div className={studio ? 'browser-bar browser-bar--studio' : 'browser-bar'}>
       <div className="browser-controls">
         <button className="icon-button" onClick={() => post('back')} aria-label="Page précédente" disabled={!origin}><Icon name="back" size={15} /></button>
         <button className="icon-button" onClick={() => post('forward')} aria-label="Page suivante" disabled={!origin}><Icon name="forward" size={15} /></button>
@@ -1338,13 +1488,14 @@ function PreviewFrame({ project, origin, device, path, compact = false, label, f
       }}>
         {displayedRoutes.map((route) => <option value={route.path} key={route.path}>{route.label}</option>)}
       </select>
-      <code title={path}>{path}</code>
-      {origin ? <span className="runner-status"><i /> Local</span> : <span className="runner-status runner-status--stopped">Arrêté</span>}
+      {!studio && <code title={path}>{path}</code>}
+      {origin ? <span className="runner-status" title={studio ? path : undefined}><i /> {studio ? 'Lié' : 'Local'}</span> : <span className="runner-status runner-status--stopped">Arrêté</span>}
     </div>}
     <div ref={stageRef} className="preview-stage" onWheel={handleZoomWheel}>
       {readinessBlocked && !showBlockedSource ? diagnosticCard() : <><div className="device-space" style={{ width: outerWidth, height: outerHeight }}>
         <div ref={spaceRef} className="device-shell" style={{ width: device.width, height: device.height, transform: `scale(${scale})` }}>
           <iframe key={`${project.id}:${origin ?? 'inline-preview'}:${frameNavigationKey}`} ref={frameRef} title={`${project.name} — ${device.name}`} width={device.width} height={device.height} sandbox={origin ? 'allow-scripts allow-forms allow-same-origin' : ''} src={source} srcDoc={source ? undefined : project.previewHtml ?? undefined} onLoad={synchronizeLoadedFrame} />
+          {designOverlay && <img className="preview-design-overlay" src={designOverlay.url} alt="Maquette de référence superposée" style={{ opacity: designOverlay.opacity }} draggable={false} />}
           {resizable && !composerEnabled && (Object.keys(resizeLabels) as ResizeEdge[]).map((edge) => <button type="button" key={edge} className={`resize-handle resize-handle--${edge}`} aria-label={resizeLabels[edge]} title={`${resizeLabels[edge]} · flèches, Maj pour 20 px`} onPointerDown={(event) => beginResize(edge, event)} onKeyDown={(event) => resizeWithKeyboard(edge, event)} />)}
         </div>
       </div>{runtimeBlocked && !showBlockedSource && diagnosticCard(true)}</>}
@@ -1374,6 +1525,24 @@ export default function App(): ReactElement {
   const [proposalContext, setProposalContext] = useState<ProposalContext | null>(null)
   const [previewMode, setPreviewMode] = useState<PreviewMode>('source')
   const [labMode, setLabMode] = useState<LabMode>('device')
+  const [labPanelOpen, setLabPanelOpen] = useState(() => {
+    try { return window.localStorage.getItem('responsiver.lab-panel-open') !== 'false' } catch { return true }
+  })
+  const [deviceCatalogState, setDeviceCatalogState] = useState<DeviceCatalogState>(storedDeviceCatalogState)
+  const [studioDeviceIds, setStudioDeviceIds] = useState<string[]>(() => initialStudioDeviceIds(storedDeviceCatalogState()))
+  const [studioLayout, setStudioLayout] = useState<StudioLayout>(() => storedStudioPreferences().layout)
+  const [studioPilotId, setStudioPilotId] = useState(() => initialStudioDeviceIds(storedDeviceCatalogState())[0])
+  const [studioFocusedId, setStudioFocusedId] = useState(() => initialStudioDeviceIds(storedDeviceCatalogState())[0])
+  const [studioLinkedIds, setStudioLinkedIds] = useState<string[]>(() => initialStudioDeviceIds(storedDeviceCatalogState()))
+  const [studioRotatedIds, setStudioRotatedIds] = useState<string[]>([])
+  const [studioPaths, setStudioPaths] = useState<Record<string, string>>({})
+  const [remoteStudioStates, setRemoteStudioStates] = useState<Record<string, RemotePageState>>({})
+  const [remoteStudioSizes, setRemoteStudioSizes] = useState<Record<string, { width: number; height: number }>>({})
+  const [studioSync, setStudioSync] = useState<StudioSyncSettings>(() => storedStudioPreferences().sync)
+  const [studioSyncCommand, setStudioSyncCommand] = useState<PreviewSyncCommand | null>(null)
+  const [studioOverlay, setStudioOverlay] = useState<StudioOverlayState>({ enabled: false, src: null, fileName: null, opacity: .45 })
+  const [studioControlsOverlayOpen, setStudioControlsOverlayOpen] = useState(false)
+  const [studioCapturing, setStudioCapturing] = useState(false)
   const [stageFullscreen, setStageFullscreen] = useState(false)
   const [visualFullscreen, setVisualFullscreen] = useState(false)
   const [visualMode, setVisualMode] = useState<VisualEditorMode>('compose')
@@ -1439,6 +1608,7 @@ export default function App(): ReactElement {
   const queuedViewportsAwaitingAudit = useRef(new Map<string, Set<string>>())
   const renderedProjectRef = useRef<(ProjectSnapshot & ProjectExtra) | null>(project)
   const queuedIssueIdsRef = useRef(queuedIssueIds)
+  const stageFullscreenRef = useRef<HTMLDivElement>(null)
   const fullscreenButtonRef = useRef<HTMLButtonElement>(null)
   const visualFullscreenButtonRef = useRef<HTMLButtonElement>(null)
   const onboardingTriggerRef = useRef<HTMLButtonElement>(null)
@@ -1447,8 +1617,15 @@ export default function App(): ReactElement {
   const remoteAudits = useRef(new Map<string, RemoteAuditResult>())
   const localRuntimeAudits = useRef(new Map<string, RuntimeAudit>())
   const localSourceIssues = useRef<ProjectIssue[]>([])
+  const studioCanvasRef = useRef<HTMLDivElement>(null)
+  const studioOverlayObjectUrlRef = useRef<string | null>(null)
+  const studioSyncSequenceRef = useRef(0)
+  const remoteStudioStatesRef = useRef<Record<string, RemotePageState>>({})
+  const remoteStudioNavigationRef = useRef(new Map<string, string>())
+  const remoteInspectorViewIdRef = useRef<string | undefined>(undefined)
   renderedProjectRef.current = project
   queuedIssueIdsRef.current = queuedIssueIds
+  remoteStudioStatesRef.current = remoteStudioStates
 
   async function refreshRecentProjects(): Promise<void> {
     if (!api().listRecentProjects) {
@@ -1470,6 +1647,60 @@ export default function App(): ReactElement {
     return devices.find((device) => device.id === deviceId) ?? devices[1]
   }, [deviceId, family, height, width])
   const familyDevices = devices.filter((device) => device.family === family)
+  const activeStudioProfiles = useMemo(() => studioDeviceIds
+    .map((id) => findDeviceProfile(id, deviceCatalogState))
+    .filter((profile): profile is DeviceProfile => Boolean(profile))
+    .slice(0, MAX_ACTIVE_DEVICES), [deviceCatalogState, studioDeviceIds])
+
+  useEffect(() => {
+    try { window.localStorage.setItem(DEVICE_CATALOG_STORAGE_KEY, serializeDeviceCatalogState(deviceCatalogState)) } catch { /* catalogue utilisable en mémoire */ }
+  }, [deviceCatalogState])
+
+  useEffect(() => {
+    try { window.localStorage.setItem('responsiver.lab-panel-open', String(labPanelOpen)) } catch { /* préférence facultative */ }
+  }, [labPanelOpen])
+
+  useEffect(() => {
+    try { window.localStorage.setItem('responsiver.studio.v1', JSON.stringify({ deviceIds: activeStudioProfiles.map((profile) => profile.id), layout: studioLayout, sync: studioSync })) } catch { /* préférences facultatives */ }
+  }, [activeStudioProfiles, studioLayout, studioSync])
+
+  useEffect(() => () => {
+    if (studioOverlayObjectUrlRef.current) URL.revokeObjectURL(studioOverlayObjectUrlRef.current)
+    studioOverlayObjectUrlRef.current = null
+  }, [])
+
+  useEffect(() => {
+    const identifiers = activeStudioProfiles.map((profile) => profile.id)
+    if (!identifiers.length) return
+    if (!identifiers.includes(studioPilotId)) setStudioPilotId(identifiers[0])
+    if (!identifiers.includes(studioFocusedId)) setStudioFocusedId(identifiers[0])
+    setStudioLinkedIds((current) => {
+      const retained = current.filter((id) => identifiers.includes(id))
+      const next = retained.length ? retained : [identifiers[0]]
+      return next.length === current.length && next.every((id, index) => id === current[index]) ? current : next
+    })
+    setStudioRotatedIds((current) => current.filter((id) => identifiers.includes(id)))
+    setRemoteStudioSizes((current) => Object.fromEntries(Object.entries(current).filter(([id]) => identifiers.includes(id))))
+    setRemoteStudioStates((current) => {
+      const next = Object.fromEntries(Object.entries(current).filter(([id]) => identifiers.includes(id)))
+      remoteStudioStatesRef.current = next
+      return next
+    })
+  }, [activeStudioProfiles, studioFocusedId, studioPilotId])
+
+  useEffect(() => {
+    if (studioOverlayObjectUrlRef.current) URL.revokeObjectURL(studioOverlayObjectUrlRef.current)
+    studioOverlayObjectUrlRef.current = null
+    setStudioOverlay({ enabled: false, src: null, fileName: null, opacity: .45 })
+    setStudioControlsOverlayOpen(false)
+    setStudioPaths({})
+    setStudioSyncCommand(null)
+    setRemoteStudioStates({})
+    setRemoteStudioSizes({})
+    remoteStudioStatesRef.current = {}
+    remoteStudioNavigationRef.current.clear()
+  }, [project?.id])
+
   const visualAuthorization = useMemo(() => project ? authorizeVisualEditor({
     sourceKind: project.source.kind,
     readOnly: project.source.readOnly,
@@ -1507,6 +1738,9 @@ export default function App(): ReactElement {
     .filter((audit) => documentPath(audit.route) === documentPath(activePath))
     .map((audit) => `${audit.viewport.width}x${audit.viewport.height}`)).size
   const isRemote = project?.source.kind === 'remote-url' || project?.source.kind === 'linked-localhost'
+  const remoteStudioPilotViewId = isRemote && labMode === 'studio' && activeStudioProfiles[0]?.id !== studioPilotId ? studioPilotId : undefined
+  const remoteStudioPilotState = remoteStudioStates[studioPilotId]
+  remoteInspectorViewIdRef.current = destination === 'lab' ? remoteStudioPilotViewId : undefined
   const frameworkSupport = useMemo(() => project ? frameworkSupportFor(project) : null, [project])
   const workspaceEnabled = Boolean(project && !project.source.readOnly && project.source.localRoot)
   const stagingAvailable = Boolean(project && !project.source.readOnly && project.source.localRoot && project.capabilities?.staging)
@@ -1551,6 +1785,7 @@ export default function App(): ReactElement {
     const unsubscribeBlocked = window.responsiver.onRemoteBlockedNavigation((payload) => flash(`${payload.detail} ${payload.url}`))
     const unsubscribeRemoteInspector = window.responsiver.onRemoteInspectorSelection((selection: RemoteInspectorSelection) => {
       if (selection.projectId !== activeProjectId.current) return
+      if ((selection.viewId ?? undefined) !== remoteInspectorViewIdRef.current) return
       setInspectedElement(selection)
       setCascadeTrace(null)
       setCascadeLoading(false)
@@ -1608,22 +1843,67 @@ export default function App(): ReactElement {
 
   useEffect(() => {
     if (!stageFullscreen) return
-    const suppressed = [...document.querySelectorAll<HTMLElement>('.nav-rail, .titlebar, .command-bar, .inspector, .activity-bar')]
-    for (const element of suppressed) {
+    const dialog = stageFullscreenRef.current
+    if (!dialog) return
+    const suppressed: HTMLElement[] = []
+    let branch: HTMLElement = dialog
+    while (branch.parentElement) {
+      const parent = branch.parentElement
+      for (const sibling of parent.children) {
+        if (sibling !== branch && sibling instanceof HTMLElement && !sibling.classList.contains('toast')) suppressed.push(sibling)
+      }
+      branch = parent
+      if (branch.classList.contains('app-shell')) break
+    }
+    const previous = suppressed.map((element) => ({ element, inert: element.inert, ariaHidden: element.getAttribute('aria-hidden') }))
+    for (const { element } of previous) {
       element.inert = true
       element.setAttribute('aria-hidden', 'true')
     }
     const focusFrame = window.requestAnimationFrame(() => fullscreenButtonRef.current?.focus())
-    const close = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') setStageFullscreen(false)
+    const focusableElements = (): HTMLElement[] => [...dialog.querySelectorAll<HTMLElement>('a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), iframe, [tabindex]:not([tabindex="-1"]), [contenteditable="true"]')]
+      .filter((element) => !element.inert && !element.closest('[inert]') && element.getAttribute('aria-hidden') !== 'true' && element.getClientRects().length > 0)
+    const keepFocusInside = (event: FocusEvent): void => {
+      if (event.target instanceof Node && dialog.contains(event.target)) return
+      fullscreenButtonRef.current?.focus()
     }
-    window.addEventListener('keydown', close)
+    const handleKeydown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        setStageFullscreen(false)
+        return
+      }
+      if (event.key !== 'Tab') return
+      const focusable = focusableElements()
+      const first = focusable[0]
+      const last = focusable.at(-1)
+      if (!first || !last) {
+        event.preventDefault()
+        fullscreenButtonRef.current?.focus()
+        return
+      }
+      const active = document.activeElement
+      if (!(active instanceof Node) || !dialog.contains(active)) {
+        event.preventDefault()
+        ;(event.shiftKey ? last : first).focus()
+      } else if (event.shiftKey && active === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+    document.addEventListener('focusin', keepFocusInside, true)
+    document.addEventListener('keydown', handleKeydown, true)
     return () => {
       window.cancelAnimationFrame(focusFrame)
-      window.removeEventListener('keydown', close)
-      for (const element of suppressed) {
-        element.inert = false
-        element.removeAttribute('aria-hidden')
+      document.removeEventListener('focusin', keepFocusInside, true)
+      document.removeEventListener('keydown', handleKeydown, true)
+      for (const { element, inert, ariaHidden } of previous) {
+        element.inert = inert
+        if (ariaHidden === null) element.removeAttribute('aria-hidden')
+        else element.setAttribute('aria-hidden', ariaHidden)
       }
       window.requestAnimationFrame(() => fullscreenButtonRef.current?.focus())
     }
@@ -1632,6 +1912,14 @@ export default function App(): ReactElement {
   useEffect(() => {
     if (destination !== 'lab') setStageFullscreen(false)
   }, [destination])
+
+  useEffect(() => window.responsiver.onRemoteEscape((projectId, viewId) => {
+    if (!stageFullscreen || destination !== 'lab' || !isRemote || projectId !== project?.id) return
+    const matchingView = labMode === 'device'
+      ? viewId === undefined
+      : activeStudioProfiles.some((profile, index) => (index === 0 ? undefined : profile.id) === viewId)
+    if (matchingView) setStageFullscreen(false)
+  }), [activeStudioProfiles, destination, isRemote, labMode, project?.id, stageFullscreen])
 
   useLayoutEffect(() => {
     appMainRef.current?.scrollTo({ top: 0, left: 0 })
@@ -1723,16 +2011,16 @@ export default function App(): ReactElement {
     return () => window.removeEventListener('keydown', shortcut, true)
   }, [destination, inspectorLocation, onboardingState.open, project?.id, showPreparation])
 
-  useEffect(() => window.responsiver.onRemoteInspectorShortcut((projectId) => {
-    if (projectId !== activeProjectId.current || onboardingState.open || showPreparation || (destination !== 'lab' && destination !== 'code' && destination !== 'visual')) return
+  useEffect(() => window.responsiver.onRemoteInspectorShortcut((projectId, viewId) => {
+    if (projectId !== activeProjectId.current || (viewId ?? undefined) !== remoteInspectorViewIdRef.current || onboardingState.open || showPreparation || (destination !== 'lab' && destination !== 'code' && destination !== 'visual')) return
     if (destination === 'visual') {
       setInspectedElement(null)
       setVisualMode((current) => current === 'select' ? 'interact' : 'select')
     } else toggleInspector(destination)
   }), [destination, inspectorLocation, onboardingState.open, project?.id, showPreparation, visualMode])
 
-  useEffect(() => window.responsiver.onRemoteInspectorCanceled((projectId) => {
-    if (projectId !== activeProjectId.current) return
+  useEffect(() => window.responsiver.onRemoteInspectorCanceled((projectId, viewId) => {
+    if (projectId !== activeProjectId.current || (viewId ?? undefined) !== remoteInspectorViewIdRef.current) return
     setInspectedElement(null)
     setCascadeTrace(null)
     setCascadeLoading(false)
@@ -1742,8 +2030,8 @@ export default function App(): ReactElement {
     else setInspectorLocation(null)
   }), [destination])
 
-  useEffect(() => window.responsiver.onRemoteInspectorReady((projectId) => {
-    if (projectId !== activeProjectId.current) return
+  useEffect(() => window.responsiver.onRemoteInspectorReady((projectId, viewId) => {
+    if (projectId !== activeProjectId.current || (viewId ?? undefined) !== remoteInspectorViewIdRef.current) return
     if ((destination === 'lab' && inspectorLocation === 'lab') || (destination === 'code' && inspectorLocation === 'code') || (destination === 'visual' && visualMode === 'select')) {
       setInspectorPhase('active')
     }
@@ -1752,7 +2040,9 @@ export default function App(): ReactElement {
   useEffect(() => {
     if (!project || !isRemote) return
     const active = (destination === 'lab' && inspectorLocation === 'lab') || (destination === 'code' && inspectorLocation === 'code') || (destination === 'visual' && visualMode === 'select')
-    const request = { projectId: project.id }
+    const request = destination === 'lab' && remoteStudioPilotViewId
+      ? { projectId: project.id, viewId: remoteStudioPilotViewId }
+      : { projectId: project.id }
     let cancelled = false
     if (active) {
       setInspectorPhase('starting')
@@ -1772,7 +2062,79 @@ export default function App(): ReactElement {
       cancelled = true
       if (active) void window.responsiver.stopRemoteInspector(request).catch(() => undefined)
     }
-  }, [destination, inspectorLocation, isRemote, project?.id, visualMode])
+  }, [destination, inspectorLocation, isRemote, project?.id, remoteStudioPilotViewId, visualMode])
+
+  useEffect(() => {
+    if (!project || !isRemote || destination !== 'lab' || labMode !== 'studio' || !studioSync.navigation || !remoteStudioPilotState || remoteStudioPilotState.loading || !studioLinkedIds.includes(studioPilotId)) return
+    let stopped = false
+    let busy = false
+    let failures = 0
+    const synchronize = async (): Promise<void> => {
+      if (stopped || busy) return
+      const targets = activeStudioProfiles.filter((target) => target.id !== studioPilotId && studioLinkedIds.includes(target.id) && remoteStudioStatesRef.current[target.id]?.url !== remoteStudioPilotState.url)
+      if (!targets.length) return
+      busy = true
+      const results = await Promise.allSettled(targets.map(async (target) => {
+        remoteStudioNavigationRef.current.set(target.id, remoteStudioPilotState.url)
+        const viewId = activeStudioProfiles[0]?.id === target.id ? undefined : target.id
+        const request = viewId ? { projectId: project.id, viewId } : { projectId: project.id }
+        try {
+          await window.responsiver.navigateRemote('url', remoteStudioPilotState.url, request)
+        } finally {
+          if (remoteStudioNavigationRef.current.get(target.id) === remoteStudioPilotState.url) remoteStudioNavigationRef.current.delete(target.id)
+        }
+      }))
+      failures += results.filter((result) => result.status === 'rejected').length
+      if (failures >= 3) {
+        failures = 0
+        flash('Certaines vues attendent la fin de leur analyse avant de rejoindre la navigation du pilote.')
+      }
+      busy = false
+    }
+    void synchronize()
+    const timer = window.setInterval(() => { void synchronize() }, 420)
+    return () => {
+      stopped = true
+      window.clearInterval(timer)
+    }
+  }, [activeStudioProfiles, destination, isRemote, labMode, project?.id, remoteStudioPilotState?.loading, remoteStudioPilotState?.url, studioLinkedIds, studioPilotId, studioSync.navigation])
+
+  useEffect(() => {
+    if (!project || !isRemote || destination !== 'lab' || labMode !== 'studio' || !studioSync.scroll) return
+    const identifiers = activeStudioProfiles.map((profile) => profile.id)
+    const primaryId = identifiers[0]
+    if (!primaryId || !identifiers.includes(studioPilotId) || !studioLinkedIds.includes(studioPilotId)) return
+    const requestFor = (id: string) => id === primaryId ? { projectId: project.id } : { projectId: project.id, viewId: id }
+    let stopped = false
+    let busy = false
+    let lastSnapshot = ''
+    let lastAppliedAt = 0
+    const synchronize = async (): Promise<void> => {
+      if (stopped || busy) return
+      busy = true
+      try {
+        const snapshot = await window.responsiver.readRemoteScroll(requestFor(studioPilotId))
+        if (stopped) return
+        const serialized = JSON.stringify(snapshot)
+        const now = Date.now()
+        if (serialized === lastSnapshot && now - lastAppliedAt < 700) return
+        lastSnapshot = serialized
+        lastAppliedAt = now
+        const targets = identifiers.filter((id) => id !== studioPilotId && studioLinkedIds.includes(id))
+        await Promise.allSettled(targets.map((id) => window.responsiver.applyRemoteScroll({ ...requestFor(id), snapshot })))
+      } catch {
+        // Un audit ou une navigation peut suspendre brièvement le renderer distant.
+      } finally {
+        busy = false
+      }
+    }
+    void synchronize()
+    const timer = window.setInterval(() => { void synchronize() }, 160)
+    return () => {
+      stopped = true
+      window.clearInterval(timer)
+    }
+  }, [activePath, activeStudioProfiles, destination, isRemote, labMode, project?.id, studioLinkedIds, studioPilotId, studioSync.scroll])
 
   useEffect(() => {
     if (!project || project.source.kind !== 'linked-localhost') return
@@ -2921,6 +3283,103 @@ export default function App(): ReactElement {
     setActivePath(path)
   }
 
+  function updateStudioDeviceIds(nextIds: readonly string[], catalogOverride = deviceCatalogState): void {
+    const available = new Set(allDeviceProfiles(catalogOverride).map((profile) => profile.id))
+    const next = [...new Set(nextIds.filter((id) => available.has(id)))].slice(0, MAX_ACTIVE_DEVICES)
+    if (!next.length) {
+      flash('Le Studio doit conserver au moins un appareil.')
+      return
+    }
+    setStudioDeviceIds(next)
+    setStudioLinkedIds((current) => {
+      const retained = current.filter((id) => next.includes(id))
+      const newlyAdded = next.filter((id) => !studioDeviceIds.includes(id))
+      const linked = [...new Set([...retained, ...newlyAdded])]
+      return linked.length ? linked : [next[0]]
+    })
+    setStudioPaths((current) => Object.fromEntries(Object.entries(current).filter(([id]) => next.includes(id))))
+    setStudioSyncCommand(null)
+    setStudioPilotId((current) => next.includes(current) ? current : next[0])
+    setStudioFocusedId((current) => next.includes(current) ? current : next[0])
+  }
+
+  function toggleStudioLink(id: string): void {
+    setStudioSyncCommand(null)
+    setStudioLinkedIds((current) => {
+      if (!current.includes(id)) return [...current, id]
+      const remaining = current.filter((candidate) => candidate !== id)
+      if (!remaining.length) {
+        flash('Au moins un appareil doit rester lié au pilotage.')
+        return current
+      }
+      if (studioPilotId === id) setStudioPilotId(remaining[0])
+      setStudioPaths((paths) => ({ ...paths, [id]: activePath }))
+      return remaining
+    })
+  }
+
+  function updateStudioOverlay(next: StudioOverlayState): void {
+    const previousObjectUrl = studioOverlayObjectUrlRef.current
+    if (previousObjectUrl && previousObjectUrl !== next.src) URL.revokeObjectURL(previousObjectUrl)
+    studioOverlayObjectUrlRef.current = next.src?.startsWith('blob:') ? next.src : null
+    setStudioOverlay(next)
+  }
+
+  function selectStudioPilot(id: string): void {
+    setStudioPilotId(id)
+    setStudioFocusedId(id)
+    setStudioLinkedIds((current) => current.includes(id) ? current : [...current, id])
+    setStudioSyncCommand(null)
+    remoteStudioNavigationRef.current.clear()
+  }
+
+  function changeStudioPath(id: string, path: string): void {
+    if (studioSync.navigation && studioLinkedIds.includes(id)) {
+      changePreviewPath(path)
+      return
+    }
+    setStudioPaths((current) => ({ ...current, [id]: path }))
+  }
+
+  function receiveStudioSyncEvent(viewId: string, event: PreviewSyncEvent): void {
+    if (viewId !== studioPilotId || !studioLinkedIds.includes(viewId)) return
+    const kind: PreviewSyncKind = event.type === 'sync-scroll' ? 'scroll' : 'interaction'
+    if (kind === 'scroll' && !studioSync.scroll || kind === 'interaction' && !studioSync.interactions) return
+    setStudioSyncCommand({ sequence: ++studioSyncSequenceRef.current, sourceViewId: viewId, kind, event })
+  }
+
+  function remoteViewIdFor(profileId: string): string | undefined {
+    return activeStudioProfiles[0]?.id === profileId ? undefined : profileId
+  }
+
+  function receiveRemoteStudioState(profileId: string, state: RemotePageState): void {
+    const nextStates = { ...remoteStudioStatesRef.current, [profileId]: state }
+    remoteStudioStatesRef.current = nextStates
+    setRemoteStudioStates(nextStates)
+    if (remoteStudioNavigationRef.current.get(profileId) === state.url && !state.loading) remoteStudioNavigationRef.current.delete(profileId)
+    if (profileId !== studioPilotId || !studioLinkedIds.includes(profileId)) return
+    setRemoteState(state)
+    changePreviewPath(state.path)
+  }
+
+  async function captureStudio(): Promise<void> {
+    const element = studioCanvasRef.current
+    if (!element || !project || studioCapturing) return
+    setStudioCapturing(true)
+    try {
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve())))
+      const rectangle = element.getBoundingClientRect()
+      const capture = window.responsiver.captureInterfaceRegion({ x: rectangle.x, y: rectangle.y, width: rectangle.width, height: rectangle.height }, `${project.name}-studio-responsive.png`)
+      window.setTimeout(() => setStudioCapturing(false), 260)
+      const path = await capture
+      flash(path ? `Planche enregistrée : ${path}` : 'Capture annulée.')
+    } catch {
+      flash('La planche n’a pas pu être capturée.')
+    } finally {
+      setStudioCapturing(false)
+    }
+  }
+
   function applyRuntimeAudit(audit: RuntimeAudit, primary = true): void {
     if (primary) setRuntimeAudit(audit)
     const auditKey = `${audit.route}\u001f${audit.viewport.width}x${audit.viewport.height}`
@@ -3038,7 +3497,7 @@ export default function App(): ReactElement {
     changes: staging?.changes.length ?? 0
   } : { blockers: 0, issues: 0, selected: 0, changes: 0 }
 
-  const interfaceOverlayOpen = pageGuideOpen || onboardingState.open || showPreparation
+  const interfaceOverlayOpen = pageGuideOpen || onboardingState.open || showPreparation || studioControlsOverlayOpen
 
   function openOnboarding(): void {
     onboardingOpenedFromRail.current = true
@@ -3065,7 +3524,7 @@ export default function App(): ReactElement {
         const limited = (isRemote && (item.id === 'review' || item.id === 'matrix')) || visualUnavailable
         return <button key={item.id} className={`${destination === item.id ? 'nav-link is-active' : 'nav-link'}${limited ? ' is-limited' : ''}`} onClick={() => go(item.id)} aria-label={item.label} aria-current={destination === item.id ? 'page' : undefined} aria-disabled={visualUnavailable || undefined} title={visualUnavailable ? 'Sources locales requises' : item.label}><Icon name={item.icon} /><span>{item.label}</span>{item.id === 'review' && counts.changes > 0 && <b>{counts.changes}</b>}</button>
       })}<button ref={onboardingTriggerRef} type="button" className="nav-link nav-link--guide" onClick={openOnboarding} aria-label="Ouvrir le guide de prise en main" aria-haspopup="dialog" aria-expanded={onboardingState.open && !showPreparation} aria-controls="responsiver-onboarding" title="Guide de prise en main"><Icon name="help" /><span>Guide</span></button></nav>
-      <div className="rail-foot"><span><Icon name="shield" size={15} /> Local strict par défaut</span><small>v0.7 · open source</small></div>
+      <div className="rail-foot"><span><Icon name="shield" size={15} /> Local strict par défaut</span><small>v0.8 · open source</small></div>
     </aside>
 
     <main ref={appMainRef} className="app-main">
@@ -3080,9 +3539,9 @@ export default function App(): ReactElement {
 
       {destination === 'projects' && <ProjectsView project={project} projectPath={projectPath} publicUrl={publicUrl} localhostUrl={localhostUrl} localhostRoot={localhostRoot} recentProjects={recentProjects} recentLoading={recentLoading} forgettingRecentId={forgettingRecentId} busy={busy} onPath={setProjectPath} onPublicUrl={setPublicUrl} onLocalhostUrl={setLocalhostUrl} onLocalhostRoot={setLocalhostRoot} onChooseLocalhostRoot={() => void chooseLocalhostRoot()} onOpenPublic={() => void openRemote('public')} onOpenLocalhost={() => void openRemote('localhost')} onOpenFolder={() => openWith(() => window.responsiver.chooseProject(), 'Projet analysé et servi localement.')} onOpenFile={() => openWith(() => api().chooseProjectFile ? api().chooseProjectFile!() : window.responsiver.chooseProject(), 'Fichier analysé et servi localement.')} onOpenPath={() => openPath()} onOpenRecent={(id) => void openRecentProject(id)} onForgetRecent={(id) => void forgetRecentProject(id)} onDemo={() => openWith(() => window.responsiver.openDemoProject(), 'Démonstration locale prête.')} onContinue={() => go('lab')} onDrop={(file) => { const path = api().getPathForFile?.(file); if (path) void openPath(path); else flash('Déposez le projet dans l’application desktop.') }} />}
 
-      {destination === 'lab' && project && <div className="workbench">
+      {destination === 'lab' && project && <div className={labMode === 'studio' ? 'workbench workbench--studio' : 'workbench'}>
         <div className="command-bar">
-          <div className="mode-switch" role="group" aria-label="Disposition de l’aperçu"><button className={labMode === 'device' ? 'is-active' : ''} onClick={() => setLabMode('device')} aria-pressed={labMode === 'device'}><Icon name="ruler" /> Appareil</button><button className={labMode === 'compare' ? 'is-active' : ''} onClick={() => { setLabMode('compare'); if (previewMode === 'before-after') setPreviewMode('proposal'); setInspectorLocation(null); setInspectorPhase('idle'); setInspectedElement(null) }} aria-pressed={labMode === 'compare'} disabled={isRemote} title={isRemote ? 'Le balayage distant analyse déjà cinq largeurs sans multiplier les sessions.' : undefined}><Icon name="compare" /> 3 écrans</button></div>
+          <div className="mode-switch" role="group" aria-label="Disposition de l’aperçu"><button className={labMode === 'device' ? 'is-active' : ''} onClick={() => setLabMode('device')} aria-pressed={labMode === 'device'}><Icon name="ruler" /> Appareil</button><button className={labMode === 'studio' ? 'is-active' : ''} onClick={() => { setLabMode('studio'); if (previewMode === 'before-after') setPreviewMode('proposal'); setInspectorLocation(null); setInspectorPhase('idle'); setInspectedElement(null) }} aria-pressed={labMode === 'studio'} title="Composer une planche synchronisée de un à cinq écrans"><Icon name="layout" /> Studio <b>{activeStudioProfiles.length}</b></button></div>
           <div className="command-divider" aria-hidden="true" />
           {!isRemote ? <div className="version-switch" role="group" aria-label="État du projet affiché">
             <button className={previewMode === 'source' ? 'is-active' : ''} onClick={() => setPreviewMode('source')} aria-pressed={previewMode === 'source'}>Version actuelle</button>
@@ -3093,25 +3552,81 @@ export default function App(): ReactElement {
           <div className="command-spacer" />
           {labMode === 'device' && <DeviceControls family={family} devices={familyDevices} selectedId={deviceId} width={width} height={height} onFamily={selectFamily} onDevice={selectDevice} onWidth={(value) => { setMatrixScenario(null); setWidth(value); setDeviceId('custom') }} onHeight={(value) => { setMatrixScenario(null); setHeight(value); setDeviceId('custom') }} onRotate={() => { setMatrixScenario(null); setWidth(height); setHeight(width); setDeviceId('custom') }} />}
         </div>
+        {labMode === 'studio' && <StudioControls catalogState={deviceCatalogState} onCatalogState={setDeviceCatalogState} activeDeviceIds={studioDeviceIds} onActiveDeviceIds={updateStudioDeviceIds} layout={studioLayout} onLayout={setStudioLayout} sync={studioSync} onSync={setStudioSync} syncCapabilities={isRemote ? { navigation: true, scroll: true, interactions: false } : undefined} overlay={studioOverlay} onOverlay={updateStudioOverlay} onInterfaceOverlayChange={setStudioControlsOverlayOpen} overlayDisabledReason={isRemote ? 'La maquette reste réservée aux rendus locaux : les vues URL natives ne peuvent pas être recouvertes sans masquer leur interaction.' : null} onCapture={() => void captureStudio()} captureBusy={studioCapturing} captureDisabledReason={isRemote ? 'La capture groupée des vues URL natives n’est pas disponible ; utilisez une capture par navigateur.' : null} />}
 
-        <div className="lab-grid">
-          <div className={`${stageFullscreen ? 'stage-column is-fullscreen' : 'stage-column'}${inspectorLocation === 'lab' ? ' is-inspecting' : ''}`} role={stageFullscreen ? 'dialog' : undefined} aria-modal={stageFullscreen || undefined} aria-label={stageFullscreen ? 'Prévisualisation en plein écran' : undefined}>
+        <div className={labPanelOpen ? 'lab-grid' : 'lab-grid is-panel-collapsed'}>
+          <div ref={stageFullscreenRef} className={`${stageFullscreen ? 'stage-column is-fullscreen' : 'stage-column'}${inspectorLocation === 'lab' ? ' is-inspecting' : ''}`} role={stageFullscreen ? 'dialog' : undefined} aria-modal={stageFullscreen || undefined} aria-label={stageFullscreen ? 'Prévisualisation en plein écran' : undefined}>
             <div className="stage-toolbar">
               <span><i className={proposal && previewMode !== 'source' && previewMode !== 'staging' ? 'status-dot status-dot--proposal' : 'status-dot status-dot--ok'} />{isRemote ? project.source.kind === 'linked-localhost' ? 'Localhost connecté' : 'URL publique isolée' : previewMode === 'before-after' ? 'Comparaison du correctif' : previewMode === 'proposal' ? 'Correctif temporaire' : previewMode === 'staging' ? 'Version corrigée prête' : workspaceOrigin ? 'Overlay code temporaire' : 'Version actuelle du projet'}</span>
-              <small>{isRemote ? 'Navigation réelle · audit multi-viewport' : previewMode === 'before-after' ? 'Deux rendus synchronisés' : labMode === 'device' ? 'Bords redimensionnables' : 'Trois familles d’appareils'}</small>
+              <small>{isRemote ? labMode === 'studio' ? `${activeStudioProfiles.length} vue${activeStudioProfiles.length > 1 ? 's' : ''} URL isolée${activeStudioProfiles.length > 1 ? 's' : ''} · pilote ${findDeviceProfile(studioPilotId, deviceCatalogState)?.name ?? 'actif'}` : 'Navigation réelle · audit multi-viewport' : previewMode === 'before-after' ? 'Deux rendus synchronisés' : labMode === 'device' ? 'Bords redimensionnables' : `${activeStudioProfiles.length} écran${activeStudioProfiles.length > 1 ? 's' : ''} · pilote ${findDeviceProfile(studioPilotId, deviceCatalogState)?.name ?? 'actif'}`}</small>
               <button className={`stage-inspect${inspectorLocation === 'lab' ? ' is-active' : ''}${inspectorLocation === 'lab' && inspectorPhase === 'starting' ? ' is-starting' : ''}`} type="button" onClick={() => toggleInspector('lab')} aria-pressed={inspectorLocation === 'lab'} aria-busy={inspectorLocation === 'lab' && inspectorPhase === 'starting'} title="Inspecter un élément · F12"><Icon name="cursor" size={15} /><span>{inspectorLocation === 'lab' && inspectorPhase === 'starting' ? 'Activation…' : 'Inspecter'}</span></button>
               <button ref={fullscreenButtonRef} className="stage-fullscreen" onClick={() => setStageFullscreen((current) => !current)} aria-label={stageFullscreen ? 'Quitter le plein écran de la prévisualisation' : 'Afficher la prévisualisation en plein écran'} aria-pressed={stageFullscreen}><Icon name={stageFullscreen ? 'fullscreenExit' : 'fullscreen'} size={15} /><span>{stageFullscreen ? 'Réduire' : 'Plein écran'}</span></button>
+              <button className="stage-panel-toggle" type="button" onClick={() => setLabPanelOpen((current) => !current)} aria-label={labPanelOpen ? 'Masquer le panneau de constats' : 'Afficher le panneau de constats'} aria-pressed={labPanelOpen} title={labPanelOpen ? 'Masquer le panneau de constats' : 'Afficher le panneau de constats'}><Icon name={labPanelOpen ? 'panelCollapse' : 'panelExpand'} size={15} /><span>{labPanelOpen ? 'Masquer le panneau' : 'Afficher les constats'}</span></button>
             </div>
             <div className="stage-canvas">
               {previewBusy && <div className="preview-loading" role="status"><span className="loading-mark" /><strong>Préparation de la proposition…</strong></div>}
-              {isRemote ? <RemotePreview projectId={project.id} device={currentDevice} visible={destination === 'lab' && !interfaceOverlayOpen} allowUpscale={stageFullscreen} onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onAudit={applyRemoteAudit} onState={(state) => { setRemoteState(state); changePreviewPath(state.path) }} onNotice={flash} /> : labMode === 'device' && previewMode === 'before-after' && proposal ? <div className="before-after-grid" aria-label="Comparaison avant et après le correctif">
+              {isRemote ? labMode === 'device' ? <RemotePreview projectId={project.id} device={currentDevice} visible={destination === 'lab' && !interfaceOverlayOpen} allowUpscale={stageFullscreen} onResize={(nextWidth, nextHeight) => { setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onAudit={applyRemoteAudit} onState={(state) => { setRemoteState(state); changePreviewPath(state.path) }} onNotice={flash} /> : <div ref={studioCanvasRef} className={`studio-wall studio-wall--${studioLayout}`} role="region" aria-label={`Studio distant de ${activeStudioProfiles.length} écrans`}>
+                {activeStudioProfiles.map((profile) => {
+                  const profileId = profile.id
+                  const baseDevice = studioDevice(profile, studioRotatedIds.includes(profileId))
+                  const override = remoteStudioSizes[profileId]
+                  const device = override ? { ...baseDevice, ...override } : baseDevice
+                  const linked = studioLinkedIds.includes(profileId)
+                  const pilot = studioPilotId === profileId
+                  const focused = studioFocusedId === profileId
+                  const viewId = remoteViewIdFor(profileId)
+                  const state = remoteStudioStates[profileId]
+                  return <article key={profileId} className={`studio-screen studio-screen--remote${pilot ? ' is-pilot' : ''}${linked ? ' is-linked' : ' is-isolated'}${focused ? ' is-focused' : ''}`} aria-label={`${profile.name}, ${pilot ? 'écran pilote' : linked ? 'écran synchronisé' : 'écran indépendant'}`}>
+                    <header className="studio-screen__toolbar">
+                      <div className="studio-screen__identity"><span>{profile.brand}</span><strong>{profile.name}</strong><code>{device.width}×{device.height}</code></div>
+                      <div className="studio-screen__actions">
+                        <button type="button" className={pilot ? 'is-active' : ''} onClick={() => selectStudioPilot(profileId)} aria-pressed={pilot} aria-label={pilot ? `${profile.name} pilote la synchronisation` : `Utiliser ${profile.name} comme pilote`} title={pilot ? 'Écran pilote' : 'Définir comme pilote'}><Icon name="pilot" size={14} /></button>
+                        <button type="button" className={linked ? 'is-active' : ''} onClick={() => toggleStudioLink(profileId)} aria-pressed={linked} aria-label={linked ? `Isoler ${profile.name}` : `Relier ${profile.name}`} title={linked ? 'Isoler cet écran' : 'Relier cet écran'}><Icon name={linked ? 'link' : 'unlink'} size={14} /></button>
+                        {profile.rotatable && <button type="button" className={studioRotatedIds.includes(profileId) ? 'is-active' : ''} onClick={() => { setRemoteStudioSizes((current) => { const next = { ...current }; delete next[profileId]; return next }); setStudioRotatedIds((current) => current.includes(profileId) ? current.filter((id) => id !== profileId) : [...current, profileId]) }} aria-pressed={studioRotatedIds.includes(profileId)} aria-label={`Pivoter ${profile.name}`} title="Pivoter l’écran"><Icon name="rotate" size={14} /></button>}
+                        <button type="button" className={focused && studioLayout === 'focus' ? 'is-active' : ''} onClick={() => { setStudioFocusedId(profileId); setStudioLayout('focus') }} aria-pressed={focused && studioLayout === 'focus'} aria-label={`Afficher ${profile.name} en focus`} title="Afficher en focus"><Icon name="focus" size={14} /></button>
+                        <button type="button" onClick={() => updateStudioDeviceIds(studioDeviceIds.filter((id) => id !== profileId))} disabled={activeStudioProfiles.length <= 1} aria-label={`Retirer ${profile.name}`} title="Retirer de la planche"><Icon name="close" size={14} /></button>
+                      </div>
+                    </header>
+                    <div className="studio-screen__preview">
+                      <RemotePreview projectId={project.id} viewId={viewId} device={device} visible={destination === 'lab' && !interfaceOverlayOpen} embedded automaticAudit={pilot} allowUpscale={stageFullscreen} onResize={(nextWidth, nextHeight) => setRemoteStudioSizes((current) => ({ ...current, [profileId]: { width: nextWidth, height: nextHeight } }))} onAudit={applyRemoteAudit} onState={(next) => receiveRemoteStudioState(profileId, next)} onNotice={flash} />
+                    </div>
+                    <footer><span className={pilot ? 'studio-screen__pilot is-active' : 'studio-screen__pilot'}><Icon name={pilot ? 'crown' : linked ? 'link' : 'unlink'} size={12} />{pilot ? 'Pilote' : linked ? 'Synchronisé' : 'Indépendant'}</span><code title={state?.url ?? project.source.url ?? ''}>{state?.loading ? 'Chargement…' : state?.path ?? 'Connexion…'}</code></footer>
+                  </article>
+                })}
+              </div> : labMode === 'device' && previewMode === 'before-after' && proposal ? <div className="before-after-grid" aria-label="Comparaison avant et après le correctif">
                 <div className="comparison-pane"><header><span>Avant</span><strong>Version actuelle</strong></header><PreviewFrame compact zoomable project={project} origin={project.previewOrigin} device={currentDevice} path={activePath} label="Avant — Version actuelle" focusSelector={focusedSelector} onPathChange={changePreviewPath} onThemeChange={setRuntimeTheme} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} /></div>
                 <div className="comparison-pane comparison-pane--after"><header><span>Après</span><strong>Correctif non validé</strong></header><PreviewFrame compact zoomable project={project} origin={proposal.previewOrigin} device={currentDevice} path={activePath} label="Après — Correctif en cours" focusSelector={focusedSelector} onPathChange={changePreviewPath} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} /></div>
-              </div> : labMode === 'device' ? <PreviewFrame project={project} origin={activeOrigin} device={currentDevice} path={activePath} focusSelector={focusedSelector} themeOverride={nativeThemeTarget} scenarioState={matrixScenario && documentPath(matrixScenario.route) === documentPath(activePath) ? matrixScenario.state : null} resizable allowUpscale={stageFullscreen} zoomable inspectorEnabled={!isRemote && inspectorLocation === 'lab'} onInspectElement={receiveInspectedElement} onCascadeTrace={receiveCascadeTrace} onInspectorReady={() => setInspectorPhase('active')} onInspectorStop={() => { setInspectorLocation(null); setInspectorPhase('idle') }} onInspectorShortcut={() => toggleInspector('lab')} onResize={(nextWidth, nextHeight) => { setMatrixScenario(null); setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onPathChange={changePreviewPath} onThemeChange={activeOrigin === project.previewOrigin ? setRuntimeTheme : undefined} onAudit={activeOrigin === project.previewOrigin ? applyRuntimeAudit : undefined} onRenderStatus={setRuntimeRenderStatus} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} /> : <div className="comparison-grid">{compareDevices.map((device) => <PreviewFrame key={device.id} project={project} origin={activeOrigin} device={device} path={activePath} compact focusSelector={focusedSelector} themeOverride={nativeThemeTarget} label={device.family === 'smartphone' ? 'Smartphone' : device.family === 'tablet' ? 'Tablette' : 'Ordinateur'} onPathChange={changePreviewPath} onThemeChange={activeOrigin === project.previewOrigin ? setRuntimeTheme : undefined} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} />)}</div>}
+              </div> : labMode === 'device' ? <PreviewFrame project={project} origin={activeOrigin} device={currentDevice} path={activePath} focusSelector={focusedSelector} themeOverride={nativeThemeTarget} scenarioState={matrixScenario && documentPath(matrixScenario.route) === documentPath(activePath) ? matrixScenario.state : null} resizable allowUpscale={stageFullscreen} zoomable inspectorEnabled={!isRemote && inspectorLocation === 'lab'} onInspectElement={receiveInspectedElement} onCascadeTrace={receiveCascadeTrace} onInspectorReady={() => setInspectorPhase('active')} onInspectorStop={() => { setInspectorLocation(null); setInspectorPhase('idle') }} onInspectorShortcut={() => toggleInspector('lab')} onResize={(nextWidth, nextHeight) => { setMatrixScenario(null); setWidth(String(nextWidth)); setHeight(String(nextHeight)); setDeviceId('custom') }} onPathChange={changePreviewPath} onThemeChange={activeOrigin === project.previewOrigin ? setRuntimeTheme : undefined} onAudit={activeOrigin === project.previewOrigin ? applyRuntimeAudit : undefined} onRenderStatus={setRuntimeRenderStatus} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} /> : <div ref={studioCanvasRef} className={`studio-wall studio-wall--${studioLayout}${studioCapturing ? ' is-capturing' : ''}`} style={{ '--studio-capture-columns': Math.min(3, activeStudioProfiles.length), '--studio-capture-rows': Math.ceil(activeStudioProfiles.length / Math.min(3, activeStudioProfiles.length)) } as React.CSSProperties} role="region" aria-label={`Studio de ${activeStudioProfiles.length} écrans`}>
+                {activeStudioProfiles.map((profile) => {
+                  const viewId = profile.id
+                  const device = studioDevice(profile, studioRotatedIds.includes(viewId))
+                  const linked = studioLinkedIds.includes(viewId)
+                  const pilot = studioPilotId === viewId
+                  const focused = studioFocusedId === viewId
+                  const previewPath = studioSync.navigation && linked ? activePath : studioPaths[viewId] ?? activePath
+                  const overlay = studioOverlay.enabled && studioOverlay.src ? { url: studioOverlay.src, opacity: studioOverlay.opacity } : null
+                  return <article key={viewId} className={`studio-screen${pilot ? ' is-pilot' : ''}${linked ? ' is-linked' : ' is-isolated'}${focused ? ' is-focused' : ''}`} aria-label={`${profile.name}, ${pilot ? 'écran pilote' : linked ? 'écran synchronisé' : 'écran indépendant'}`}>
+                    <header className="studio-screen__toolbar">
+                      <div className="studio-screen__identity"><span>{profile.brand}</span><strong>{profile.name}</strong><code>{device.width}×{device.height}</code></div>
+                      <div className="studio-screen__actions">
+                        <button type="button" className={pilot ? 'is-active' : ''} onClick={() => selectStudioPilot(viewId)} aria-pressed={pilot} aria-label={pilot ? `${profile.name} pilote la synchronisation` : `Utiliser ${profile.name} comme pilote`} title={pilot ? 'Écran pilote' : 'Définir comme pilote'}><Icon name="pilot" size={14} /></button>
+                        <button type="button" className={linked ? 'is-active' : ''} onClick={() => toggleStudioLink(viewId)} aria-pressed={linked} aria-label={linked ? `Isoler ${profile.name}` : `Relier ${profile.name}`} title={linked ? 'Isoler cet écran' : 'Relier cet écran'}><Icon name={linked ? 'link' : 'unlink'} size={14} /></button>
+                        {profile.rotatable && <button type="button" className={studioRotatedIds.includes(viewId) ? 'is-active' : ''} onClick={() => setStudioRotatedIds((current) => current.includes(viewId) ? current.filter((id) => id !== viewId) : [...current, viewId])} aria-pressed={studioRotatedIds.includes(viewId)} aria-label={`Pivoter ${profile.name}`} title="Pivoter l’écran"><Icon name="rotate" size={14} /></button>}
+                        <button type="button" className={focused && studioLayout === 'focus' ? 'is-active' : ''} onClick={() => { setStudioFocusedId(viewId); setStudioLayout('focus') }} aria-pressed={focused && studioLayout === 'focus'} aria-label={`Afficher ${profile.name} en focus`} title="Afficher en focus"><Icon name="focus" size={14} /></button>
+                        <button type="button" onClick={() => updateStudioDeviceIds(studioDeviceIds.filter((id) => id !== viewId))} disabled={activeStudioProfiles.length <= 1} aria-label={`Retirer ${profile.name}`} title="Retirer de la planche"><Icon name="close" size={14} /></button>
+                      </div>
+                    </header>
+                    <div className="studio-screen__preview">
+                      <PreviewFrame compact studio zoomable project={project} origin={activeOrigin} device={device} path={previewPath} focusSelector={focusedSelector} themeOverride={nativeThemeTarget} designOverlay={overlay} syncCommand={linked && studioSyncCommand?.sourceViewId !== viewId ? studioSyncCommand : null} inspectorEnabled={pilot && inspectorLocation === 'lab'} onInspectElement={pilot ? receiveInspectedElement : undefined} onCascadeTrace={pilot ? receiveCascadeTrace : undefined} onInspectorReady={pilot ? () => setInspectorPhase('active') : undefined} onInspectorStop={pilot ? () => { setInspectorLocation(null); setInspectorPhase('idle') } : undefined} onInspectorShortcut={pilot ? () => toggleInspector('lab') : undefined} onSyncEvent={(event) => receiveStudioSyncEvent(viewId, event)} onPathChange={(path) => changeStudioPath(viewId, path)} onThemeChange={pilot && activeOrigin === project.previewOrigin ? setRuntimeTheme : undefined} onAudit={pilot && activeOrigin === project.previewOrigin ? applyRuntimeAudit : undefined} onRenderStatus={pilot ? setRuntimeRenderStatus : undefined} onExternal={(url) => flash(`Lien externe bloqué : ${url}`)} onEscape={() => setStageFullscreen(false)} />
+                    </div>
+                    <footer><span className={pilot ? 'studio-screen__pilot is-active' : 'studio-screen__pilot'}><Icon name={pilot ? 'crown' : linked ? 'link' : 'unlink'} size={12} />{pilot ? 'Pilote' : linked ? 'Synchronisé' : 'Indépendant'}</span><code title={previewPath}>{previewPath}</code></footer>
+                  </article>
+                })}
+              </div>}
             </div>
             {inspectorLocation === 'lab' && <QuickInspectorPanel element={inspectedElement} phase={inspectorPhase} readOnly={project.source.kind === 'remote-url' || Boolean(project.previewBasePath)} cascade={cascadeTrace} cascadeLoading={cascadeLoading} onOpenSource={openCascadeSource} onClose={() => { setInspectorLocation(null); setInspectorPhase('idle') }} onEdit={() => go('visual')} />}
           </div>
-          {scopedProject && <Inspector project={scopedProject} allIssues={project.issues} activeIssueCount={routeIssues.length} totalIssueCount={project.issues.length} showAllIssues={showAllIssues} onShowAllIssues={setShowAllIssues} tab={inspectorTab} onTab={setInspectorTab} selectedIssue={selectedIssue} selectedIds={selectedIssueIds} queuedIds={queuedIssueIds} visualEditCount={visualHistory.present.length} onPreviewIssue={(issue) => void previewIssue(issue)} onPreviewBatch={(ids) => void previewQueuedIssues(ids)} onToggleIssue={toggleAcceptedIssue} onToggleQueued={toggleQueuedIssue} runtimeTheme={runtimeTheme} themeTarget={themeTarget} previewThemeTarget={previewThemeTarget} onPreviewTheme={(target) => void previewTheme(target)} onRemoveTheme={removeTheme} proposal={proposal} proposalContext={proposalContext} previewBusy={previewBusy} staging={staging} runtimeAudit={runtimeAudit} runtimeRenderStatus={runtimeRenderStatus} instructions={instructions} onRemoveInstruction={removeInstruction} messages={messages} draft={draft} onDraft={setDraft} onSubmit={submitInstruction} busy={busy || matrixBusy} expressVerification={expressVerification} onApplyExpress={() => void applyExpressVerification()} onAcceptProposal={acceptProposal} onAcceptAndApply={() => void acceptAndApplyProposal()} onRejectProposal={rejectProposal} onApplySafe={(ids) => void applyQueuedSafeIssues(ids)} undoAvailable={undoAvailable} onUndo={() => void undoLastApply()} directApplyAvailable={directApplyAvailable} onReview={() => void prepareAndOpenReview()} onClear={() => void clearStaging()} assistantRoute={remoteState?.path ?? activePath} assistantViewport={{ width: currentDevice.width, height: currentDevice.height, deviceScaleFactor: 1, mobile: currentDevice.family !== 'computer', touch: currentDevice.family !== 'computer' }} assistantScreenshot={remoteAudit?.screenshotDataUrl ?? null} workspaceEnabled={workspaceEnabled} onWorkspacePreviewOrigin={setWorkspaceOrigin} onNotice={flash} onOpenCode={() => go('code')} />}
+          {labPanelOpen && scopedProject && <Inspector project={scopedProject} allIssues={project.issues} activeIssueCount={routeIssues.length} totalIssueCount={project.issues.length} showAllIssues={showAllIssues} onShowAllIssues={setShowAllIssues} tab={inspectorTab} onTab={setInspectorTab} selectedIssue={selectedIssue} selectedIds={selectedIssueIds} queuedIds={queuedIssueIds} visualEditCount={visualHistory.present.length} onPreviewIssue={(issue) => void previewIssue(issue)} onPreviewBatch={(ids) => void previewQueuedIssues(ids)} onToggleIssue={toggleAcceptedIssue} onToggleQueued={toggleQueuedIssue} runtimeTheme={runtimeTheme} themeTarget={themeTarget} previewThemeTarget={previewThemeTarget} onPreviewTheme={(target) => void previewTheme(target)} onRemoveTheme={removeTheme} proposal={proposal} proposalContext={proposalContext} previewBusy={previewBusy} staging={staging} runtimeAudit={runtimeAudit} runtimeRenderStatus={runtimeRenderStatus} instructions={instructions} onRemoveInstruction={removeInstruction} messages={messages} draft={draft} onDraft={setDraft} onSubmit={submitInstruction} busy={busy || matrixBusy} expressVerification={expressVerification} onApplyExpress={() => void applyExpressVerification()} onAcceptProposal={acceptProposal} onAcceptAndApply={() => void acceptAndApplyProposal()} onRejectProposal={rejectProposal} onApplySafe={(ids) => void applyQueuedSafeIssues(ids)} undoAvailable={undoAvailable} onUndo={() => void undoLastApply()} directApplyAvailable={directApplyAvailable} onReview={() => void prepareAndOpenReview()} onClear={() => void clearStaging()} assistantRoute={remoteState?.path ?? activePath} assistantViewport={{ width: currentDevice.width, height: currentDevice.height, deviceScaleFactor: 1, mobile: currentDevice.family !== 'computer', touch: currentDevice.family !== 'computer' }} assistantScreenshot={remoteAudit?.screenshotDataUrl ?? null} workspaceEnabled={workspaceEnabled} onWorkspacePreviewOrigin={setWorkspaceOrigin} onNotice={flash} onOpenCode={() => go('code')} />}
         </div>
         {!isRemote && previewMode === 'source' && project.previewOrigin && (project.previewReadiness.status === 'ready' || project.previewReadiness.status === 'degraded') && <div className="runtime-audit-probes" aria-hidden="true" inert>
           {auditDevices.map((device) => <PreviewFrame key={`${project.id}:${device.id}`} compact project={project} origin={project.previewOrigin} device={device} path={activePath} label={`Sonde ${auditFamily(device.width)}`} onAudit={(audit) => applyRuntimeAudit(audit, false)} />)}
