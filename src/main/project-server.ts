@@ -2177,8 +2177,10 @@ const bridge = `<style data-responsiver-bridge-style>
         if (!base) { designMessage('design-rejected', { reason: 'existing-complex-transform' }); finishDesignGesture(true); return; }
         const deltaX = Math.round(preview.left - gesture.actualStartRect.left);
         const deltaY = Math.round(preview.top - gesture.actualStartRect.top);
-        const mutation = { target: gesture.snapshot, property: 'translate', before: computed.translate || 'none', after: formatTranslate(base, deltaX, deltaY) };
-        sendDesignCommit('move', 'flow-translate', [mutation], gesture.id, 'flow-preserved', preview);
+        const mutations = [];
+        if (computed.display === 'inline') mutations.push({ target: gesture.snapshot, property: 'display', before: computed.display, after: 'inline-block' });
+        mutations.push({ target: gesture.snapshot, property: 'translate', before: computed.translate || 'none', after: formatTranslate(base, deltaX, deltaY) });
+        sendDesignCommit('move', 'flow-translate', mutations, gesture.id, 'flow-preserved', preview);
       }
     } else {
       const computed = getComputedStyle(designSelected);
@@ -2238,7 +2240,10 @@ const bridge = `<style data-responsiver-bridge-style>
     const pendingOffsetX = Math.round(pendingRectangle.left - rectangle.left);
     const pendingOffsetY = Math.round(pendingRectangle.top - rectangle.top);
     const after = formatTranslate(base, pendingOffsetX + deltaX, pendingOffsetY + deltaY);
-    sendDesignCommit('nudge', 'flow-translate', [{ target: snapshot, property: 'translate', before: computed.translate || 'none', after }], 'gesture-key-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8), 'flow-preserved', { left: pendingRectangle.left + deltaX, top: pendingRectangle.top + deltaY, right: pendingRectangle.right + deltaX, bottom: pendingRectangle.bottom + deltaY, width: pendingRectangle.width, height: pendingRectangle.height });
+    const mutations = [];
+    if (computed.display === 'inline') mutations.push({ target: snapshot, property: 'display', before: computed.display, after: 'inline-block' });
+    mutations.push({ target: snapshot, property: 'translate', before: computed.translate || 'none', after });
+    sendDesignCommit('nudge', 'flow-translate', mutations, 'gesture-key-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8), 'flow-preserved', { left: pendingRectangle.left + deltaX, top: pendingRectangle.top + deltaY, right: pendingRectangle.right + deltaX, bottom: pendingRectangle.bottom + deltaY, width: pendingRectangle.width, height: pendingRectangle.height });
     return true;
   };
   addEventListener('message', (event) => {

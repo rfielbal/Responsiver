@@ -18,6 +18,7 @@ import { authorizeVisualEditor, compileVisualEditCss, createVisualEditOperation,
 import {
   mergeVisualGestureOperations,
   rebaseVisualGestureChangesAfterRejection,
+  resolveVisualGestureScope,
   rollbackVisualGestureOperations,
   sanitizeVisualGestureCommit,
   visualGestureOperationChanges,
@@ -931,7 +932,7 @@ function previewOwnsMessageSource(frame: HTMLIFrameElement | null, source: Messa
   return false
 }
 
-function PreviewFrame({ project, origin, device, path, compact = false, studio = false, label, focusSelector, themeOverride, scenarioState = null, resizable = false, allowUpscale = false, zoomable = false, inspectorEnabled = false, composerEnabled = false, visualCss = '', syncCommand = null, designOverlay = null, onResize, onPathChange, onThemeChange, onExternal, onAudit, onRenderStatus, onEscape, onInspectElement, onCascadeTrace, onInspectorReady, onInspectorStop, onInspectorShortcut, onSyncEvent, onComposerGesture, onComposerVerified, onComposerRejected, onComposerNotice }: {
+function PreviewFrame({ project, origin, device, path, compact = false, studio = false, label, focusSelector, composerSelector, themeOverride, scenarioState = null, resizable = false, allowUpscale = false, zoomable = false, inspectorEnabled = false, composerEnabled = false, visualCss = '', syncCommand = null, designOverlay = null, onResize, onPathChange, onThemeChange, onExternal, onAudit, onRenderStatus, onEscape, onInspectElement, onCascadeTrace, onInspectorReady, onInspectorStop, onInspectorShortcut, onSyncEvent, onComposerGesture, onComposerVerified, onComposerRejected, onComposerNotice }: {
   project: ProjectSnapshot & ProjectExtra
   origin: string | null
   device: Device
@@ -940,6 +941,7 @@ function PreviewFrame({ project, origin, device, path, compact = false, studio =
   studio?: boolean
   label?: string
   focusSelector?: string | null
+  composerSelector?: string | null
   themeOverride?: ThemeTarget | null
   scenarioState?: MatrixStateId | null
   resizable?: boolean
@@ -984,6 +986,7 @@ function PreviewFrame({ project, origin, device, path, compact = false, studio =
   const [framePath, setFramePath] = useState(path)
   const [frameNavigationKey, setFrameNavigationKey] = useState(0)
   const focusSelectorRef = useRef(focusSelector)
+  const composerSelectorRef = useRef(composerSelector)
   const themeOverrideRef = useRef(themeOverride)
   const scenarioStateRef = useRef(scenarioState)
   const inspectorEnabledRef = useRef(inspectorEnabled)
@@ -1016,6 +1019,7 @@ function PreviewFrame({ project, origin, device, path, compact = false, studio =
   const appliedSyncSequenceRef = useRef(0)
   const syncCommandRef = useRef(syncCommand)
   focusSelectorRef.current = focusSelector
+  composerSelectorRef.current = composerSelector
   themeOverrideRef.current = themeOverride
   scenarioStateRef.current = scenarioState
   inspectorEnabledRef.current = inspectorEnabled
@@ -1337,7 +1341,7 @@ function PreviewFrame({ project, origin, device, path, compact = false, studio =
         if (!documentId) return
         composerDocumentRef.current = documentId
         sendComposerCommand(composerEnabledRef.current ? 'design-start' : 'design-stop', { interactionRevision: Math.max(1, interactionRevisionRef.current) })
-        if (composerEnabledRef.current && focusSelectorRef.current) sendComposerCommand('design-select', { selector: focusSelectorRef.current })
+        if (composerEnabledRef.current && composerSelectorRef.current) sendComposerCommand('design-select', { selector: composerSelectorRef.current })
         return
       }
       const eventRevision = Number(data.revision)
@@ -1430,9 +1434,14 @@ function PreviewFrame({ project, origin, device, path, compact = false, studio =
       return
     }
     const timer = window.setTimeout(() => post('focus-selector', { selector: focusSelector }), 220)
-    if (composerEnabled && focusSelector) sendComposerCommand('design-select', { selector: focusSelector })
     return () => window.clearTimeout(timer)
-  }, [composerEnabled, device.height, device.width, focusSelector, source])
+  }, [device.height, device.width, focusSelector, source])
+
+  useEffect(() => {
+    if (!composerEnabled || !composerSelector) return
+    const timer = window.setTimeout(() => sendComposerCommand('design-select', { selector: composerSelector }), 40)
+    return () => window.clearTimeout(timer)
+  }, [composerEnabled, composerSelector, device.height, device.width, source])
 
   useEffect(() => {
     const timer = window.setTimeout(() => post(themeOverride ? 'set-theme-preview' : 'clear-theme-preview', themeOverride ? { theme: themeOverride } : {}), 240)
@@ -1444,7 +1453,7 @@ function PreviewFrame({ project, origin, device, path, compact = false, studio =
     const timer = window.setTimeout(() => {
       post(inspectorEnabled ? 'inspector-start' : 'inspector-stop', { interactionRevision })
       sendComposerCommand(composerEnabled ? 'design-start' : 'design-stop', { interactionRevision })
-      if (composerEnabled && focusSelectorRef.current) sendComposerCommand('design-select', { selector: focusSelectorRef.current })
+      if (composerEnabled && composerSelectorRef.current) sendComposerCommand('design-select', { selector: composerSelectorRef.current })
     }, 20)
     return () => window.clearTimeout(timer)
   }, [composerEnabled, inspectorEnabled, source])
@@ -1704,6 +1713,12 @@ export default function App(): ReactElement {
     .map((id) => findDeviceProfile(id, deviceCatalogState))
     .filter((profile): profile is DeviceProfile => Boolean(profile))
     .slice(0, MAX_ACTIVE_DEVICES), [deviceCatalogState, studioDeviceIds])
+
+  useEffect(() => {
+    if (destination !== 'visual') return
+    const resolved = resolveVisualGestureScope(visualScope, currentDevice.width)
+    if (resolved !== visualScope) setVisualScope(resolved)
+  }, [currentDevice.width, destination, visualScope])
 
   useEffect(() => {
     try { window.localStorage.setItem(DEVICE_CATALOG_STORAGE_KEY, serializeDeviceCatalogState(deviceCatalogState)) } catch { /* catalogue utilisable en mémoire */ }
@@ -2479,7 +2494,9 @@ export default function App(): ReactElement {
       const gesture = sanitizeVisualGestureCommit(value)
       if (!gesture) throw new Error('Ce geste ne peut pas être appliqué en toute sécurité.')
       const route = visualRouteScope === 'current' ? { kind: 'current' as const, path: documentPath(activePath) } : { kind: 'all' as const }
-      const batch = visualGestureOperations(gesture, { scope: visualScope, route })
+      const effectiveScope = resolveVisualGestureScope(visualScope, currentDevice.width)
+      if (effectiveScope !== visualScope) setVisualScope(effectiveScope)
+      const batch = visualGestureOperations(gesture, { scope: effectiveScope, route })
       const current = visualHistoryRef.current.present
       const next = mergeVisualGestureOperations(current, batch)
       const changes = visualGestureOperationChanges(current, next, batch)
@@ -2495,14 +2512,10 @@ export default function App(): ReactElement {
       const selected = gesture.mutations[0]?.target
       if (selected) setInspectedElement(selected)
       const retainedCount = next.filter((operation) => batch.some((candidate) => visualEditOperationKey(candidate) === visualEditOperationKey(operation))).length
-      const message = retainedCount === 0
-        ? 'Le réglage est revenu à sa valeur source ; la surcharge temporaire a été retirée.'
-        : gesture.kind === 'reorder'
-          ? `Ordre visuel préparé pour ${retainedCount} élément${retainedCount > 1 ? 's' : ''}. Testez aussi le clavier avant validation.`
-        : gesture.kind === 'resize'
-          ? 'Dimensions définies pour ce format. La règle CSS responsive est visible immédiatement ; passez en mode Tester pour vérifier le contenu.'
-          : 'Placement libre défini pour ce format. La règle CSS responsive est visible immédiatement et reste modifiable.'
-      flash(message)
+      // Le rendu et le compteur constituent déjà le retour de succès. Un toast
+      // par pixel déplacé masquait le canvas ; seuls les retours à la source et
+      // les erreurs demandent désormais une notification globale.
+      if (retainedCount === 0) flash('Le réglage est revenu à sa valeur source ; la surcharge temporaire a été retirée.')
     } catch (error) {
       flash(error instanceof Error ? error.message : 'Ce geste ne peut pas être transformé en CSS responsive sûr.')
     }
@@ -4012,24 +4025,41 @@ function VisualEditorView({ project, remotePreviewVisible, device, family, famil
     return `${operation.route.kind === 'all' ? 'Site' : operation.route.path} · ${operationScope}`
   }))
   const operationScopeSummary = operationScopes.size === 1 ? [...operationScopes][0] : `${operationScopes.size} portées distinctes`
+  const scopeSummary = scope.kind === 'all'
+    ? 'Tous les écrans'
+    : scope.kind === 'mobile'
+      ? 'Mobile ≤ 767 px'
+      : scope.kind === 'tablet'
+        ? 'Tablette 768–1024 px'
+        : scope.minWidth === 1_025 && scope.maxWidth == null
+          ? 'Bureau ≥ 1025 px'
+          : `${scope.minWidth ?? '…'}–${scope.maxWidth ?? '…'} px`
+  const routeSummary = routeScope === 'all' ? 'Tout le site' : 'Cette page'
   return <div className="visual-editor-page">
     <h1 className="sr-only">Atelier visuel</h1>
     <div className="visual-toolbar">
       <div className="visual-mode-switch" role="group" aria-label="Mode de l’Atelier"><button className={mode === 'compose' ? 'is-active' : ''} onClick={() => onMode('compose')} aria-pressed={mode === 'compose'} disabled={remote} title={remote ? 'La composition directe nécessite la preview locale instrumentée. L’inspection reste disponible.' : 'Figer la page et manipuler ses éléments à la souris'}><Icon name="compose" size={15} /> Composer</button><button className={mode === 'select' ? 'is-active' : ''} onClick={() => onMode('select')} aria-pressed={mode === 'select'} title="Inspecter un élément · F12"><Icon name="cursor" size={15} /> Inspecter</button><button className={mode === 'interact' ? 'is-active' : ''} onClick={() => onMode('interact')} aria-pressed={mode === 'interact'}><Icon name="play" size={15} /> Tester</button><button className={mode === 'compare' ? 'is-active' : ''} onClick={() => onMode('compare')} aria-pressed={mode === 'compare'} disabled={remote} title={remote ? 'La comparaison du localhost utilise une seule session réelle.' : undefined}><Icon name="compare" size={15} /> Avant / après</button></div>
       <div className="visual-history-actions"><button className="icon-button" type="button" onClick={onUndo} disabled={!canUndo} aria-label="Annuler la dernière modification" title="Annuler"><Icon name="undo" size={15} /></button><button className="icon-button" type="button" onClick={onRedo} disabled={!canRedo} aria-label="Rétablir la modification" title="Rétablir"><Icon name="redo" size={15} /></button></div>
-      <div className="visual-toolbar-divider" />
-      <div className="visual-scope-group" aria-label="Portée du changement"><span>Appliquer à</span><label className="visual-scope-select"><span>Tailles</span><select aria-label="Tailles concernées" value={selectedScope} onChange={(event) => { const next = event.target.value; onScope(next === 'all' || next === 'mobile' || next === 'tablet' ? { kind: next } : { kind: 'custom', minWidth: device.width, maxWidth: device.width }) }}><option value="all">Tous les écrans</option><option value="mobile">Mobile uniquement (≤ 767 px)</option><option value="tablet">Tablette uniquement (768–1024 px)</option><option value="custom">Plage personnalisée</option></select></label><label className="visual-scope-select"><span>Pages</span><select aria-label="Pages concernées" value={routeScope} onChange={(event) => onRouteScope(event.target.value === 'all' ? 'all' : 'current')}><option value="current" disabled={!currentRoutePersistent}>Cette page seulement</option><option value="all">Tout le site</option></select></label></div>
-      {scope.kind === 'custom' && <div className="custom-scope-fields"><label>Min <input aria-label="Largeur minimale concernée" type="number" min="240" max="3840" value={scope.minWidth ?? ''} onChange={(event) => onScope({ ...scope, minWidth: event.target.value ? Number(event.target.value) : null })} /></label><label>Max <input aria-label="Largeur maximale concernée" type="number" min="240" max="3840" value={scope.maxWidth ?? ''} onChange={(event) => onScope({ ...scope, maxWidth: event.target.value ? Number(event.target.value) : null })} /></label></div>}
+      <details className="visual-scope-popover">
+        <summary aria-label={`Régler la portée : ${scopeSummary}, ${routeSummary}`}><Icon name="settings" size={14} /><span>Portée</span><strong>{scopeSummary} · {routeSummary}</strong></summary>
+        <div className="visual-scope-popover__panel" aria-label="Portée du changement">
+          <header><span className="overline">Appliquer les prochains gestes à</span><strong>{scopeSummary} · {routeSummary}</strong></header>
+          <label className="visual-scope-select"><span>Tailles</span><select aria-label="Tailles concernées" value={selectedScope} onChange={(event) => { const next = event.target.value; onScope(next === 'all' || next === 'mobile' || next === 'tablet' ? { kind: next } : { kind: 'custom', minWidth: device.width, maxWidth: device.width }) }}><option value="all">Tous les écrans</option><option value="mobile">Mobile uniquement (≤ 767 px)</option><option value="tablet">Tablette uniquement (768–1024 px)</option><option value="custom">Plage personnalisée</option></select></label>
+          <label className="visual-scope-select"><span>Pages</span><select aria-label="Pages concernées" value={routeScope} onChange={(event) => onRouteScope(event.target.value === 'all' ? 'all' : 'current')}><option value="current" disabled={!currentRoutePersistent}>Cette page seulement</option><option value="all">Tout le site</option></select></label>
+          {scope.kind === 'custom' && <div className="custom-scope-fields"><label>Min <input aria-label="Largeur minimale concernée" type="number" min="240" max="3840" value={scope.minWidth ?? ''} onChange={(event) => onScope({ ...scope, minWidth: event.target.value ? Number(event.target.value) : null })} /></label><label>Max <input aria-label="Largeur maximale concernée" type="number" min="240" max="3840" value={scope.maxWidth ?? ''} onChange={(event) => onScope({ ...scope, maxWidth: event.target.value ? Number(event.target.value) : null })} /></label></div>}
+          <small>La portée suit automatiquement le format visible lorsqu’elle n’est plus compatible.</small>
+        </div>
+      </details>
     </div>
     <div className="visual-device-bar"><DeviceControls family={family} devices={familyDevices} selectedId={selectedDeviceId} width={width} height={height} onFamily={onFamily} onDevice={onDevice} onWidth={onWidth} onHeight={onHeight} onRotate={onRotate} /></div>
-    <div className={`visual-workspace${fullscreen ? ' is-fullscreen' : ''}`} role={fullscreen ? 'dialog' : undefined} aria-modal={fullscreen || undefined} aria-label={fullscreen ? 'Atelier visuel en plein écran' : undefined}>
-      <section className={`visual-canvas visual-canvas--${mode}`}><header><span><i />{mode === 'compose' ? 'Page figée · déplacez ou redimensionnez librement' : mode === 'select' ? 'Inspection active · cliquez un élément' : mode === 'interact' ? 'Aperçu fonctionnel · interactions actives' : 'Source et proposition synchronisées'}</span><div className="visual-canvas-actions"><code>{path}</code><button className={`stage-inspect${mode === 'select' ? ' is-active' : ''}`} type="button" onClick={() => onMode(mode === 'select' ? 'interact' : 'select')} aria-pressed={mode === 'select'} title="Inspecter un élément · F12"><Icon name="cursor" size={15} /><span>Inspecter</span></button><button ref={fullscreenButtonRef} className="stage-fullscreen" type="button" onClick={onFullscreen} aria-label={fullscreen ? 'Quitter le plein écran de l’Atelier' : 'Afficher l’Atelier en plein écran'} aria-pressed={fullscreen}><Icon name={fullscreen ? 'fullscreenExit' : 'fullscreen'} size={15} /><span>{fullscreen ? 'Réduire' : 'Plein écran'}</span></button></div></header><div className="visual-canvas-body">{remote
+    <div className={`visual-workspace${target ? ' has-target' : ' is-awaiting-selection'}${fullscreen ? ' is-fullscreen' : ''}`} role={fullscreen ? 'dialog' : undefined} aria-modal={fullscreen || undefined} aria-label={fullscreen ? 'Atelier visuel en plein écran' : undefined}>
+      <section className={`visual-canvas visual-canvas--${mode}`}><header><span><i />{mode === 'compose' ? 'Page figée · déplacez ou redimensionnez librement' : mode === 'select' ? 'Inspection active · cliquez un élément' : mode === 'interact' ? 'Aperçu fonctionnel · interactions actives' : 'Source et proposition synchronisées'}</span><div className="visual-canvas-actions"><button ref={fullscreenButtonRef} className="stage-fullscreen" type="button" onClick={onFullscreen} aria-label={fullscreen ? 'Quitter le plein écran de l’Atelier' : 'Afficher l’Atelier en plein écran'} aria-pressed={fullscreen}><Icon name={fullscreen ? 'fullscreenExit' : 'fullscreen'} size={15} /><span>{fullscreen ? 'Réduire' : 'Plein écran'}</span></button></div></header><div className="visual-canvas-body">{remote
         ? <RemotePreview projectId={project.id} device={device} visible={remotePreviewVisible} embedded automaticAudit={false} allowUpscale={fullscreen} onResize={onResize} onAudit={() => undefined} onState={(state) => onPathChange(state.path)} onNotice={onNotice} />
         : mode === 'compare' ? <div className="before-after-grid visual-before-after"><div className="comparison-pane"><header><span>Avant</span><strong>Source</strong></header><PreviewFrame compact zoomable allowUpscale={fullscreen} project={project} origin={project.previewOrigin} device={device} path={path} label="Avant — Source" onPathChange={onPathChange} onEscape={() => fullscreen && onFullscreen()} /></div><div className="comparison-pane comparison-pane--after"><header><span>Après</span><strong>{operations.length} ajustement{operations.length > 1 ? 's' : ''}</strong></header><PreviewFrame compact zoomable allowUpscale={fullscreen} project={project} origin={project.previewOrigin} device={device} path={path} label="Après — Atelier" visualCss={visualCss} onPathChange={onPathChange} onEscape={() => fullscreen && onFullscreen()} /></div></div>
-          : <PreviewFrame project={project} origin={project.previewOrigin} device={device} path={path} resizable allowUpscale={fullscreen} zoomable inspectorEnabled={mode === 'select'} composerEnabled={mode === 'compose'} focusSelector={mode === 'compose' || mode === 'select' ? target?.selector : null} visualCss={visualCss} onInspectElement={onInspect} onInspectorStop={onInspectorStop} onInspectorShortcut={() => onMode(mode === 'select' ? 'interact' : 'select')} onComposerGesture={onGesture} onComposerVerified={onGestureVerified} onComposerRejected={onGestureRejected} onComposerNotice={onNotice} onResize={onResize} onPathChange={onPathChange} onEscape={() => fullscreen && onFullscreen()} />}</div><footer><span className="source-badge"><i />Preview temporaire</span><small>{mode === 'compose' ? 'Glisser : déplacer · Poignées : redimensionner · Maj + glisser : réordonner · ⌥ + clic : cibler dans un bloc.' : mode === 'select' ? 'Les clics sont capturés ; repassez en mode Tester pour naviguer.' : mode === 'interact' ? 'Le vrai site fonctionne avec les changements temporaires.' : 'Aucun fichier n’est modifié pendant cette étape.'}</small></footer></section>
-      <VisualPropertiesPanel target={target} scope={scope} routeScope={routeScope} multipleConfirmed={multipleConfirmed} operations={operations} authorization={authorization} onMultipleConfirmed={onMultipleConfirmed} onProperty={onProperty} onRemoveOperation={onRemoveOperation} onOpenCode={onOpenCode} />
+          : <PreviewFrame project={project} origin={project.previewOrigin} device={device} path={path} resizable allowUpscale={fullscreen} zoomable inspectorEnabled={mode === 'select'} composerEnabled={mode === 'compose'} focusSelector={mode === 'select' ? target?.selector : null} composerSelector={mode === 'compose' ? target?.selector : null} visualCss={visualCss} onInspectElement={onInspect} onInspectorStop={onInspectorStop} onInspectorShortcut={() => onMode(mode === 'select' ? 'interact' : 'select')} onComposerGesture={onGesture} onComposerVerified={onGestureVerified} onComposerRejected={onGestureRejected} onComposerNotice={onNotice} onResize={onResize} onPathChange={onPathChange} onEscape={() => fullscreen && onFullscreen()} />}</div><footer><span className="source-badge"><i />Preview temporaire</span><small>{mode === 'compose' ? 'Glisser : déplacer · Poignées : redimensionner · Maj + glisser : réordonner · ⌥ + clic : cibler dans un bloc.' : mode === 'select' ? 'Les clics sont capturés ; repassez en mode Tester pour naviguer.' : mode === 'interact' ? 'Le vrai site fonctionne avec les changements temporaires.' : 'Aucun fichier n’est modifié pendant cette étape.'}</small></footer></section>
+      {target && <VisualPropertiesPanel target={target} scope={scope} routeScope={routeScope} multipleConfirmed={multipleConfirmed} operations={operations} authorization={authorization} onMultipleConfirmed={onMultipleConfirmed} onProperty={onProperty} onRemoveOperation={onRemoveOperation} onOpenCode={onOpenCode} />}
     </div>
-    <footer className="visual-change-tray"><div className="visual-change-summary"><span className="visual-change-count">{operations.length}</span><span><strong>Changement{operations.length > 1 ? 's' : ''} dans l’Atelier</strong><small>{operations.length ? `${new Set(operations.map((operation) => operation.target.selector)).size} cible${new Set(operations.map((operation) => operation.target.selector)).size > 1 ? 's' : ''} · ${operationScopeSummary}` : 'Sélectionnez un élément pour commencer.'}</small></span></div><div className="visual-change-list">{operations.slice(-3).map((operation) => <span key={operation.id}><code>{operation.property}</code><b>{operation.after}</b><button onClick={() => onRemoveOperation(operation.id)} aria-label={`Retirer ${operation.property}`}><Icon name="close" size={11} /></button></span>)}{operations.length > 3 && <em>+{operations.length - 3}</em>}</div><div className="visual-tray-actions">{operations.length > 0 && <button className="text-button" type="button" onClick={onClear} disabled={busy}>Tout effacer</button>}{authorization.persistable ? <><button className="button button--secondary visual-commit-action" type="button" onClick={onPrepare} disabled={!operations.length || busy} title="Prépare un aperçu et un diff sans modifier les fichiers."><Icon name="changes" size={15} /><span><strong>Réviser sans modifier</strong><small>Aperçu + diff · fichiers intacts</small></span></button><button className="button button--primary visual-commit-action" type="button" onClick={onApply} disabled={!operations.length || busy} title="Écrit les ajustements dans les fichiers, puis réanalyse le projet."><Icon name="check" size={15} /><span><strong>Appliquer aux fichiers</strong><small>Écrit puis réanalyse · annulable</small></span></button></> : <button className="button button--primary visual-commit-action" type="button" onClick={onApply} disabled={!operations.length || busy}><Icon name="export" size={15} /><span><strong>Préparer l’export CSS</strong><small>Aucune écriture dans le framework</small></span></button>}</div></footer>
+    <footer className={`visual-change-tray${operations.length ? '' : ' is-empty'}`}><div className="visual-change-summary" role="status" aria-live="polite" aria-atomic="true"><span className="visual-change-count">{operations.length}</span><span><strong>{operations.length ? `Changement${operations.length > 1 ? 's' : ''} dans l’Atelier` : 'Aucun changement préparé'}</strong><small>{operations.length ? `${new Set(operations.map((operation) => operation.target.selector)).size} cible${new Set(operations.map((operation) => operation.target.selector)).size > 1 ? 's' : ''} · ${operationScopeSummary}` : 'Cliquez un élément dans la page pour commencer.'}</small></span></div>{operations.length > 0 && <><div className="visual-change-list">{operations.slice(-3).map((operation) => <span key={operation.id}><code>{operation.property}</code><b>{operation.after}</b><button onClick={() => onRemoveOperation(operation.id)} aria-label={`Retirer ${operation.property}`}><Icon name="close" size={11} /></button></span>)}{operations.length > 3 && <em>+{operations.length - 3}</em>}</div><div className="visual-tray-actions"><button className="text-button" type="button" onClick={onClear} disabled={busy}>Tout effacer</button>{authorization.persistable ? <><button className="button button--secondary visual-commit-action" type="button" onClick={onPrepare} disabled={busy} title="Prépare un aperçu et un diff sans modifier les fichiers."><Icon name="changes" size={15} /><span><strong>Réviser sans modifier</strong><small>Aperçu + diff · fichiers intacts</small></span></button><button className="button button--primary visual-commit-action" type="button" onClick={onApply} disabled={busy} title="Écrit les ajustements dans les fichiers, puis réanalyse le projet."><Icon name="check" size={15} /><span><strong>Appliquer aux fichiers</strong><small>Écrit puis réanalyse · annulable</small></span></button></> : <button className="button button--primary visual-commit-action" type="button" onClick={onApply} disabled={busy}><Icon name="export" size={15} /><span><strong>Préparer l’export CSS</strong><small>Aucune écriture dans le framework</small></span></button>}</div></>}</footer>
   </div>
 }
 
@@ -4285,7 +4315,8 @@ function Inspector({ project, allIssues, activeIssueCount, totalIssueCount, show
   const batchAccepted = batchAppliedIds.size > 0 && batchIssues.filter((issue) => batchAppliedIds.has(issue.id)).every((issue) => issueIsRetained(issue, selectedIds, instructions))
   const queuedBatchIsDisplayed = Boolean(batchProposal && batchIssueIds.length === queuedBatchIds.length && queuedBatchIds.every((id) => batchIssueIds.includes(id)))
   const batchSelectionStale = Boolean(batchProposal && !queuedBatchIsDisplayed && !batchAccepted)
-  const showPlanBar = tab === 'findings' || tab === 'fixes'
+  const planHasContent = acceptedCount > 0 || queuedClassified.length > 0 || Boolean(staging) || undoAvailable || Boolean(expressVerification) || Boolean(batchProposal) || Boolean(previewBusy && proposalContext?.kind === 'batch')
+  const showPlanBar = (tab === 'findings' || tab === 'fixes') && planHasContent
   return <aside className="inspector" aria-label="Inspecteur">
     <div className="inspector-tabs" role="tablist" aria-label="Outils d’analyse">{inspectorTabs.map((item) => <button role="tab" aria-selected={tab === item.id} className={tab === item.id ? 'is-active' : ''} key={item.id} onClick={() => onTab(item.id)} title={item.label}><Icon name={item.icon} size={16} /><span>{item.label}</span>{item.id === 'findings' && <b>{consolidatedIssues.length}</b>}</button>)}</div>
     <div className="inspector-content">

@@ -10,12 +10,38 @@ import {
 const allowedKinds = new Set<VisualGestureKind>(['move', 'resize', 'reorder', 'nudge'])
 const allowedStrategies = new Set<VisualGestureStrategy>(['flow-translate', 'responsive-size', 'flex-order', 'grid-order'])
 const propertiesByStrategy: Record<VisualGestureStrategy, ReadonlySet<string>> = {
-  'flow-translate': new Set(['translate']),
+  // Un élément inline n'est pas une boîte transformable. Le Composer peut le
+  // rendre inline-block dans le même geste afin que le déplacement demandé
+  // reste visible au lieu d'être accepté puis annulé par la vérification.
+  'flow-translate': new Set(['display', 'translate']),
   'responsive-size': new Set(['display', 'box-sizing', 'width', 'min-width', 'max-width', 'height', 'min-height', 'max-height', 'flex-basis', 'flex-grow', 'flex-shrink', 'translate']),
   'flex-order': new Set(['order']),
   'grid-order': new Set(['order'])
 }
 const maximumMutations = 60
+
+export function visualScopeIncludesWidth(scope: VisualEditScope, width: number): boolean {
+  if (!Number.isFinite(width)) return false
+  if (scope.kind === 'all') return true
+  if (scope.kind === 'mobile') return width <= 767
+  if (scope.kind === 'tablet') return width >= 768 && width <= 1_024
+  const minimum = scope.minWidth ?? Number.NEGATIVE_INFINITY
+  const maximum = scope.maxWidth ?? Number.POSITIVE_INFINITY
+  return width >= minimum && width <= maximum
+}
+
+/**
+ * Le CSS temporaire doit nécessairement être actif dans le viewport manipulé.
+ * Une portée devenue incompatible après un changement d'appareil est donc
+ * ramenée vers la famille visible. Le bureau reste isolé de mobile/tablette.
+ */
+export function resolveVisualGestureScope(scope: VisualEditScope, width: number): VisualEditScope {
+  if (!Number.isFinite(width)) return scope
+  if (visualScopeIncludesWidth(scope, width)) return scope
+  if (width <= 767) return { kind: 'mobile' }
+  if (width <= 1_024) return { kind: 'tablet' }
+  return { kind: 'custom', minWidth: 1_025, maxWidth: null }
+}
 
 export interface VisualGestureOperationChange {
   key: string
