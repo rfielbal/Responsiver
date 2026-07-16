@@ -202,28 +202,36 @@ const remoteInspectorPayloadFunction = `function () {
   };
 }`
 
-const remoteScrollSnapshotFunction = `function (preferredContainer) {
+const remoteScrollSnapshotFunction = `function (preferredContainer, includeRuntime = false) {
   const root = document.scrollingElement || document.documentElement;
   const clamp = (value, minimum, maximum) => Math.min(maximum, Math.max(minimum, Number.isFinite(value) ? value : minimum));
   const overflowAllowsScroll = (value) => /^(?:auto|scroll|overlay)$/.test(String(value || '').toLowerCase());
+  const rootMaxX = Math.max(0, root.scrollWidth - window.innerWidth);
+  const rootMaxY = Math.max(0, root.scrollHeight - window.innerHeight);
+  const rootScrollable = rootMaxX > 1 || rootMaxY > 1;
+  const hasPreferredContainer = Boolean(preferredContainer && preferredContainer.kind === 'scrollable' && Number.isSafeInteger(preferredContainer.index));
+  // Sans cible explicite, le document reste la référence dès qu'il peut
+  // réellement défiler. Le parcours coûteux des styles n'est nécessaire que
+  // pour résoudre un conteneur demandé ou remplacer un document immobile.
+  const needsContainerScan = hasPreferredContainer || preferredContainer === undefined && !rootScrollable;
   const scrollables = [];
   const nodes = [];
   const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_ELEMENT);
   while (nodes.length < ${REMOTE_SCROLL_LIMITS.maxScrollableNodes} && walker.nextNode()) nodes.push(walker.currentNode);
-  for (const element of nodes) {
-    const style = getComputedStyle(element);
-    const allowsX = overflowAllowsScroll(style.overflowX);
-    const allowsY = overflowAllowsScroll(style.overflowY);
-    if (!allowsX && !allowsY) continue;
-    const maxX = Math.max(0, element.scrollWidth - element.clientWidth);
-    const maxY = Math.max(0, element.scrollHeight - element.clientHeight);
-    const rectangle = element.getBoundingClientRect();
-    const visibleWidth = Math.max(0, Math.min(window.innerWidth, rectangle.right) - Math.max(0, rectangle.left));
-    const visibleHeight = Math.max(0, Math.min(window.innerHeight, rectangle.bottom) - Math.max(0, rectangle.top));
-    scrollables.push({ element, index: scrollables.length, maxX, maxY, rectangle, visibleArea: visibleWidth * visibleHeight });
+  if (needsContainerScan) {
+    for (const element of nodes) {
+      const style = getComputedStyle(element);
+      const allowsX = overflowAllowsScroll(style.overflowX);
+      const allowsY = overflowAllowsScroll(style.overflowY);
+      if (!allowsX && !allowsY) continue;
+      const maxX = Math.max(0, element.scrollWidth - element.clientWidth);
+      const maxY = Math.max(0, element.scrollHeight - element.clientHeight);
+      const rectangle = element.getBoundingClientRect();
+      const visibleWidth = Math.max(0, Math.min(window.innerWidth, rectangle.right) - Math.max(0, rectangle.left));
+      const visibleHeight = Math.max(0, Math.min(window.innerHeight, rectangle.bottom) - Math.max(0, rectangle.top));
+      scrollables.push({ element, index: scrollables.length, maxX, maxY, rectangle, visibleArea: visibleWidth * visibleHeight });
+    }
   }
-  const rootMaxX = Math.max(0, root.scrollWidth - window.innerWidth);
-  const rootMaxY = Math.max(0, root.scrollHeight - window.innerHeight);
   const viewportArea = Math.max(1, window.innerWidth * window.innerHeight);
   const minimumRatio = rootMaxX > 1 || rootMaxY > 1 ? .5 : .18;
   const scoreFor = (candidate) => candidate.visibleArea * (candidate.maxY > 1 ? 2 : 1);
@@ -237,14 +245,14 @@ const remoteScrollSnapshotFunction = `function (preferredContainer) {
     if (!dominant || score > dominant.score) dominant = { ...candidate, score };
   }
   let selected = null;
-  if (preferredContainer !== null && preferredContainer && preferredContainer.kind === 'scrollable' && Number.isSafeInteger(preferredContainer.index)) {
+  if (hasPreferredContainer) {
     const preferred = scrollables[preferredContainer.index] || null;
     if (isEligible(preferred)) {
       const score = scoreFor(preferred);
       if (!dominant || score >= dominant.score * .75) selected = { ...preferred, score };
     }
   }
-  if (!selected && preferredContainer !== null) selected = dominant;
+  if (!selected && (hasPreferredContainer || preferredContainer === undefined && !rootScrollable)) selected = dominant;
   const scroller = selected ? selected.element : root;
   const viewportWidth = Math.max(1, selected ? scroller.clientWidth : window.innerWidth);
   const viewportHeight = Math.max(1, selected ? scroller.clientHeight : window.innerHeight);
@@ -277,13 +285,14 @@ const remoteScrollSnapshotFunction = `function (preferredContainer) {
     const score = Math.abs(relativeTop);
     if (!best || score < best.score) best = { kind, index, viewportOffset: relativeTop / viewportHeight, score };
   }
-  return {
+  const snapshot = {
     version: 1,
     xProgress: maxX > 0 ? clamp(scroller.scrollLeft / maxX, 0, 1) : 0,
     yProgress: maxY > 0 ? clamp(scroller.scrollTop / maxY, 0, 1) : 0,
     ...(selected ? { container: { kind: 'scrollable', index: selected.index } } : {}),
     anchor: best ? { kind: best.kind, index: best.index, viewportOffset: best.viewportOffset } : null
   };
+  return includeRuntime ? { snapshot, scroller, nodes } : snapshot;
 }`
 
 function cleanInspectorText(value: unknown, maximum: number): string {
@@ -1172,19 +1181,12 @@ export class RemoteBrowserSession {
       const snapshot = ${JSON.stringify(snapshot)};
       const readSnapshot = ${remoteScrollSnapshotFunction};
       const root = document.scrollingElement || document.documentElement;
-      const overflowAllowsScroll = (value) => /^(?:auto|scroll|overlay)$/.test(String(value || '').toLowerCase());
-      const scrollables = [];
-      const nodes = [];
-      const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_ELEMENT);
-      while (nodes.length < ${REMOTE_SCROLL_LIMITS.maxScrollableNodes} && walker.nextNode()) nodes.push(walker.currentNode);
-      for (const element of nodes) {
-        const style = getComputedStyle(element);
-        if (!overflowAllowsScroll(style.overflowX) && !overflowAllowsScroll(style.overflowY)) continue;
-        scrollables.push(element);
-      }
-      const resolvedContainer = readSnapshot(snapshot.container || undefined).container || null;
-      const scroller = resolvedContainer ? scrollables[resolvedContainer.index] : root;
-      if (!scroller) return readSnapshot();
+      const resolved = readSnapshot(snapshot.container || undefined, true);
+      const resolvedSnapshot = resolved && resolved.snapshot;
+      const scroller = resolved && resolved.scroller;
+      const nodes = resolved && Array.isArray(resolved.nodes) ? resolved.nodes : [];
+      if (!resolvedSnapshot || !scroller) return readSnapshot(null);
+      const resolvedContainer = resolvedSnapshot.container || null;
       const kindFor = (element) => {
         const role = String(element.getAttribute('role') || '').toLowerCase();
         if (role === 'banner') return 'header';

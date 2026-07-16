@@ -55,6 +55,25 @@ export interface RemoteClipConstraint {
 const CLIPPING_OVERFLOWS = new Set(['auto', 'clip', 'hidden', 'overlay', 'scroll'])
 const BOUNDS_RETRY_DELAYS = [70, 180] as const
 
+/**
+ * Regroupe les ancres HTML ordinaires avec leur document afin qu'un scrollspy
+ * ne relance pas l'audit multi-viewport. Les fragments utilisés comme route
+ * par un HashRouter restent en revanche des pages logiques distinctes.
+ */
+export function remoteAuditRouteKey(value: string): string {
+  try {
+    const route = new URL(value || '/', 'https://responsiver.invalid')
+    const hashRoute = route.hash.startsWith('#/') || route.hash.startsWith('#!/')
+    return `${route.pathname || '/'}${route.search}${hashRoute ? route.hash : ''}`
+  } catch {
+    const hashIndex = value.indexOf('#')
+    if (hashIndex < 0) return value || '/'
+    const base = value.slice(0, hashIndex) || '/'
+    const hash = value.slice(hashIndex)
+    return hash.startsWith('#/') || hash.startsWith('#!/') ? `${base}${hash}` : base
+  }
+}
+
 export function intersectRemoteClipBounds(base: RemoteClipRectangle, constraints: readonly RemoteClipConstraint[]): RemoteClipRectangle | null {
   let left = base.left
   let top = base.top
@@ -325,13 +344,13 @@ export default function RemotePreview({ projectId, viewId, device, visible, allo
 
   const audit = async (automatic = false): Promise<void> => {
     if (auditing) return
-    const routeKey = state?.path || '/'
+    const routeKey = remoteAuditRouteKey(state?.path || '/')
     if (automatic && auditedRoutes.current.has(routeKey)) return
     if (automatic) auditedRoutes.current.add(routeKey)
     setAuditing(true)
     try {
       const result = await window.responsiver.auditRemote(sweepViewports, viewId ? { projectId, viewId } : undefined)
-      auditedRoutes.current.add(result.path)
+      auditedRoutes.current.add(remoteAuditRouteKey(result.path))
       onAudit(result)
       onNotice(result.truncated
         ? `${result.findings.length} constat${result.findings.length > 1 ? 's' : ''} mesuré${result.findings.length > 1 ? 's' : ''} sur cette route. Les limites de sécurité ont été atteintes : le résultat est partiel.`
@@ -351,7 +370,8 @@ export default function RemotePreview({ projectId, viewId, device, visible, allo
 
   useEffect(() => {
     const shouldAuditAutomatically = automaticAudit ?? !viewId
-    if (!shouldAuditAutomatically || !visible || state?.loading || !state?.path || auditedRoutes.current.has(state.path)) return
+    const routeKey = remoteAuditRouteKey(state?.path || '/')
+    if (!shouldAuditAutomatically || !visible || state?.loading || !state?.path || auditedRoutes.current.has(routeKey)) return
     const timer = window.setTimeout(() => { void audit(true) }, 850)
     return () => window.clearTimeout(timer)
   }, [automaticAudit, projectId, state?.loading, state?.path, viewId, visible])

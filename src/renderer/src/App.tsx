@@ -1,6 +1,6 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactElement } from 'react'
 
-import type { CascadeTrace, MatrixObservation, MatrixRunProgress, MatrixRunResult, MatrixStateId, ProjectPreparationProgress, RecentProjectSummary, RemoteAuditResult, RemoteInspectorSelection, RemotePageState, RemoteViewport, RuntimeAudit, StagingVerificationResult, VisualElementSnapshot, VisualGestureCommit } from '../../shared/contracts'
+import type { CascadeTrace, MatrixObservation, MatrixRunProgress, MatrixRunResult, MatrixStateId, ProjectPreparationProgress, RecentProjectSummary, RemoteAuditResult, RemoteInspectorSelection, RemotePageState, RemoteScrollSnapshot, RemoteViewport, RuntimeAudit, StagingVerificationResult, VisualElementSnapshot, VisualGestureCommit } from '../../shared/contracts'
 import { classifyProjectIssue, consolidateProjectIssues, deterministicVisualTarget, isExpressEligibleIssue, type FindingGroup, type FindingPolicy } from '../../shared/finding-policy'
 import { frameworkSupportFor } from '../../shared/framework-support'
 import {
@@ -30,6 +30,7 @@ import OnboardingTour from './OnboardingTour'
 import PreviewZoomControls from './PreviewZoomControls'
 import RemotePreview from './RemotePreview'
 import StudioControls, { type StudioLayout, type StudioOverlayState } from './StudioControls'
+import { getPageGuidance, type GuideChapterId, type GuideDestination } from './guidance'
 import { isOnboardingHidden, persistOnboardingHidden } from './onboarding'
 import { clampPreviewScale, stepPreviewScale, wheelPreviewScale } from './preview-zoom'
 
@@ -397,11 +398,19 @@ function Mark(): ReactElement {
   return <span className="brand-mark" aria-hidden="true"><i /><i /><i /></span>
 }
 
-function PageGuide({ page, onOpenChange }: { page: 'code' | 'visual'; onOpenChange: (open: boolean) => void }): ReactElement {
+function PageGuide({ page, sourceKind, labMode, hasStaging, onOpenChange, onOpenTour }: {
+  page: GuideDestination
+  sourceKind?: ProjectSnapshot['source']['kind']
+  labMode: LabMode
+  hasStaging: boolean
+  onOpenChange: (open: boolean) => void
+  onOpenTour: (chapter: GuideChapterId) => void
+}): ReactElement {
   const [open, setOpen] = useState(false)
   const root = useRef<HTMLDivElement>(null)
   const trigger = useRef<HTMLButtonElement>(null)
   const titleId = `page-guide-${page}`
+  const guidance = getPageGuidance(page, { sourceKind, labMode, hasStaging })
 
   useEffect(() => {
     if (!open) return
@@ -427,21 +436,12 @@ function PageGuide({ page, onOpenChange }: { page: 'code' | 'visual'; onOpenChan
 
   useEffect(() => () => onOpenChange(false), [onOpenChange])
 
-  const visual = page === 'visual'
   return <div className="page-guide" ref={root}>
-    <button ref={trigger} className="page-guide-trigger" type="button" onClick={() => { const next = !open; onOpenChange(next); setOpen(next) }} aria-label={`Guide de la page ${visual ? 'Atelier visuel' : 'Code'}`} aria-expanded={open} aria-controls={`${titleId}-panel`} title="Guide rapide"><Icon name="help" size={17} /></button>
+    <button ref={trigger} className="page-guide-trigger" type="button" onClick={() => { const next = !open; onOpenChange(next); setOpen(next) }} aria-label={`Guide de la page ${guidance.label}`} aria-expanded={open} aria-controls={`${titleId}-panel`} title={`Guide rapide · ${guidance.label}`}><Icon name="help" size={17} /></button>
     {open && <section id={`${titleId}-panel`} className="page-guide-panel" role="dialog" aria-modal="false" aria-labelledby={titleId}>
-      <header><div><span className="overline">Guide rapide</span><h2 id={titleId}>{visual ? 'Atelier visuel' : 'Espace Code'}</h2></div><button className="icon-button" type="button" onClick={() => { onOpenChange(false); setOpen(false); window.requestAnimationFrame(() => trigger.current?.focus()) }} aria-label="Fermer le guide"><Icon name="close" size={14} /></button></header>
-      {visual ? <ol>
-        <li><b>Composez</b><span>La page est figée : glissez un bloc, redimensionnez-le avec ses poignées ou ajustez ses propriétés.</span></li>
-        <li><b>Définissez la portée</b><span>Choisissez l’écran et la page auxquels le réglage doit s’appliquer.</span></li>
-        <li><b>Testez puis comparez</b><span>Réactivez le vrai site dans Tester, ouvrez l’avant/après, puis appliquez explicitement.</span></li>
-      </ol> : <ol>
-        <li><b>Choisissez un fichier</b><span>L’éditeur conserve d’abord chaque modification dans un overlay en mémoire.</span></li>
-        <li><b>Contrôlez le rendu</b><span>La preview se met à jour pour le CSS ; utilisez Inspecter pour relier rendu et DOM.</span></li>
-        <li><b>Validez explicitement</b><span>Consultez le diff, puis appliquez uniquement le fichier souhaité au projet.</span></li>
-      </ol>}
-      <footer><Icon name="cursor" size={14} /><span><b>Zoom précis</b> : Ctrl + molette, pincement du pavé tactile ou commandes sous la preview. Le viewport CSS reste inchangé.</span></footer>
+      <header><div><span className="overline">Guide rapide · {guidance.label}</span><h2 id={titleId}>{guidance.title}</h2></div><button className="icon-button" type="button" onClick={() => { onOpenChange(false); setOpen(false); window.requestAnimationFrame(() => trigger.current?.focus()) }} aria-label="Fermer le guide"><Icon name="close" size={14} /></button></header>
+      <ol>{guidance.steps.map((step) => <li key={step.title}><b>{step.title}</b><span>{step.detail}</span></li>)}</ol>
+      <footer className="page-guide-footer"><Icon name="info" size={14} /><span><b>{guidance.note.title}</b> · {guidance.note.detail}</span><button type="button" onClick={() => { onOpenChange(false); setOpen(false); onOpenTour(guidance.tourChapter) }}>Voir le guide complet <Icon name="arrow" size={13} /></button></footer>
     </section>}
   </div>
 }
@@ -499,10 +499,31 @@ function runtimeIssueViewportKeys(issue: ProjectIssue): string[] {
 function previewRoute(value: string): string {
   try {
     const route = new URL(value, 'http://responsiver.local')
-    return `${route.pathname}${route.search}${route.hash}`
+    const applicationHash = /^#(?:!\/|\/)/.test(route.hash) ? route.hash : ''
+    return `${route.pathname}${route.search}${applicationHash}`
   } catch {
-    return value
+    const [document, hash = ''] = value.split('#', 2)
+    return /^!?\//.test(hash) ? `${document}#${hash}` : document
   }
+}
+
+function remoteNavigationKey(value: string): string {
+  try {
+    const route = new URL(value)
+    return `${route.origin}${previewRoute(value)}`
+  } catch {
+    return previewRoute(value)
+  }
+}
+
+function remoteScrollSignature(snapshot: RemoteScrollSnapshot): string {
+  const rounded = (value: number): number => Math.round(value * 1_000) / 1_000
+  return JSON.stringify({
+    x: rounded(snapshot.xProgress),
+    y: rounded(snapshot.yProgress),
+    container: snapshot.container?.index ?? null,
+    anchor: snapshot.anchor ? [snapshot.anchor.kind, snapshot.anchor.index, rounded(snapshot.anchor.viewportOffset)] : null
+  })
 }
 
 const runtimeAuditRules = new Set<RuntimeAudit['findings'][number]['rule']>([
@@ -951,6 +972,8 @@ function PreviewFrame({ project, origin, device, path, compact = false, studio =
   const spaceRef = useRef<HTMLDivElement>(null)
   const frameRef = useRef<HTMLIFrameElement>(null)
   const frameLoadTimerRef = useRef<number | null>(null)
+  const syncReplayTimersRef = useRef<number[]>([])
+  const syncLoadGenerationRef = useRef(0)
   const resizeCleanupRef = useRef<(() => void) | null>(null)
   const previousDeviceId = useRef(device.id)
   const [scale, setScale] = useState(compact ? 0.22 : 0.7)
@@ -991,6 +1014,7 @@ function PreviewFrame({ project, origin, device, path, compact = false, studio =
   const previousProjectIdRef = useRef(project.id)
   const reportedPathRef = useRef(path)
   const appliedSyncSequenceRef = useRef(0)
+  const syncCommandRef = useRef(syncCommand)
   focusSelectorRef.current = focusSelector
   themeOverrideRef.current = themeOverride
   scenarioStateRef.current = scenarioState
@@ -1002,6 +1026,7 @@ function PreviewFrame({ project, origin, device, path, compact = false, studio =
   composerRejectedRef.current = onComposerRejected
   composerNoticeRef.current = onComposerNotice
   inspectElementRef.current = onInspectElement
+  syncCommandRef.current = syncCommand
   scaleRef.current = scale
   const [runtimeRender, setRuntimeRender] = useState<RuntimeRenderState | null>(null)
   const safeRoutes = project.routes.length ? project.routes : [{ path: project.entryPath ?? '/', label: 'Page principale' }]
@@ -1076,6 +1101,8 @@ function PreviewFrame({ project, origin, device, path, compact = false, studio =
   }, [])
   useEffect(() => () => {
     if (frameLoadTimerRef.current) window.clearTimeout(frameLoadTimerRef.current)
+    for (const timer of syncReplayTimersRef.current) window.clearTimeout(timer)
+    syncReplayTimersRef.current = []
   }, [])
 
   useEffect(() => {
@@ -1238,11 +1265,7 @@ function PreviewFrame({ project, origin, device, path, compact = false, studio =
   useEffect(() => {
     if (!syncCommand || syncCommand.sequence <= appliedSyncSequenceRef.current) return
     appliedSyncSequenceRef.current = syncCommand.sequence
-    const event = syncCommand.event
-    const payload = event.type === 'sync-scroll'
-      ? { protocol: 1, eventId: event.eventId, sourceDocumentId: event.documentId, route: event.route, anchor: event.anchor, progress: event.progress }
-      : { protocol: 1, eventId: event.eventId, sourceDocumentId: event.documentId, route: event.route, target: event.target, action: event.action, checked: event.checked, selectedIndices: event.selectedIndices, value: event.value }
-    frameRef.current?.contentWindow?.postMessage({ channel: 'responsiver-preview', type: syncCommand.kind === 'scroll' ? 'sync-apply-scroll' : 'sync-apply-interaction', ...payload }, origin ?? '*')
+    dispatchSyncCommand(syncCommand)
   }, [origin, syncCommand])
 
   function scheduleVisualStylePreview(delay = 80): void {
@@ -1354,6 +1377,32 @@ function PreviewFrame({ project, origin, device, path, compact = false, studio =
     frameWindow.postMessage({ channel: 'responsiver-preview', type: 'design-connect', protocol: 1, sessionId }, origin, [bridgeChannel.port2])
   }
 
+  function dispatchSyncCommand(command: PreviewSyncCommand, replaySuffix = ''): void {
+    const event = command.event
+    const eventId = replaySuffix
+      ? `${event.eventId.slice(0, 72)}:${replaySuffix}`.slice(0, 96)
+      : event.eventId
+    const payload = event.type === 'sync-scroll'
+      ? { protocol: 1, eventId, sourceDocumentId: event.documentId, route: event.route, anchor: event.anchor, progress: event.progress }
+      : { protocol: 1, eventId, sourceDocumentId: event.documentId, route: event.route, target: event.target, action: event.action, checked: event.checked, selectedIndices: event.selectedIndices, value: event.value }
+    frameRef.current?.contentWindow?.postMessage({ channel: 'responsiver-preview', type: command.kind === 'scroll' ? 'sync-apply-scroll' : 'sync-apply-interaction', ...payload }, origin ?? '*')
+  }
+
+  function scheduleLoadedFrameSyncReplay(): void {
+    for (const timer of syncReplayTimersRef.current) window.clearTimeout(timer)
+    syncReplayTimersRef.current = []
+    const command = syncCommandRef.current
+    if (!command || command.kind !== 'scroll') return
+    const generation = ++syncLoadGenerationRef.current
+    for (const [index, delay] of [120, 420, 1_050].entries()) {
+      const timer = window.setTimeout(() => {
+        if (syncCommandRef.current?.sequence !== command.sequence || syncLoadGenerationRef.current !== generation) return
+        dispatchSyncCommand(command, `load${generation}-${index + 1}`)
+      }, delay)
+      syncReplayTimersRef.current.push(timer)
+    }
+  }
+
   function synchronizeLoadedFrame(): void {
     connectComposerBridge()
     pendingPathLoadedRef.current = true
@@ -1362,6 +1411,7 @@ function PreviewFrame({ project, origin, device, path, compact = false, studio =
     pendingStateRequestRef.current = requestId
     post('state-request', { requestId })
     if (frameLoadTimerRef.current) window.clearTimeout(frameLoadTimerRef.current)
+    scheduleLoadedFrameSyncReplay()
     frameLoadTimerRef.current = window.setTimeout(() => {
       const currentFocus = focusSelectorRef.current
       const currentTheme = themeOverrideRef.current
@@ -1510,7 +1560,7 @@ export default function App(): ReactElement {
   })
   const [onboardingState, setOnboardingState] = useState(() => {
     const hideOnStartup = isOnboardingHidden()
-    return { open: !hideOnStartup, hideOnStartup }
+    return { open: !hideOnStartup, hideOnStartup, chapter: 'welcome' as GuideChapterId }
   })
   const [destination, setDestination] = useState<Destination>('projects')
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>('findings')
@@ -1527,6 +1577,9 @@ export default function App(): ReactElement {
   const [labMode, setLabMode] = useState<LabMode>('device')
   const [labPanelOpen, setLabPanelOpen] = useState(() => {
     try { return window.localStorage.getItem('responsiver.lab-panel-open') !== 'false' } catch { return true }
+  })
+  const [studioPanelOpen, setStudioPanelOpen] = useState(() => {
+    try { return window.localStorage.getItem('responsiver.studio-panel-open') === 'true' } catch { return false }
   })
   const [deviceCatalogState, setDeviceCatalogState] = useState<DeviceCatalogState>(storedDeviceCatalogState)
   const [studioDeviceIds, setStudioDeviceIds] = useState<string[]>(() => initialStudioDeviceIds(storedDeviceCatalogState()))
@@ -1661,6 +1714,10 @@ export default function App(): ReactElement {
   }, [labPanelOpen])
 
   useEffect(() => {
+    try { window.localStorage.setItem('responsiver.studio-panel-open', String(studioPanelOpen)) } catch { /* préférence facultative */ }
+  }, [studioPanelOpen])
+
+  useEffect(() => {
     try { window.localStorage.setItem('responsiver.studio.v1', JSON.stringify({ deviceIds: activeStudioProfiles.map((profile) => profile.id), layout: studioLayout, sync: studioSync })) } catch { /* préférences facultatives */ }
   }, [activeStudioProfiles, studioLayout, studioSync])
 
@@ -1740,6 +1797,8 @@ export default function App(): ReactElement {
   const isRemote = project?.source.kind === 'remote-url' || project?.source.kind === 'linked-localhost'
   const remoteStudioPilotViewId = isRemote && labMode === 'studio' && activeStudioProfiles[0]?.id !== studioPilotId ? studioPilotId : undefined
   const remoteStudioPilotState = remoteStudioStates[studioPilotId]
+  const remoteStudioPilotRoute = remoteStudioPilotState ? remoteNavigationKey(remoteStudioPilotState.url) : null
+  const activeLabPanelOpen = labMode === 'studio' ? studioPanelOpen : labPanelOpen
   remoteInspectorViewIdRef.current = destination === 'lab' ? remoteStudioPilotViewId : undefined
   const frameworkSupport = useMemo(() => project ? frameworkSupportFor(project) : null, [project])
   const workspaceEnabled = Boolean(project && !project.source.readOnly && project.source.localRoot)
@@ -2065,39 +2124,64 @@ export default function App(): ReactElement {
   }, [destination, inspectorLocation, isRemote, project?.id, remoteStudioPilotViewId, visualMode])
 
   useEffect(() => {
-    if (!project || !isRemote || destination !== 'lab' || labMode !== 'studio' || !studioSync.navigation || !remoteStudioPilotState || remoteStudioPilotState.loading || !studioLinkedIds.includes(studioPilotId)) return
+    if (!studioSync.navigation) remoteStudioNavigationRef.current.clear()
+  }, [studioSync.navigation])
+
+  useEffect(() => {
+    if (!project || !isRemote || destination !== 'lab' || labMode !== 'studio' || !studioSync.navigation || !remoteStudioPilotState || !remoteStudioPilotRoute || remoteStudioPilotState.loading || !studioLinkedIds.includes(studioPilotId)) return
     let stopped = false
     let busy = false
-    let failures = 0
+    let noticeSent = false
     const synchronize = async (): Promise<void> => {
       if (stopped || busy) return
-      const targets = activeStudioProfiles.filter((target) => target.id !== studioPilotId && studioLinkedIds.includes(target.id) && remoteStudioStatesRef.current[target.id]?.url !== remoteStudioPilotState.url)
+      const targets = activeStudioProfiles.filter((target) => {
+        if (target.id === studioPilotId || !studioLinkedIds.includes(target.id)) return false
+        const targetState = remoteStudioStatesRef.current[target.id]
+        if (targetState && !targetState.loading && remoteNavigationKey(targetState.url) === remoteStudioPilotRoute) {
+          remoteStudioNavigationRef.current.delete(target.id)
+          return false
+        }
+        return remoteStudioNavigationRef.current.get(target.id) !== remoteStudioPilotRoute
+      })
       if (!targets.length) return
       busy = true
-      const results = await Promise.allSettled(targets.map(async (target) => {
-        remoteStudioNavigationRef.current.set(target.id, remoteStudioPilotState.url)
-        const viewId = activeStudioProfiles[0]?.id === target.id ? undefined : target.id
-        const request = viewId ? { projectId: project.id, viewId } : { projectId: project.id }
-        try {
-          await window.responsiver.navigateRemote('url', remoteStudioPilotState.url, request)
-        } finally {
-          if (remoteStudioNavigationRef.current.get(target.id) === remoteStudioPilotState.url) remoteStudioNavigationRef.current.delete(target.id)
+      try {
+        const results = await Promise.allSettled(targets.map(async (target) => {
+          remoteStudioNavigationRef.current.set(target.id, remoteStudioPilotRoute)
+          const viewId = activeStudioProfiles[0]?.id === target.id ? undefined : target.id
+          const request = viewId ? { projectId: project.id, viewId } : { projectId: project.id }
+          const previousTargetState = remoteStudioStatesRef.current[target.id]
+          const previousTargetRoute = previousTargetState ? remoteNavigationKey(previousTargetState.url) : null
+          try {
+            const result = await window.responsiver.navigateRemote('url', remoteStudioPilotState.url, request)
+            const resultRoute = remoteNavigationKey(result.url)
+            // Une navigation explicite peut rencontrer la toute fin d'un audit :
+            // le backend renvoie alors l'ancien état sans erreur. On la rejoue de
+            // façon bornée. Une vraie redirection vers une nouvelle route est en
+            // revanche acceptée comme variante propre à ce viewport.
+            if (resultRoute !== remoteStudioPilotRoute && (!previousTargetRoute || resultRoute === previousTargetRoute) && remoteStudioNavigationRef.current.get(target.id) === remoteStudioPilotRoute) {
+              remoteStudioNavigationRef.current.delete(target.id)
+            }
+          } catch (error) {
+            if (remoteStudioNavigationRef.current.get(target.id) === remoteStudioPilotRoute) remoteStudioNavigationRef.current.delete(target.id)
+            throw error
+          }
+        }))
+        if (!noticeSent && results.some((result) => result.status === 'rejected')) {
+          noticeSent = true
+          flash('Certaines vues attendent la fin de leur analyse avant de rejoindre la navigation du pilote.')
         }
-      }))
-      failures += results.filter((result) => result.status === 'rejected').length
-      if (failures >= 3) {
-        failures = 0
-        flash('Certaines vues attendent la fin de leur analyse avant de rejoindre la navigation du pilote.')
+      } finally {
+        busy = false
       }
-      busy = false
     }
     void synchronize()
-    const timer = window.setInterval(() => { void synchronize() }, 420)
+    const retryTimers = [650, 1_800, 4_500, 8_000].map((delay) => window.setTimeout(() => { void synchronize() }, delay))
     return () => {
       stopped = true
-      window.clearInterval(timer)
+      retryTimers.forEach((timer) => window.clearTimeout(timer))
     }
-  }, [activeStudioProfiles, destination, isRemote, labMode, project?.id, remoteStudioPilotState?.loading, remoteStudioPilotState?.url, studioLinkedIds, studioPilotId, studioSync.navigation])
+  }, [activeStudioProfiles, destination, isRemote, labMode, project?.id, remoteStudioPilotRoute, remoteStudioPilotState?.loading, studioLinkedIds, studioPilotId, studioSync.navigation])
 
   useEffect(() => {
     if (!project || !isRemote || destination !== 'lab' || labMode !== 'studio' || !studioSync.scroll) return
@@ -2107,21 +2191,29 @@ export default function App(): ReactElement {
     const requestFor = (id: string) => id === primaryId ? { projectId: project.id } : { projectId: project.id, viewId: id }
     let stopped = false
     let busy = false
-    let lastSnapshot = ''
-    let lastAppliedAt = 0
+    const appliedSignatures = new Map<string, { signature: string; at: number }>()
     const synchronize = async (): Promise<void> => {
       if (stopped || busy) return
       busy = true
       try {
         const snapshot = await window.responsiver.readRemoteScroll(requestFor(studioPilotId))
         if (stopped) return
-        const serialized = JSON.stringify(snapshot)
+        const signature = remoteScrollSignature(snapshot)
         const now = Date.now()
-        if (serialized === lastSnapshot && now - lastAppliedAt < 700) return
-        lastSnapshot = serialized
-        lastAppliedAt = now
-        const targets = identifiers.filter((id) => id !== studioPilotId && studioLinkedIds.includes(id))
-        await Promise.allSettled(targets.map((id) => window.responsiver.applyRemoteScroll({ ...requestFor(id), snapshot })))
+        const pilotRoute = remoteStudioStatesRef.current[studioPilotId]
+        const pilotRouteKey = pilotRoute && !pilotRoute.loading ? remoteNavigationKey(pilotRoute.url) : null
+        if (!pilotRouteKey) return
+        const targets = identifiers.filter((id) => {
+          if (id === studioPilotId || !studioLinkedIds.includes(id)) return false
+          const targetState = remoteStudioStatesRef.current[id]
+          if (!targetState || targetState.loading || remoteNavigationKey(targetState.url) !== pilotRouteKey) return false
+          const applied = appliedSignatures.get(id)
+          return !applied || applied.signature !== signature || now - applied.at >= 1_500
+        })
+        const results = await Promise.allSettled(targets.map((id) => window.responsiver.applyRemoteScroll({ ...requestFor(id), snapshot })))
+        results.forEach((result, index) => {
+          if (result.status === 'fulfilled') appliedSignatures.set(targets[index], { signature, at: now })
+        })
       } catch {
         // Un audit ou une navigation peut suspendre brièvement le renderer distant.
       } finally {
@@ -2129,7 +2221,7 @@ export default function App(): ReactElement {
       }
     }
     void synchronize()
-    const timer = window.setInterval(() => { void synchronize() }, 160)
+    const timer = window.setInterval(() => { void synchronize() }, 240)
     return () => {
       stopped = true
       window.clearInterval(timer)
@@ -3298,6 +3390,9 @@ export default function App(): ReactElement {
       return linked.length ? linked : [next[0]]
     })
     setStudioPaths((current) => Object.fromEntries(Object.entries(current).filter(([id]) => next.includes(id))))
+    for (const id of new Set([...studioDeviceIds, ...next])) {
+      if (!next.includes(id) || !studioDeviceIds.includes(id)) remoteStudioNavigationRef.current.delete(id)
+    }
     setStudioSyncCommand(null)
     setStudioPilotId((current) => next.includes(current) ? current : next[0])
     setStudioFocusedId((current) => next.includes(current) ? current : next[0])
@@ -3305,6 +3400,7 @@ export default function App(): ReactElement {
 
   function toggleStudioLink(id: string): void {
     setStudioSyncCommand(null)
+    remoteStudioNavigationRef.current.delete(id)
     setStudioLinkedIds((current) => {
       if (!current.includes(id)) return [...current, id]
       const remaining = current.filter((candidate) => candidate !== id)
@@ -3356,7 +3452,7 @@ export default function App(): ReactElement {
     const nextStates = { ...remoteStudioStatesRef.current, [profileId]: state }
     remoteStudioStatesRef.current = nextStates
     setRemoteStudioStates(nextStates)
-    if (remoteStudioNavigationRef.current.get(profileId) === state.url && !state.loading) remoteStudioNavigationRef.current.delete(profileId)
+    if (remoteStudioNavigationRef.current.get(profileId) === remoteNavigationKey(state.url) && !state.loading) remoteStudioNavigationRef.current.delete(profileId)
     if (profileId !== studioPilotId || !studioLinkedIds.includes(profileId)) return
     setRemoteState(state)
     changePreviewPath(state.path)
@@ -3499,16 +3595,16 @@ export default function App(): ReactElement {
 
   const interfaceOverlayOpen = pageGuideOpen || onboardingState.open || showPreparation || studioControlsOverlayOpen
 
-  function openOnboarding(): void {
-    onboardingOpenedFromRail.current = true
-    setOnboardingState({ open: true, hideOnStartup: isOnboardingHidden() })
+  function openOnboarding(chapter: GuideChapterId = 'welcome', fromRail = false): void {
+    onboardingOpenedFromRail.current = fromRail
+    setOnboardingState({ open: true, hideOnStartup: isOnboardingHidden(), chapter })
   }
 
   function closeOnboarding(hideOnStartup: boolean): void {
     persistOnboardingHidden(hideOnStartup)
     const restoreRailFocus = onboardingOpenedFromRail.current
     onboardingOpenedFromRail.current = false
-    setOnboardingState({ open: false, hideOnStartup })
+    setOnboardingState((current) => ({ ...current, open: false, hideOnStartup }))
     window.requestAnimationFrame(() => {
       const fallback = onboardingFallbackFocusRef.current
       const target = restoreRailFocus || fallback?.disabled ? onboardingTriggerRef.current : fallback
@@ -3523,7 +3619,7 @@ export default function App(): ReactElement {
         const visualUnavailable = item.id === 'visual' && Boolean(project && (!project.source.localRoot || project.source.readOnly || project.source.kind === 'remote-url'))
         const limited = (isRemote && (item.id === 'review' || item.id === 'matrix')) || visualUnavailable
         return <button key={item.id} className={`${destination === item.id ? 'nav-link is-active' : 'nav-link'}${limited ? ' is-limited' : ''}`} onClick={() => go(item.id)} aria-label={item.label} aria-current={destination === item.id ? 'page' : undefined} aria-disabled={visualUnavailable || undefined} title={visualUnavailable ? 'Sources locales requises' : item.label}><Icon name={item.icon} /><span>{item.label}</span>{item.id === 'review' && counts.changes > 0 && <b>{counts.changes}</b>}</button>
-      })}<button ref={onboardingTriggerRef} type="button" className="nav-link nav-link--guide" onClick={openOnboarding} aria-label="Ouvrir le guide de prise en main" aria-haspopup="dialog" aria-expanded={onboardingState.open && !showPreparation} aria-controls="responsiver-onboarding" title="Guide de prise en main"><Icon name="help" /><span>Guide</span></button></nav>
+      })}<button ref={onboardingTriggerRef} type="button" className="nav-link nav-link--guide" onClick={() => openOnboarding('welcome', true)} aria-label="Ouvrir le guide de prise en main" aria-haspopup="dialog" aria-expanded={onboardingState.open && !showPreparation} aria-controls="responsiver-onboarding" title="Guide de prise en main"><Icon name="help" /><span>Guide</span></button></nav>
       <div className="rail-foot"><span><Icon name="shield" size={15} /> Local strict par défaut</span><small>v0.8 · open source</small></div>
     </aside>
 
@@ -3531,7 +3627,7 @@ export default function App(): ReactElement {
       <header className="titlebar">
         <div className="project-identity"><span>{project ? project.source.kind === 'remote-url' ? 'Audit URL' : project.source.kind === 'linked-localhost' ? 'Localhost associé' : 'Projet actif' : 'Espace local'}</span><strong>{project?.name ?? 'Aucun projet ouvert'}</strong>{project && <code title={project.source.url ?? project.root}>{project.source.url ?? project.root}</code>}</div>
         <div className="title-actions">
-          {(destination === 'code' || destination === 'visual') && <PageGuide key={destination} page={destination} onOpenChange={setPageGuideOpen} />}
+          <PageGuide key={`${destination}:${labMode}:${project?.source.kind ?? 'none'}:${Boolean(staging)}`} page={destination} sourceKind={project?.source.kind} labMode={labMode} hasStaging={Boolean(staging)} onOpenChange={setPageGuideOpen} onOpenTour={(chapter) => openOnboarding(chapter)} />
           {project && <span className={`origin-indicator${project.source.readOnly ? ' is-readonly' : ''}`}><i />{project.source.kind === 'remote-url' ? 'URL · lecture seule' : project.source.kind === 'linked-localhost' ? 'Localhost · sources liées' : 'Runner local'}</span>}
           <button ref={onboardingFallbackFocusRef} className="button button--quiet" onClick={() => openWith(() => window.responsiver.chooseProject(), 'Projet analysé et servi localement.')} disabled={busy}><Icon name="folder" /> Ouvrir</button>
         </div>
@@ -3554,14 +3650,14 @@ export default function App(): ReactElement {
         </div>
         {labMode === 'studio' && <StudioControls catalogState={deviceCatalogState} onCatalogState={setDeviceCatalogState} activeDeviceIds={studioDeviceIds} onActiveDeviceIds={updateStudioDeviceIds} layout={studioLayout} onLayout={setStudioLayout} sync={studioSync} onSync={setStudioSync} syncCapabilities={isRemote ? { navigation: true, scroll: true, interactions: false } : undefined} overlay={studioOverlay} onOverlay={updateStudioOverlay} onInterfaceOverlayChange={setStudioControlsOverlayOpen} overlayDisabledReason={isRemote ? 'La maquette reste réservée aux rendus locaux : les vues URL natives ne peuvent pas être recouvertes sans masquer leur interaction.' : null} onCapture={() => void captureStudio()} captureBusy={studioCapturing} captureDisabledReason={isRemote ? 'La capture groupée des vues URL natives n’est pas disponible ; utilisez une capture par navigateur.' : null} />}
 
-        <div className={labPanelOpen ? 'lab-grid' : 'lab-grid is-panel-collapsed'}>
+        <div className={activeLabPanelOpen ? 'lab-grid' : 'lab-grid is-panel-collapsed'}>
           <div ref={stageFullscreenRef} className={`${stageFullscreen ? 'stage-column is-fullscreen' : 'stage-column'}${inspectorLocation === 'lab' ? ' is-inspecting' : ''}`} role={stageFullscreen ? 'dialog' : undefined} aria-modal={stageFullscreen || undefined} aria-label={stageFullscreen ? 'Prévisualisation en plein écran' : undefined}>
             <div className="stage-toolbar">
               <span><i className={proposal && previewMode !== 'source' && previewMode !== 'staging' ? 'status-dot status-dot--proposal' : 'status-dot status-dot--ok'} />{isRemote ? project.source.kind === 'linked-localhost' ? 'Localhost connecté' : 'URL publique isolée' : previewMode === 'before-after' ? 'Comparaison du correctif' : previewMode === 'proposal' ? 'Correctif temporaire' : previewMode === 'staging' ? 'Version corrigée prête' : workspaceOrigin ? 'Overlay code temporaire' : 'Version actuelle du projet'}</span>
               <small>{isRemote ? labMode === 'studio' ? `${activeStudioProfiles.length} vue${activeStudioProfiles.length > 1 ? 's' : ''} URL isolée${activeStudioProfiles.length > 1 ? 's' : ''} · pilote ${findDeviceProfile(studioPilotId, deviceCatalogState)?.name ?? 'actif'}` : 'Navigation réelle · audit multi-viewport' : previewMode === 'before-after' ? 'Deux rendus synchronisés' : labMode === 'device' ? 'Bords redimensionnables' : `${activeStudioProfiles.length} écran${activeStudioProfiles.length > 1 ? 's' : ''} · pilote ${findDeviceProfile(studioPilotId, deviceCatalogState)?.name ?? 'actif'}`}</small>
               <button className={`stage-inspect${inspectorLocation === 'lab' ? ' is-active' : ''}${inspectorLocation === 'lab' && inspectorPhase === 'starting' ? ' is-starting' : ''}`} type="button" onClick={() => toggleInspector('lab')} aria-pressed={inspectorLocation === 'lab'} aria-busy={inspectorLocation === 'lab' && inspectorPhase === 'starting'} title="Inspecter un élément · F12"><Icon name="cursor" size={15} /><span>{inspectorLocation === 'lab' && inspectorPhase === 'starting' ? 'Activation…' : 'Inspecter'}</span></button>
               <button ref={fullscreenButtonRef} className="stage-fullscreen" onClick={() => setStageFullscreen((current) => !current)} aria-label={stageFullscreen ? 'Quitter le plein écran de la prévisualisation' : 'Afficher la prévisualisation en plein écran'} aria-pressed={stageFullscreen}><Icon name={stageFullscreen ? 'fullscreenExit' : 'fullscreen'} size={15} /><span>{stageFullscreen ? 'Réduire' : 'Plein écran'}</span></button>
-              <button className="stage-panel-toggle" type="button" onClick={() => setLabPanelOpen((current) => !current)} aria-label={labPanelOpen ? 'Masquer le panneau de constats' : 'Afficher le panneau de constats'} aria-pressed={labPanelOpen} title={labPanelOpen ? 'Masquer le panneau de constats' : 'Afficher le panneau de constats'}><Icon name={labPanelOpen ? 'panelCollapse' : 'panelExpand'} size={15} /><span>{labPanelOpen ? 'Masquer le panneau' : 'Afficher les constats'}</span></button>
+              <button className="stage-panel-toggle" type="button" onClick={() => labMode === 'studio' ? setStudioPanelOpen((current) => !current) : setLabPanelOpen((current) => !current)} aria-label={activeLabPanelOpen ? 'Masquer le panneau de constats' : 'Afficher le panneau de constats'} aria-pressed={activeLabPanelOpen} title={activeLabPanelOpen ? 'Masquer le panneau de constats' : 'Afficher le panneau de constats'}><Icon name={activeLabPanelOpen ? 'panelCollapse' : 'panelExpand'} size={15} /><span>{activeLabPanelOpen ? 'Masquer le panneau' : 'Afficher les constats'}</span></button>
             </div>
             <div className="stage-canvas">
               {previewBusy && <div className="preview-loading" role="status"><span className="loading-mark" /><strong>Préparation de la proposition…</strong></div>}
@@ -3626,7 +3722,7 @@ export default function App(): ReactElement {
             </div>
             {inspectorLocation === 'lab' && <QuickInspectorPanel element={inspectedElement} phase={inspectorPhase} readOnly={project.source.kind === 'remote-url' || Boolean(project.previewBasePath)} cascade={cascadeTrace} cascadeLoading={cascadeLoading} onOpenSource={openCascadeSource} onClose={() => { setInspectorLocation(null); setInspectorPhase('idle') }} onEdit={() => go('visual')} />}
           </div>
-          {labPanelOpen && scopedProject && <Inspector project={scopedProject} allIssues={project.issues} activeIssueCount={routeIssues.length} totalIssueCount={project.issues.length} showAllIssues={showAllIssues} onShowAllIssues={setShowAllIssues} tab={inspectorTab} onTab={setInspectorTab} selectedIssue={selectedIssue} selectedIds={selectedIssueIds} queuedIds={queuedIssueIds} visualEditCount={visualHistory.present.length} onPreviewIssue={(issue) => void previewIssue(issue)} onPreviewBatch={(ids) => void previewQueuedIssues(ids)} onToggleIssue={toggleAcceptedIssue} onToggleQueued={toggleQueuedIssue} runtimeTheme={runtimeTheme} themeTarget={themeTarget} previewThemeTarget={previewThemeTarget} onPreviewTheme={(target) => void previewTheme(target)} onRemoveTheme={removeTheme} proposal={proposal} proposalContext={proposalContext} previewBusy={previewBusy} staging={staging} runtimeAudit={runtimeAudit} runtimeRenderStatus={runtimeRenderStatus} instructions={instructions} onRemoveInstruction={removeInstruction} messages={messages} draft={draft} onDraft={setDraft} onSubmit={submitInstruction} busy={busy || matrixBusy} expressVerification={expressVerification} onApplyExpress={() => void applyExpressVerification()} onAcceptProposal={acceptProposal} onAcceptAndApply={() => void acceptAndApplyProposal()} onRejectProposal={rejectProposal} onApplySafe={(ids) => void applyQueuedSafeIssues(ids)} undoAvailable={undoAvailable} onUndo={() => void undoLastApply()} directApplyAvailable={directApplyAvailable} onReview={() => void prepareAndOpenReview()} onClear={() => void clearStaging()} assistantRoute={remoteState?.path ?? activePath} assistantViewport={{ width: currentDevice.width, height: currentDevice.height, deviceScaleFactor: 1, mobile: currentDevice.family !== 'computer', touch: currentDevice.family !== 'computer' }} assistantScreenshot={remoteAudit?.screenshotDataUrl ?? null} workspaceEnabled={workspaceEnabled} onWorkspacePreviewOrigin={setWorkspaceOrigin} onNotice={flash} onOpenCode={() => go('code')} />}
+          {activeLabPanelOpen && scopedProject && <Inspector project={scopedProject} allIssues={project.issues} activeIssueCount={routeIssues.length} totalIssueCount={project.issues.length} showAllIssues={showAllIssues} onShowAllIssues={setShowAllIssues} tab={inspectorTab} onTab={setInspectorTab} selectedIssue={selectedIssue} selectedIds={selectedIssueIds} queuedIds={queuedIssueIds} visualEditCount={visualHistory.present.length} onPreviewIssue={(issue) => void previewIssue(issue)} onPreviewBatch={(ids) => void previewQueuedIssues(ids)} onToggleIssue={toggleAcceptedIssue} onToggleQueued={toggleQueuedIssue} runtimeTheme={runtimeTheme} themeTarget={themeTarget} previewThemeTarget={previewThemeTarget} onPreviewTheme={(target) => void previewTheme(target)} onRemoveTheme={removeTheme} proposal={proposal} proposalContext={proposalContext} previewBusy={previewBusy} staging={staging} runtimeAudit={runtimeAudit} runtimeRenderStatus={runtimeRenderStatus} instructions={instructions} onRemoveInstruction={removeInstruction} messages={messages} draft={draft} onDraft={setDraft} onSubmit={submitInstruction} busy={busy || matrixBusy} expressVerification={expressVerification} onApplyExpress={() => void applyExpressVerification()} onAcceptProposal={acceptProposal} onAcceptAndApply={() => void acceptAndApplyProposal()} onRejectProposal={rejectProposal} onApplySafe={(ids) => void applyQueuedSafeIssues(ids)} undoAvailable={undoAvailable} onUndo={() => void undoLastApply()} directApplyAvailable={directApplyAvailable} onReview={() => void prepareAndOpenReview()} onClear={() => void clearStaging()} assistantRoute={remoteState?.path ?? activePath} assistantViewport={{ width: currentDevice.width, height: currentDevice.height, deviceScaleFactor: 1, mobile: currentDevice.family !== 'computer', touch: currentDevice.family !== 'computer' }} assistantScreenshot={remoteAudit?.screenshotDataUrl ?? null} workspaceEnabled={workspaceEnabled} onWorkspacePreviewOrigin={setWorkspaceOrigin} onNotice={flash} onOpenCode={() => go('code')} />}
         </div>
         {!isRemote && previewMode === 'source' && project.previewOrigin && (project.previewReadiness.status === 'ready' || project.previewReadiness.status === 'degraded') && <div className="runtime-audit-probes" aria-hidden="true" inert>
           {auditDevices.map((device) => <PreviewFrame key={`${project.id}:${device.id}`} compact project={project} origin={project.previewOrigin} device={device} path={activePath} label={`Sonde ${auditFamily(device.width)}`} onAudit={(audit) => applyRuntimeAudit(audit, false)} />)}
@@ -3711,7 +3807,7 @@ export default function App(): ReactElement {
         ? <RemoteReportView project={project} auditedRouteCount={remoteAudits.current.size} busy={busy} onCopy={() => void copyRemoteSummary()} onExport={() => void exportAction('report')} onLab={() => go('lab')} />
         : <ExportView project={project} staging={staging} selectedCount={counts.selected} busy={busy} onCopy={() => void copyPatch()} onExport={exportAction} onReview={() => project.source.kind === 'linked-localhost' ? go('visual') : go('review')} reviewLabel={project.source.kind === 'linked-localhost' ? 'Revenir à l’Atelier' : 'Réviser la version corrigée'} />)}
     </main>
-    {onboardingState.open && !showPreparation && <OnboardingTour initialHideOnStartup={onboardingState.hideOnStartup} onClose={closeOnboarding} />}
+    {onboardingState.open && !showPreparation && <OnboardingTour key={onboardingState.chapter} initialStep={onboardingState.chapter} initialHideOnStartup={onboardingState.hideOnStartup} onClose={closeOnboarding} />}
     {showPreparation && preparation && <PreparationOverlay progress={preparation} />}
     {notice && <div className={destination === 'visual' ? 'toast toast--above-visual-tray' : 'toast'} role="status" inert={visualFullscreen || undefined} aria-hidden={visualFullscreen || undefined}><Icon name="info" size={16} /> <span>{notice}</span><button aria-label="Fermer" onClick={() => setNotice(null)}><Icon name="close" size={14} /></button></div>}
   </div>

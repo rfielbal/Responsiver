@@ -1562,3 +1562,441 @@ code { font-family: var(--mono); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; }
 }
+
+/* Consolidation de l’espace de travail : les commandes expertes restent
+   disponibles, mais la preview conserve la priorité visuelle. */
+.page-guide-panel {
+  display: grid;
+  max-height: min(640px, calc(100dvh - 92px));
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+}
+
+.page-guide-panel > ol {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.page-guide-footer {
+  grid-template-columns: auto minmax(0, 1fr) !important;
+  align-items: start !important;
+}
+
+.page-guide-footer > button {
+  grid-column: 2;
+  display: inline-flex;
+  width: max-content;
+  max-width: 100%;
+  min-height: 28px;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  padding: 0;
+  color: var(--accent-hover);
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-weight: 700;
+  text-align: left;
+}
+
+.page-guide-footer > button:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.page-guide-footer > button:focus-visible,
+.page-guide-panel > header button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.page-guide-footer > button svg {
+  margin: 0;
+}
+
+.workbench--studio {
+  grid-template-rows: auto auto minmax(0, 1fr) 24px;
+}
+
+.workbench--studio > .command-bar {
+  gap: 8px;
+  padding: 5px 10px;
+}
+
+.workbench--studio > .command-bar .mode-switch button,
+.workbench--studio > .command-bar .version-switch button {
+  min-height: 28px;
+  padding-inline: 8px;
+  font-size: 11px;
+}
+
+.workbench--studio .studio-controls .studio-controls__bar {
+  min-height: 46px;
+  gap: 6px;
+  padding: 5px 10px;
+}
+
+.workbench--studio .studio-controls .studio-controls__suite {
+  gap: 5px;
+}
+
+.workbench--studio .studio-controls .studio-controls__suite select,
+.workbench--studio .studio-controls .studio-icon-button {
+  height: 34px;
+}
+
+.workbench--studio .studio-controls .studio-icon-button {
+  width: 34px;
+}
+
+.workbench--studio .studio-controls .studio-controls__layouts,
+.workbench--studio .studio-controls .studio-controls__popover > summary,
+.workbench--studio .studio-controls .studio-controls__capture {
+  height: 34px;
+  min-height: 34px;
+}
+
+.workbench--studio .studio-controls .studio-controls__layouts {
+  padding: 2px;
+}
+
+.workbench--studio .studio-controls .studio-controls__layouts button,
+.workbench--studio .studio-controls .studio-controls__popover > summary {
+  gap: 5px;
+  padding-inline: 8px;
+  font-size: 10px;
+}
+
+.workbench--studio .studio-controls .studio-controls__capture {
+  padding-inline: 10px;
+  font-size: 10px;
+}
+
+.workbench--studio .studio-controls .studio-controls__counter {
+  min-width: 31px;
+  height: 21px;
+  padding-inline: 5px;
+}
+
+.workbench--studio .studio-controls .studio-controls__feedback {
+  min-height: 30px;
+  padding-block: 2px;
+}
+
+.workbench--studio .stage-column {
+  grid-template-rows: 30px minmax(0, 1fr);
+  gap: 5px;
+  padding: 7px 9px 9px;
+}
+
+.workbench--studio .stage-toolbar {
+  gap: 7px;
+}
+
+.workbench--studio .stage-fullscreen,
+.workbench--studio .stage-panel-toggle,
+.workbench--studio .stage-inspect {
+  min-height: 25px;
+  padding-inline: 7px;
+}
+
+.workbench--studio .studio-wall {
+  padding: 7px;
+}
+
+.workbench--studio .studio-wall--aligned,
+.workbench--studio .studio-wall--grid,
+.workbench--studio .studio-wall--focus {
+  gap: 7px;
+}
+
+.workbench--studio .studio-screen {
+  grid-template-rows: 32px minmax(0, 1fr) 22px;
+}
+
+.workbench--studio .studio-screen__toolbar {
+  gap: 5px;
+  padding: 0 4px 0 7px;
+}
+
+.workbench--studio .studio-screen__identity {
+  gap: 5px;
+}
+
+.workbench--studio .studio-screen__actions {
+  align-items: center;
+  gap: 1px;
+}
+
+.workbench--studio .studio-screen__actions button {
+  width: 27px;
+  height: 27px;
+  transition: width .14s ease, opacity .12s ease, color .12s ease, background-color .12s ease;
+}
+
+.workbench--studio .studio-screen__actions button:focus-visible {
+  position: relative;
+  z-index: 2;
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.workbench--studio .preview--studio {
+  grid-template-rows: 31px minmax(0, 1fr) 26px;
+}
+
+.workbench--studio .preview--studio .browser-bar--studio {
+  padding: 2px 4px;
+}
+
+.workbench--studio .preview--studio .browser-bar--studio select {
+  height: 25px;
+}
+
+.workbench--studio .preview--studio .browser-bar--studio .icon-button {
+  width: 23px;
+  height: 23px;
+}
+
+.workbench--studio .remote-preview.is-embedded {
+  grid-template-rows: 31px minmax(0, 1fr) 22px;
+}
+
+.workbench--studio .remote-preview.is-embedded .remote-browser-bar {
+  padding: 2px 4px;
+}
+
+.workbench--studio .remote-preview.is-embedded .remote-browser-bar > div button {
+  width: 24px;
+  height: 24px;
+}
+
+.workbench--studio .remote-preview.is-embedded .remote-browser-bar form {
+  height: 25px;
+}
+
+.workbench--studio .remote-preview.is-embedded .remote-browser-bar input {
+  height: 23px;
+}
+
+.workbench--studio .studio-screen > footer {
+  padding-inline: 6px;
+}
+
+.workbench--studio > .activity-bar {
+  height: 24px;
+  gap: 12px;
+  padding-inline: 10px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.workbench--studio > .activity-bar::-webkit-scrollbar {
+  display: none;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .workbench--studio .studio-screen__actions::after {
+    display: grid;
+    width: 18px;
+    height: 27px;
+    place-items: center;
+    color: var(--ink-subtle);
+    content: "•••";
+    font-size: 8px;
+    letter-spacing: .04em;
+    transition: width .14s ease, opacity .1s ease;
+  }
+
+  .workbench--studio .studio-screen__actions button:nth-child(n + 3) {
+    width: 0;
+    padding: 0;
+    overflow: hidden;
+    border-width: 0;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .workbench--studio .studio-screen:hover .studio-screen__actions::after,
+  .workbench--studio .studio-screen:focus-within .studio-screen__actions::after {
+    width: 0;
+    opacity: 0;
+  }
+
+  .workbench--studio .studio-screen:hover .studio-screen__actions button:nth-child(n + 3),
+  .workbench--studio .studio-screen:focus-within .studio-screen__actions button:nth-child(n + 3) {
+    width: 27px;
+    border-width: 1px;
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+@media (min-width: 761px) and (max-width: 1180px) {
+  .workbench--studio .studio-controls .studio-controls__bar {
+    flex-wrap: nowrap;
+  }
+
+  .workbench--studio .studio-controls .studio-controls__layouts {
+    order: initial;
+    margin-left: auto;
+  }
+
+  .workbench--studio .studio-controls .studio-controls__layouts button span,
+  .workbench--studio .studio-controls .studio-controls__popover > summary > span:not(.studio-controls__signal):not(.studio-controls__live-dot),
+  .workbench--studio .studio-controls .studio-controls__capture span {
+    display: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .page-guide-panel {
+    position: fixed;
+    top: 68px;
+    right: 10px;
+    left: 10px;
+    width: auto;
+    max-height: calc(100dvh - 142px);
+  }
+
+  .page-guide-panel::before {
+    display: none;
+  }
+
+  .page-guide-panel > header {
+    min-height: 52px;
+    padding-block: 7px;
+  }
+
+  .page-guide-panel li {
+    padding-block: 10px;
+  }
+
+  .page-guide-footer > button {
+    grid-column: 1 / -1;
+    width: 100%;
+    min-height: 40px;
+    justify-content: center;
+    border-top: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
+  }
+
+  .workbench--studio .studio-controls .studio-controls__bar {
+    gap: 5px;
+    padding: 4px 7px;
+  }
+
+  .workbench--studio .studio-controls .studio-controls__suite {
+    gap: 4px;
+  }
+
+  .workbench--studio .studio-controls .studio-controls__suite > label {
+    display: none;
+  }
+
+  .workbench--studio .studio-controls .studio-controls__suite select {
+    height: 32px;
+  }
+
+  .workbench--studio .studio-controls .studio-icon-button,
+  .workbench--studio .studio-controls .studio-controls__layouts,
+  .workbench--studio .studio-controls .studio-controls__popover > summary,
+  .workbench--studio .studio-controls .studio-controls__capture {
+    width: 32px;
+    height: 32px;
+    min-height: 32px;
+  }
+
+  .workbench--studio .studio-controls .studio-controls__layouts {
+    flex: 0 0 auto;
+    width: auto;
+  }
+
+  .workbench--studio .studio-controls .studio-controls__layouts button {
+    min-width: 31px;
+    padding-inline: 6px;
+  }
+
+  .workbench--studio .studio-screen__actions::after {
+    display: none;
+  }
+}
+
+@media (max-width: 620px) {
+  .nav-rail nav {
+    grid-template-columns: repeat(8, minmax(0, 1fr));
+  }
+
+  .nav-link {
+    min-width: 0;
+  }
+
+  .titlebar {
+    gap: 8px;
+    padding: 7px 10px 7px 12px;
+  }
+
+  .project-identity {
+    gap: 0 5px;
+  }
+
+  .project-identity > span {
+    font-size: 8px;
+  }
+
+  .project-identity strong {
+    max-width: 46vw;
+    overflow: hidden;
+    font-size: 12px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .title-actions {
+    gap: 5px;
+  }
+
+  .page-guide-trigger,
+  .title-actions .button {
+    width: 40px;
+    height: 40px;
+    min-height: 40px;
+  }
+
+  .page-guide-panel {
+    top: 62px;
+    right: 7px;
+    left: 7px;
+    max-height: calc(100dvh - 128px - env(safe-area-inset-bottom));
+  }
+
+  .page-guide-panel h2 {
+    font-size: 14px;
+  }
+
+  .page-guide-panel > ol {
+    scrollbar-gutter: auto;
+  }
+
+  .workbench--studio > .command-bar {
+    gap: 5px;
+    padding: 4px 7px;
+  }
+
+  .workbench--studio > .command-bar .mode-switch button,
+  .workbench--studio > .command-bar .version-switch button {
+    min-height: 27px;
+    padding-inline: 6px;
+    font-size: 10px;
+  }
+
+  .workbench--studio .stage-column {
+    padding: 5px 6px 7px;
+  }
+
+  .workbench--studio .studio-wall {
+    padding: 5px;
+  }
+}

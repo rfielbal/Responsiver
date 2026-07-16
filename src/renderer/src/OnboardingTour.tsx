@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState, type ReactElement } from 'react'
+import type { GuideChapterId } from './guidance'
 
 interface OnboardingTourProps {
   initialHideOnStartup: boolean
+  initialStep?: GuideChapterId
   onClose: (hideOnStartup: boolean) => void
 }
 
 interface TourStep {
-  id: 'welcome' | 'sources' | 'laboratory' | 'workspaces' | 'review' | 'ready'
+  id: GuideChapterId
   chapter: string
   eyebrow: string
   title: string
@@ -53,8 +55,20 @@ const steps: TourStep[] = [
     ]
   },
   {
+    id: 'diagnosis',
+    chapter: 'Diagnostiquer',
+    eyebrow: 'Constats & Matrice',
+    title: 'Explorer vite, puis vérifier sans régression.',
+    summary: 'Les constats séparent rendu et structure. La Matrice rejoue ensuite les routes, tailles et états canoniques avant toute écriture.',
+    points: [
+      { title: 'Prioriser', detail: 'Traitez d’abord les défauts visuels réellement observés au viewport courant.' },
+      { title: 'Comparer', detail: 'Correction Express prépare une proposition temporaire et lisible.' },
+      { title: 'Certifier', detail: 'La Matrice signale les vues améliorées, stables ou en régression.' }
+    ]
+  },
+  {
     id: 'workspaces',
-    chapter: 'Ajuster',
+    chapter: 'Modifier',
     eyebrow: 'Atelier visuel & Code',
     title: 'Corrigez aussi vite que le problème le demande.',
     summary: 'Une navbar mobile peut se régler visuellement. Une règle précise peut s’éditer dans le code. Dans les deux cas, le rendu reste visible.',
@@ -65,28 +79,15 @@ const steps: TourStep[] = [
     ]
   },
   {
-    id: 'review',
-    chapter: 'Contrôler',
-    eyebrow: 'Correction Express & révision',
-    title: 'Le Studio observe. La Matrice certifie.',
-    summary: 'Le Studio accélère l’exploration interactive. La Matrice rejoue séparément les routes, tailles et états canoniques avant une écriture vérifiée.',
+    id: 'delivery',
+    chapter: 'Réviser & livrer',
+    eyebrow: 'Dernière autorisation',
+    title: 'Relisez, appliquez ou exportez exactement ce qui convient.',
+    summary: 'Révision réunit le rendu et les fichiers préparés. Exporter livre un patch, des fichiers ou un rapport selon la source ouverte.',
     points: [
-      { title: 'Studio interactif', detail: 'Naviguez, défilez et comparez rapidement les écrans de votre choix.' },
-      { title: 'Matrice reproductible', detail: 'Repérez les vues améliorées, stables ou en régression sur un scénario fermé.' },
-      { title: 'Corriger et vérifier', detail: 'Comparez source et candidat sans écrire les fichiers.' },
-      { title: 'Retour possible', detail: 'La dernière application reste annulable.' }
-    ]
-  },
-  {
-    id: 'ready',
-    chapter: 'À vous de jouer',
-    eyebrow: 'Votre méthode, votre rythme',
-    title: 'Commencez petit. Responsiver suit le besoin.',
-    summary: 'Pour une correction simple, le parcours tient en quelques clics. Les outils avancés restent disponibles sans ralentir le travail courant.',
-    points: [
-      { title: '1', detail: 'Ouvrez le projet ou son localhost.' },
-      { title: '2', detail: 'Choisissez un constat visuel utile.' },
-      { title: '3', detail: 'Comparez, testez et appliquez.' }
+      { title: 'Réviser', detail: 'Comparez le rendu et les diffs sans modifier le disque.' },
+      { title: 'Appliquer', detail: 'L’écriture exige une validation explicite et reste annulable.' },
+      { title: 'Exporter', detail: 'Choisissez patch, fichiers, copie ou rapport sans toucher à l’original.' }
     ]
   }
 ]
@@ -161,21 +162,23 @@ function WorkspacesScene(): ReactElement {
   </div>
 }
 
-function ReviewScene(): ReactElement {
+function DiagnosisScene(): ReactElement {
+  return <div className="tour-scene tour-scene--review" aria-hidden="true">
+    <div className="tour-review-head"><span>MATRICE ANTI-RÉGRESSION</span><b>9 vues vérifiées</b></div>
+    <div className="tour-change-row"><i><TourGlyph name="check" size={13} /></i><div><b>Mobile · navigation</b><small>393 × 852 · /index.html</small></div><em>AMÉLIORÉ</em></div>
+    <div className="tour-change-row"><i><TourGlyph name="check" size={13} /></i><div><b>Tablette · état initial</b><small>768 × 1024 · /index.html</small></div><em>STABLE</em></div>
+    <div className="tour-diff"><code><b>✓</b> 6 signaux corrigés</code><code><b>✓</b> 0 nouvelle régression</code></div>
+    <div className="tour-apply-bar"><span><TourGlyph name="shield" size={15} /> Mesure locale, disque intact</span><span className="tour-demo-apply">Ouvrir une cellule</span></div>
+  </div>
+}
+
+function DeliveryScene(): ReactElement {
   return <div className="tour-scene tour-scene--review" aria-hidden="true">
     <div className="tour-review-head"><span>PLAN DE CHANGEMENTS</span><b>2 sélectionnés</b></div>
     <div className="tour-change-row"><i><TourGlyph name="check" size={13} /></i><div><b>Navigation mobile</b><small>responsiver.generated.css</small></div><em>VISUEL</em></div>
     <div className="tour-change-row"><i><TourGlyph name="check" size={13} /></i><div><b>Retour à la ligne sûr</b><small>styles/components.css</small></div><em>CODE</em></div>
     <div className="tour-diff"><code><span>−</span> white-space: nowrap;</code><code><b>+</b> white-space: normal;</code></div>
-    <div className="tour-apply-bar"><span><TourGlyph name="shield" size={15} /> Aucune source modifiée</span><span className="tour-demo-apply">Corriger et vérifier</span></div>
-  </div>
-}
-
-function ReadyScene(): ReactElement {
-  return <div className="tour-scene tour-scene--ready" aria-hidden="true">
-    <div className="tour-ready-orbit"><div><BrandMark /></div><span className="orbit orbit--one" /><span className="orbit orbit--two" /><i className="orbit-dot orbit-dot--one" /><i className="orbit-dot orbit-dot--two" /><i className="orbit-dot orbit-dot--three" /></div>
-    <div className="tour-ready-steps"><span><b>01</b> Ouvrir</span><i /><span><b>02</b> Corriger</span><i /><span><b>03</b> Valider</span></div>
-    <p>Le guide reste disponible à tout moment depuis <b>?</b> dans le menu.</p>
+    <div className="tour-apply-bar"><span><TourGlyph name="shield" size={15} /> Aucune source modifiée</span><span className="tour-demo-apply">Réviser et livrer</span></div>
   </div>
 }
 
@@ -183,13 +186,13 @@ function StepScene({ step }: { step: TourStep['id'] }): ReactElement {
   if (step === 'welcome') return <WorkflowScene />
   if (step === 'sources') return <SourcesScene />
   if (step === 'laboratory') return <LaboratoryScene />
+  if (step === 'diagnosis') return <DiagnosisScene />
   if (step === 'workspaces') return <WorkspacesScene />
-  if (step === 'review') return <ReviewScene />
-  return <ReadyScene />
+  return <DeliveryScene />
 }
 
-export default function OnboardingTour({ initialHideOnStartup, onClose }: OnboardingTourProps): ReactElement {
-  const [stepIndex, setStepIndex] = useState(0)
+export default function OnboardingTour({ initialHideOnStartup, initialStep = 'welcome', onClose }: OnboardingTourProps): ReactElement {
+  const [stepIndex, setStepIndex] = useState(() => Math.max(0, steps.findIndex((step) => step.id === initialStep)))
   const [hideOnStartup, setHideOnStartup] = useState(initialHideOnStartup)
   const dialogRef = useRef<HTMLElement>(null)
   const titleRef = useRef<HTMLHeadingElement>(null)
@@ -283,13 +286,13 @@ export default function OnboardingTour({ initialHideOnStartup, onClose }: Onboar
             <span className="onboarding-eyebrow">{activeStep.eyebrow}</span>
             <h1 id="onboarding-title" ref={titleRef} tabIndex={-1}>{activeStep.title}</h1>
             <p id="onboarding-summary">{activeStep.summary}</p>
-            <ul>{activeStep.points.map((point, index) => <li key={point.title}><span>{activeStep.id === 'ready' ? point.title : String(index + 1).padStart(2, '0')}</span><div><b>{activeStep.id === 'ready' ? point.detail : point.title}</b>{activeStep.id !== 'ready' && <small>{point.detail}</small>}</div></li>)}</ul>
+            <ul>{activeStep.points.map((point, index) => <li key={point.title}><span>{String(index + 1).padStart(2, '0')}</span><div><b>{point.title}</b><small>{point.detail}</small></div></li>)}</ul>
           </article>
           <StepScene step={activeStep.id} />
         </div>
 
         <footer className="onboarding-footer">
-          <label className="onboarding-preference"><input type="checkbox" checked={hideOnStartup} onChange={(event) => setHideOnStartup(event.target.checked)} /><span aria-hidden="true"><TourGlyph name="check" size={12} /></span><div><b>Ne plus afficher au démarrage</b><small>Le guide restera accessible depuis le bouton ? du menu.</small></div></label>
+          <label className="onboarding-preference"><input type="checkbox" checked={hideOnStartup} onChange={(event) => setHideOnStartup(event.target.checked)} /><span aria-hidden="true"><TourGlyph name="check" size={12} /></span><div><b>Ne plus afficher au démarrage</b><small>Le guide restera accessible depuis le bouton ? de chaque page.</small></div></label>
           <div className="onboarding-actions">
             {stepIndex === 0 ? <button type="button" className="onboarding-skip" onClick={() => onClose(hideOnStartup)}>Passer pour le moment</button> : <button type="button" className="button button--secondary" onClick={() => goToStep(stepIndex - 1)}><TourGlyph name="back" size={15} /> Précédent</button>}
             <button type="button" className="button button--primary onboarding-next" onClick={() => isLastStep ? onClose(hideOnStartup) : goToStep(stepIndex + 1)}>{isLastStep ? 'Terminer le guide' : 'Continuer'} <TourGlyph name={isLastStep ? 'check' : 'next'} size={15} /></button>

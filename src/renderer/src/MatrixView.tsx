@@ -1,6 +1,7 @@
 import { useMemo, type ReactElement } from 'react'
 import type { MatrixJob, MatrixObservation, MatrixRunProgress, MatrixRunResult, MatrixStateId, ProjectSnapshot, RegressionFinding, RegressionReport } from '../../shared/contracts'
 import { MATRIX_STATE_LABELS } from '../../shared/regression-matrix'
+import './matrix-view.css'
 
 interface MatrixViewProps {
   project: ProjectSnapshot
@@ -59,23 +60,42 @@ export default function MatrixView({ project, result, progress, busy, compareAva
   const rows = [...new Map(observations.map((observation) => [`${observation.job.route}::${observation.job.state}`, { route: observation.job.route, state: observation.job.state }])).values()]
   const report = result?.report
   const progressPercent = progress ? Math.round(progress.total ? progress.completed / progress.total * 100 : 0) : 0
+  const primaryAction = compareAvailable
+    ? { label: 'Comparer la version préparée', compare: true }
+    : { label: 'Auditer la source', compare: false }
+  const secondaryAction = compareAvailable
+    ? { label: 'Auditer de nouveau la source', compare: false, disabled: false }
+    : { label: 'Préparer une version pour comparer', compare: true, disabled: true }
   const stateOrder: MatrixStateId[] = ['initial', 'navigation-open', 'keyboard-focus']
   rows.sort((left, right) => left.route.localeCompare(right.route) || stateOrder.indexOf(left.state) - stateOrder.indexOf(right.state))
 
-  return <div className="matrix-page">
+  return <div className="matrix-page matrix-page--compact">
     <header className="matrix-hero">
-      <div><span className="overline">Couverture reproductible</span><h1>Matrice responsive</h1><p>Chaque cellule recharge une route dans un Chromium isolé, à une taille et dans un état précis. Les sources ne sont jamais modifiées pendant ce contrôle.</p></div>
-      <div className="matrix-actions"><button className="button button--secondary" type="button" onClick={() => onRun(false)} disabled={busy}>Auditer la source</button><button className="button button--primary" type="button" onClick={() => onRun(true)} disabled={busy || !compareAvailable}>{compareAvailable ? 'Comparer la version préparée' : 'Préparer une version pour comparer'}</button></div>
+      <div className="matrix-hero__identity"><span className="overline">Couverture reproductible</span><div><h1>Matrice responsive</h1><p>Routes × tailles × états, rejoués dans un Chromium isolé sans modifier les sources.</p></div></div>
+      <div className="matrix-actions">
+        <button className="button button--primary" type="button" onClick={() => onRun(primaryAction.compare)} disabled={busy}>{primaryAction.label}</button>
+        <details className="matrix-more-actions">
+          <summary aria-label="Afficher les autres actions de la matrice" title="Autres actions"><span aria-hidden="true">•••</span></summary>
+          <div><button className="button button--secondary" type="button" onClick={() => onRun(secondaryAction.compare)} disabled={busy || secondaryAction.disabled}>{secondaryAction.label}</button></div>
+        </details>
+      </div>
     </header>
 
     {busy && progress && <section className="matrix-progress" aria-live="polite"><div><span className="loading-mark" /><div><strong>{progress.phase === 'source' ? 'Mesure de la source' : progress.phase === 'candidate' ? 'Mesure de la version corrigée' : 'Comparaison anti-régression'}</strong><p>{progress.current ? `${progress.current.route} · ${progress.current.deviceName} · ${MATRIX_STATE_LABELS[progress.current.state]}` : 'Consolidation des résultats'}</p></div><b>{progress.completed}/{progress.total}</b></div><span><i style={{ width: `${progressPercent}%` }} /></span></section>}
 
-    {report && <section className={`matrix-verdict is-${report.status}`}>
-      <div className="matrix-verdict-mark">{report.status === 'passed' ? '✓' : report.status === 'blocked' ? '!' : '?'}</div>
-      <div><span className="overline">Verdict anti-régression</span><h2>{report.status === 'passed' ? 'Comparaison validée' : report.status === 'blocked' ? 'Régression détectée' : 'Révision nécessaire'}</h2><p>{report.status === 'passed' ? `${report.comparableCells} vues comparées, ${report.fixed.length} signal${report.fixed.length > 1 ? 's supprimés' : ' supprimé'} et aucun nouveau défaut.` : report.reasons[0] ?? 'Certaines vues n’ont pas fourni une preuve suffisante.'}</p></div>
-      <dl><div><dt>Corrigés</dt><dd>{report.fixed.length}</dd></div><div><dt>Nouveaux</dt><dd>{report.regressions.length}</dd></div><div><dt>Restants</dt><dd>{report.remaining.length}</dd></div></dl>
-      {report.status !== 'passed' && <button className="button button--secondary" type="button" onClick={onReview}>Ouvrir la révision</button>}
-    </section>}
+    {report && <details className={`matrix-verdict is-${report.status}`} open={report.status !== 'passed'}>
+      <summary>
+        <span className="matrix-verdict-mark" aria-hidden="true">{report.status === 'passed' ? '✓' : report.status === 'blocked' ? '!' : '?'}</span>
+        <span className="matrix-verdict-title"><small>Verdict anti-régression</small><strong>{report.status === 'passed' ? 'Comparaison validée' : report.status === 'blocked' ? 'Régression détectée' : 'Révision nécessaire'}</strong></span>
+        <span className="matrix-verdict-metrics" aria-label={`${report.fixed.length} corrigés, ${report.regressions.length} nouveaux, ${report.remaining.length} restants`}><span><b>{report.fixed.length}</b> corrigés</span><span><b>{report.regressions.length}</b> nouveaux</span><span><b>{report.remaining.length}</b> restants</span></span>
+        <span className="matrix-verdict-toggle"><span className="matrix-verdict-toggle__closed">Détails</span><span className="matrix-verdict-toggle__open">Réduire</span><i aria-hidden="true" /></span>
+      </summary>
+      <div className="matrix-verdict-details">
+        <p>{report.status === 'passed' ? `${report.comparableCells} vues comparées, ${report.fixed.length} signal${report.fixed.length > 1 ? 's supprimés' : ' supprimé'} et aucun nouveau défaut.` : report.reasons[0] ?? 'Certaines vues n’ont pas fourni une preuve suffisante.'}</p>
+        {report.reasons.length > 1 && <ul>{report.reasons.slice(1).map((reason) => <li key={reason}>{reason}</li>)}</ul>}
+        {report.status !== 'passed' && <button className="button button--secondary" type="button" onClick={onReview}>Ouvrir la révision</button>}
+      </div>
+    </details>}
 
     {!result && !busy ? <section className="matrix-empty"><span>M—01</span><div><strong>Une couverture lisible, pas une batterie de réglages</strong><p>Responsiver utilise automatiquement les formats Mobile, Tablette et Bureau, puis vérifie l’état initial et la navigation ouverte lorsqu’elle existe.</p></div><ol><li><b>Routes</b><span>{Math.min(project.routes.length, 12)} page{project.routes.length > 1 ? 's' : ''} prête{project.routes.length > 1 ? 's' : ''}</span></li><li><b>Tailles</b><span>393 · 768 · 1440 px</span></li><li><b>États</b><span>Initial · Navigation</span></li></ol></section> : result && <section className="matrix-board" aria-label="Résultats de la matrice responsive">
       <header><div><span className="overline">Dernier passage</span><strong>{result.candidate ? 'Source ↔ version corrigée' : 'Source actuelle'}</strong></div><small>{new Date(result.source.createdAt).toLocaleString('fr-FR')} · cliquez une cellule pour l’ouvrir dans le Laboratoire</small></header>

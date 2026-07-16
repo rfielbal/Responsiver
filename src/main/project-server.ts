@@ -112,6 +112,7 @@ export const LOCAL_PREVIEW_SYNC_LIMITS = Object.freeze({
   maxValueLength: 512,
   maxSelectedIndices: 64,
   maxOccurrenceScan: 2_500,
+  maxScrollableNodes: 2_000,
   maxRememberedEvents: 256,
   maxInteractionsPerSecond: 24,
   scrollThrottleMs: 48,
@@ -192,6 +193,7 @@ const bridge = `<style data-responsiver-bridge-style>
   const SYNC_MAX_VALUE_LENGTH = ${LOCAL_PREVIEW_SYNC_LIMITS.maxValueLength};
   const SYNC_MAX_SELECTED_INDICES = ${LOCAL_PREVIEW_SYNC_LIMITS.maxSelectedIndices};
   const SYNC_MAX_OCCURRENCE_SCAN = ${LOCAL_PREVIEW_SYNC_LIMITS.maxOccurrenceScan};
+  const SYNC_MAX_SCROLLABLE_NODES = ${LOCAL_PREVIEW_SYNC_LIMITS.maxScrollableNodes};
   const SYNC_MAX_REMEMBERED_EVENTS = ${LOCAL_PREVIEW_SYNC_LIMITS.maxRememberedEvents};
   const SYNC_MAX_INTERACTIONS_PER_SECOND = ${LOCAL_PREVIEW_SYNC_LIMITS.maxInteractionsPerSecond};
   const SYNC_SCROLL_THROTTLE_MS = ${LOCAL_PREVIEW_SYNC_LIMITS.scrollThrottleMs};
@@ -2471,7 +2473,12 @@ const bridge = `<style data-responsiver-bridge-style>
   let syncPendingScroller = null;
   const syncInputSentAt = new WeakMap();
   const syncRememberedEvents = new Set();
-  const syncRoute = () => (location.pathname + location.search + location.hash).slice(0, SYNC_MAX_ROUTE_LENGTH);
+  // Une ancre peut évoluer avec un scroll-spy sans changer de document.
+  // Seuls les fragments de route SPA (#/… et #!/…) restent structurants.
+  const syncRoute = () => {
+    const applicationHash = /^#(?:!\\/|\\/)/.test(location.hash) ? location.hash : '';
+    return (location.pathname + location.search + applicationHash).slice(0, SYNC_MAX_ROUTE_LENGTH);
+  };
   const syncRound = (value) => {
     const numeric = Number(value);
     if (!Number.isFinite(numeric)) return 0;
@@ -2510,6 +2517,40 @@ const bridge = `<style data-responsiver-bridge-style>
   const syncResolveContainer = (value) => {
     if (!value || typeof value.selector !== 'string' || !value.selector.startsWith(SYNC_SCROLL_CONTAINER_PREFIX)) return null;
     return syncResolveLocator({ ...value, selector: value.selector.slice(SYNC_SCROLL_CONTAINER_PREFIX.length) });
+  };
+  const syncScrollableRange = (element) => {
+    if (!(element instanceof HTMLElement) || !element.isConnected || isInspectorInternal(element)) return null;
+    const style = getComputedStyle(element);
+    if (!/^(?:auto|scroll|overlay)$/.test(style.overflowX) && !/^(?:auto|scroll|overlay)$/.test(style.overflowY)) return null;
+    const maximumX = Math.max(0, element.scrollWidth - element.clientWidth);
+    const maximumY = Math.max(0, element.scrollHeight - element.clientHeight);
+    if (maximumX <= 1 && maximumY <= 1) return null;
+    const rectangle = element.getBoundingClientRect();
+    const visibleWidth = Math.max(0, Math.min(innerWidth, rectangle.right) - Math.max(0, rectangle.left));
+    const visibleHeight = Math.max(0, Math.min(innerHeight, rectangle.bottom) - Math.max(0, rectangle.top));
+    const visibleArea = visibleWidth * visibleHeight;
+    if (visibleArea <= 1) return null;
+    return { element, maximumX, maximumY, visibleArea };
+  };
+  const syncDominantScroller = () => {
+    const rootNode = document.body || document.documentElement;
+    if (!rootNode) return null;
+    const walker = document.createTreeWalker(rootNode, NodeFilter.SHOW_ELEMENT);
+    const viewportArea = Math.max(1, innerWidth * innerHeight);
+    let inspected = 0;
+    let dominant = null;
+    const rootCandidate = syncScrollableRange(rootNode);
+    if (rootCandidate && rootCandidate.visibleArea / viewportArea >= .14) {
+      dominant = { ...rootCandidate, score: rootCandidate.visibleArea * (rootCandidate.maximumY > 1 ? 2 : 1) };
+    }
+    while (inspected < SYNC_MAX_SCROLLABLE_NODES && walker.nextNode()) {
+      inspected += 1;
+      const candidate = syncScrollableRange(walker.currentNode);
+      if (!candidate || candidate.visibleArea / viewportArea < .14) continue;
+      const score = candidate.visibleArea * (candidate.maximumY > 1 ? 2 : 1);
+      if (!dominant || score > dominant.score) dominant = { ...candidate, score };
+    }
+    return dominant?.element || null;
   };
   const syncSemanticText = (element) => [
     element.id,
@@ -2602,11 +2643,11 @@ const bridge = `<style data-responsiver-bridge-style>
     });
   };
   const syncScheduleScroll = (event) => {
-    const target = event.target;
     const root = document.scrollingElement || document.documentElement;
-    const scroller = target === document || target === document.documentElement || target === document.body || target === window
-      ? root
-      : target instanceof HTMLElement && target.getRootNode() === document && !isInspectorInternal(target) ? target : null;
+    const path = typeof event.composedPath === 'function' ? event.composedPath() : [event.target];
+    const target = path.find((entry) => entry instanceof HTMLElement && syncScrollableRange(entry));
+    const rootEvent = event.target === document || event.target === document.documentElement || event.target === document.body || event.target === window;
+    const scroller = rootEvent ? root : target instanceof HTMLElement ? target : null;
     if (!scroller || performance.now() < syncApplyScrollUntil) return;
     syncPendingScroller = scroller;
     if (syncScrollFrame) return;
@@ -2632,9 +2673,13 @@ const bridge = `<style data-responsiver-bridge-style>
     if (!progress || !Number.isFinite(Number(progress.x)) || !Number.isFinite(Number(progress.y))) return;
     const root = document.scrollingElement || document.documentElement;
     const encodedContainer = Boolean(data.anchor && typeof data.anchor.selector === 'string' && data.anchor.selector.startsWith(SYNC_SCROLL_CONTAINER_PREFIX));
-    const container = encodedContainer ? syncResolveContainer(data.anchor) : null;
-    if (encodedContainer && !(container instanceof HTMLElement)) return;
-    const scroller = container instanceof HTMLElement ? container : root;
+    const resolvedContainer = encodedContainer ? syncResolveContainer(data.anchor) : null;
+    const resolvedRange = syncScrollableRange(resolvedContainer);
+    const rootMaximumX = Math.max(0, root.scrollWidth - innerWidth);
+    const rootMaximumY = Math.max(0, root.scrollHeight - innerHeight);
+    const requiresFallback = encodedContainer && !resolvedRange || !encodedContainer && rootMaximumX <= 1 && rootMaximumY <= 1 && (syncProgress(progress.x) > 0 || syncProgress(progress.y) > 0);
+    const fallback = requiresFallback ? syncDominantScroller() : null;
+    const scroller = resolvedRange?.element || fallback || root;
     const internal = scroller !== root;
     const viewportWidth = Math.max(1, internal ? scroller.clientWidth : innerWidth);
     const viewportHeight = Math.max(1, internal ? scroller.clientHeight : innerHeight);
@@ -2645,7 +2690,9 @@ const bridge = `<style data-responsiver-bridge-style>
     const anchor = encodedContainer ? null : syncResolveLocator(data.anchor);
     if (anchor && Number.isFinite(Number(data.anchor.offset)) && Math.abs(Number(data.anchor.offset)) <= 100000) {
       const rectangle = anchor.getBoundingClientRect();
-      top = scrollY + rectangle.top - Number(data.anchor.offset);
+      const scrollerTop = internal ? scroller.getBoundingClientRect().top : 0;
+      const currentTop = internal ? scroller.scrollTop : scrollY;
+      top = currentTop + rectangle.top - scrollerTop - Number(data.anchor.offset);
     }
     syncApplyScrollUntil = performance.now() + 240;
     scroller.scrollTo({ left: syncRound(left), top: syncRound(top), behavior: 'auto' });
